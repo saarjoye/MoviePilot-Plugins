@@ -496,9 +496,10 @@ class FileTransferMatcher:
 class TransferRecordChecker:
     """媒体整理记录检查器"""
     
-    def __init__(self, enabled: bool = True, timeout: int = 5):
+    def __init__(self, enabled: bool = True, timeout: int = 5, fail_open: bool = False):
         self.enabled = enabled
         self.timeout = timeout
+        self.fail_open = fail_open
         self.transfer_oper = None
         self.file_retriever = None
         self.file_matcher = None
@@ -514,26 +515,70 @@ class TransferRecordChecker:
                 logger.error(f"媒体整理记录检查器初始化失败: {e}")
                 self.enabled = False
     
-    def check_transfer_record(self, download_hash: str, torrent_name: str = "", 
-                             downloader: str = None) -> bool:
+    def _run_with_timeout(self, func, *args, default: bool = False) -> bool:
+        """以可配置超时执行检查，超时/异常时返回默认值"""
+        try:
+            timeout = float(self.timeout)
+        except (TypeError, ValueError):
+            timeout = 0
+
+        if timeout <= 0:
+            return func(*args)
+
+        result_holder = {"ok": False, "value": default, "error": None}
+
+        def _runner():
+            try:
+                result_holder["value"] = func(*args)
+            except Exception as exc:
+                result_holder["error"] = exc
+            finally:
+                result_holder["ok"] = True
+
+        worker = threading.Thread(target=_runner, daemon=True)
+        worker.start()
+        worker.join(timeout=timeout)
+
+        if worker.is_alive():
+            logger.warning(f"媒体整理记录检查超时（{timeout}s），按{'放行' if default else '阻断'}策略处理")
+            return default
+
+        if result_holder["error"] is not None:
+            logger.error(f"媒体整理记录检查执行异常: {result_holder['error']}")
+            return default
+
+        return result_holder["value"]
+
+    def check_transfer_record(self, download_hash: str, torrent_name: str = "",
+                              downloader: str = None) -> bool:
         """检查种子是否有成功的媒体整理记录"""
         if not self.enabled or not self.transfer_oper:
             logger.info("媒体整理记录检查功能未启用，跳过检查")
             return True
-            
+
         if not download_hash:
             logger.info(f"种子 [{torrent_name}] hash为空，跳过媒体整理记录检查")
             return False
-            
+
+        return self._run_with_timeout(
+            self._check_transfer_record_internal,
+            download_hash,
+            torrent_name,
+            downloader,
+            default=self.fail_open
+        )
+
+    def _check_transfer_record_internal(self, download_hash: str, torrent_name: str,
+                                        downloader: str = None) -> bool:
         try:
             logger.info(f"正在检查种子 [{torrent_name}] (hash: {download_hash[:8]}...) 的媒体整理记录")
-            
+
             # 查询该hash对应的所有转移记录（兼容大小写差异）
             transfer_records = self._list_records_by_hash(download_hash)
             if not transfer_records:
                 logger.info(f"✗ 种子 [{torrent_name}] 不存在任何媒体整理记录，跳过删种")
                 return False
-            
+
             # 尝试使用增强检查逻辑
             try:
                 passed = self._check_all_files_transferred(download_hash, torrent_name,
@@ -553,12 +598,13 @@ class TransferRecordChecker:
             except Exception as e:
                 logger.warning(f"增强检查逻辑失败，回退到原始逻辑: {e}")
                 return self._fallback_check(transfer_records, torrent_name)
-                
+
         except Exception as e:
             logger.error(f"检查种子 [{torrent_name}] 的媒体整理记录时发生错误: {e}")
-            logger.warning(f"因数据库查询异常，种子 [{torrent_name}] 将按原有逻辑处理（避免误删）")
-            # 发生错误时返回True，避免因为数据库问题导致误删
-            return True
+            logger.warning(
+                f"因数据库查询异常，种子 [{torrent_name}] 将按{'放行' if self.fail_open else '阻断'}策略处理"
+            )
+            return self.fail_open
 
     def _list_records_by_hash(self, download_hash: str) -> List:
         """
@@ -642,9 +688,9 @@ class TransferRecordChecker:
         for p in parts:
             if not p:
                 continue
-            if re.match(r"^S\\d{1,2}$", p, re.IGNORECASE):
+            if re.match(r"^S\d{1,2}$", p, re.IGNORECASE):
                 break
-            if re.match(r"^(19|20)\\d{2}$", p):
+            if re.match(r"^(19|20)\d{2}$", p):
                 break
             cleaned.append(p)
         # 跳过第一个（通常是中文名），保留后面的英文名
@@ -800,11 +846,11 @@ class wYw(_PluginBase):
     # 插件图标
     plugin_icon = "delete.jpg"
     # 插件版本
-    plugin_version = "2.4"
+    plugin_version = "2.5"
     # 插件作者
-    plugin_author = "wYw"
+    plugin_author = "污妖王"
     # 作者主页
-    author_url = "https://github.com/"
+    author_url = "https://github.com/KoWming/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "wyw_"
     # 加载顺序
@@ -837,6 +883,7 @@ class wYw(_PluginBase):
     # 新增配置项
     _check_transfer_record = True
     _transfer_check_timeout = 5
+    _transfer_fail_open = False
     
     # 媒体整理记录检查器
     _transfer_checker = None
@@ -864,12 +911,18 @@ class wYw(_PluginBase):
             self._torrentcategorys = config.get("torrentcategorys") or ""
             # 新增配置项处理
             self._check_transfer_record = config.get("check_transfer_record", True)
-            self._transfer_check_timeout = config.get("transfer_check_timeout", 5)
+            self._transfer_fail_open = config.get("transfer_fail_open", False)
+            timeout_config = config.get("transfer_check_timeout", 5)
+            try:
+                self._transfer_check_timeout = max(1, int(float(timeout_config)))
+            except (TypeError, ValueError):
+                self._transfer_check_timeout = 5
 
         # 初始化媒体整理记录检查器
         self._transfer_checker = TransferRecordChecker(
             enabled=self._check_transfer_record,
-            timeout=self._transfer_check_timeout
+            timeout=self._transfer_check_timeout,
+            fail_open=self._transfer_fail_open
         )
         
         # 记录配置状态
@@ -911,7 +964,8 @@ class wYw(_PluginBase):
                     "torrentstates": self._torrentstates,
                     "torrentcategorys": self._torrentcategorys,
                     "check_transfer_record": self._check_transfer_record,
-                    "transfer_check_timeout": self._transfer_check_timeout
+                    "transfer_check_timeout": self._transfer_check_timeout,
+                    "transfer_fail_open": self._transfer_fail_open
 
                 })
                 if self._scheduler.get_jobs():
@@ -924,10 +978,10 @@ class wYw(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_service(self) -> List[Dict[str, Any]]:
         """
@@ -1314,6 +1368,22 @@ class wYw(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'transfer_fail_open',
+                                            'label': '检查异常时放行删种',
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -1331,7 +1401,7 @@ class wYw(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '媒体整理记录检查：启用后，只有在MoviePilot中存在成功整理记录的种子才会被删除，确保媒体库完整性。'
+                                            'text': '媒体整理记录检查：启用后，只有在MoviePilot中存在成功整理记录的种子才会被删除。可通过“检查异常时放行删种”控制异常策略。'
                                         }
                                     }
                                 ]
@@ -1421,11 +1491,12 @@ class wYw(_PluginBase):
             "torrentstates": "",
             "torrentcategorys": "",
             "check_transfer_record": True,
-            "transfer_check_timeout": 5
+            "transfer_check_timeout": 5,
+            "transfer_fail_open": False
         }
 
     def get_page(self) -> List[dict]:
-        pass
+        return []
 
     def stop_service(self):
         """
@@ -1675,62 +1746,89 @@ class wYw(_PluginBase):
         if self._samedata and remove_torrents:
             logger.info("开始处理辅种...")
             remove_ids = [t.get("id") for t in remove_torrents]
+            remove_id_set = set(remove_ids)
             remove_torrents_plus = []
+
+            # 预构建候选索引，避免全量嵌套扫描
+            candidates_by_key: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+            for torrent in torrents:
+                if downloader_config.type == "qbittorrent":
+                    plus_id = torrent.hash
+                    plus_name = torrent.name
+                    plus_size = torrent.size
+                    plus_site = StringUtils.get_url_sld(torrent.tracker)
+                else:
+                    plus_id = torrent.hashString
+                    plus_name = torrent.name
+                    plus_size = torrent.total_size
+                    plus_site = torrent.trackers[0].get("sitename") if torrent.trackers else ""
+
+                key = (plus_name, plus_size)
+                candidates_by_key.setdefault(key, []).append({
+                    "id": plus_id,
+                    "name": plus_name,
+                    "size": plus_size,
+                    "site": plus_site
+                })
+
+            # 文件列表缓存，避免重复请求下载器
+            file_list_cache: Dict[str, List[str]] = {}
+
+            def _get_cached_files(hash_id: str) -> List[str]:
+                if not hash_id:
+                    return []
+                if hash_id in file_list_cache:
+                    return file_list_cache[hash_id]
+                files, _ = self._transfer_checker.file_retriever.get_torrent_files(hash_id, downloader) \
+                    if self._transfer_checker.file_retriever else ([], "")
+                file_list_cache[hash_id] = files or []
+                return file_list_cache[hash_id]
+
             for remove_torrent in remove_torrents:
                 name = remove_torrent.get("name")
                 size = remove_torrent.get("size")
                 # 获取原种子的文件列表用于更精确的辅种判断
                 original_torrent_hash = remove_torrent.get("id")
-                original_files, _ = self._transfer_checker.file_retriever.get_torrent_files(original_torrent_hash, downloader) if self._transfer_checker.file_retriever else ([], "")
-                
-                for torrent in torrents:
-                    if downloader_config.type == "qbittorrent":
-                        plus_id = torrent.hash
-                        plus_name = torrent.name
-                        plus_size = torrent.size
-                        plus_site = StringUtils.get_url_sld(torrent.tracker)
-                    else:
-                        plus_id = torrent.hashString
-                        plus_name = torrent.name
-                        plus_size = torrent.total_size
-                        plus_site = torrent.trackers[0].get("sitename") if torrent.trackers else ""
-                    
-                    # 比对名称和大小
-                    if plus_name == name \
-                            and plus_size == size \
-                            and plus_id not in remove_ids:
-                        
-                        # 对于多文件种子，需要进一步比较文件列表的相似性
-                        is_potential_duplicate = True
-                        if original_files:
-                            # 获取辅种的文件列表
-                            plus_files, _ = self._transfer_checker.file_retriever.get_torrent_files(plus_id, downloader) if self._transfer_checker.file_retriever else ([], "")
-                            
-                            if plus_files:
-                                # 检查两个种子的文件列表是否高度相似
-                                is_potential_duplicate = self._compare_file_lists(original_files, plus_files)
-                                
-                                if not is_potential_duplicate:
-                                    logger.debug(f"辅种 [{plus_name}] 文件列表与原种子差异较大，跳过")
-                                    continue
-                        
-                        if is_potential_duplicate:
-                            # 辅种也需要检查媒体整理记录
-                            if self._transfer_checker.is_enabled():
-                                # 对辅种进行更严格的检查，确保其文件也被正确处理
-                                if not self._transfer_checker.check_transfer_record(plus_id, plus_name, downloader):
-                                    logger.info(f"辅种 [{plus_name}] 未通过媒体整理记录检查，跳过")
-                                    continue
-                            
-                            logger.info(f"辅种 [{plus_name}] 通过检查，加入删种列表")
-                            remove_torrents_plus.append(
-                                {
-                                    "id": plus_id,
-                                    "name": plus_name,
-                                    "site": plus_site,
-                                    "size": plus_size
-                                }
-                            )
+                original_files = _get_cached_files(original_torrent_hash)
+
+                for candidate in candidates_by_key.get((name, size), []):
+                    plus_id = candidate.get("id")
+                    plus_name = candidate.get("name")
+                    plus_size = candidate.get("size")
+                    plus_site = candidate.get("site")
+
+                    if plus_id in remove_id_set:
+                        continue
+
+                    # 对于多文件种子，需要进一步比较文件列表的相似性
+                    is_potential_duplicate = True
+                    if original_files:
+                        plus_files = _get_cached_files(plus_id)
+                        if plus_files:
+                            # 检查两个种子的文件列表是否高度相似
+                            is_potential_duplicate = self._compare_file_lists(original_files, plus_files)
+                            if not is_potential_duplicate:
+                                logger.debug(f"辅种 [{plus_name}] 文件列表与原种子差异较大，跳过")
+                                continue
+
+                    if is_potential_duplicate:
+                        # 辅种也需要检查媒体整理记录
+                        if self._transfer_checker.is_enabled():
+                            # 对辅种进行更严格的检查，确保其文件也被正确处理
+                            if not self._transfer_checker.check_transfer_record(plus_id, plus_name, downloader):
+                                logger.info(f"辅种 [{plus_name}] 未通过媒体整理记录检查，跳过")
+                                continue
+
+                        logger.info(f"辅种 [{plus_name}] 通过检查，加入删种列表")
+                        remove_torrents_plus.append(
+                            {
+                                "id": plus_id,
+                                "name": plus_name,
+                                "site": plus_site,
+                                "size": plus_size
+                            }
+                        )
+                        remove_id_set.add(plus_id)
             if remove_torrents_plus:
                 remove_torrents.extend(remove_torrents_plus)
                 logger.info(f"新增 {len(remove_torrents_plus)} 个辅种到删种列表")

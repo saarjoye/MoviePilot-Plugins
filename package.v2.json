@@ -34,5 +34,17 @@
     "history": {
       "v1.3.0": "115上传监控-魔改版 1.3.0 通过 Web 面板发布"
     }
+  },
+  "wYw": {
+    "name": "自动删种115版",
+    "description": "自动删除下载器中的下载任务。",
+    "labels": "影视,工具",
+    "version": "2.5",
+    "icon": "delete.jpg",
+    "author": "污妖王",
+    "level": 2,
+    "history": {
+      "v2.5": "自动删种115版 2.5 通过 Web 面板发布"
+    }
   }
 }
