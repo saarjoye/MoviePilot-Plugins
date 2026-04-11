@@ -11,5 +11,18 @@
       "v2.0": "HR管理-魔改版 2.0 通过 Web 面板发布"
     },
     "v2": true
+  },
+  "u115uploadmonitor": {
+    "name": "115上传监控-魔改版",
+    "description": "实时监听 115 上传开始/成功/失败事件，支持过滤、去重和统计。",
+    "labels": "影视,工具",
+    "version": "1.3.0",
+    "icon": "upload.png",
+    "author": "污妖王",
+    "level": 1,
+    "history": {
+      "v1.3.0": "115上传监控-魔改版 1.3.0 通过 Web 面板发布"
+    },
+    "v2": true
   }
 }
