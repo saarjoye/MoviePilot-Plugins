@@ -367,11 +367,11 @@ def extract_balanced_object(text: str, marker: str) -> Optional[str]:
 
 
 class UpcomingReleases(_PluginBase):
-    plugin_name = "待播影视日历"
+    plugin_name = "待播影视日历-魔改版"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
-    plugin_icon = ""
+    plugin_icon = "TrendingShow.jpg"
     plugin_version = "0.6.13"
-    plugin_author = "Codex"
+    plugin_author = "污妖王"
     author_url = ""
     plugin_config_prefix = "upcomingreleases_"
     plugin_order = 26

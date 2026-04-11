@@ -24,5 +24,18 @@
       "v1.3.0": "115上传监控-魔改版 1.3.0 通过 Web 面板发布"
     },
     "v2": true
+  },
+  "UpcomingReleases": {
+    "name": "待播影视日历-魔改版",
+    "description": "聚合爱奇艺、腾讯视频、优酷、芒果TV的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。",
+    "labels": "影视,工具",
+    "version": "0.6.13",
+    "icon": "TrendingShow.jpg",
+    "author": "污妖王",
+    "level": 1,
+    "history": {
+      "v0.6.13": "待播影视日历-魔改版 0.6.13 通过 Web 面板发布"
+    },
+    "v2": true
   }
 }
