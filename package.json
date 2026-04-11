@@ -37,5 +37,18 @@
       "v0.6.13": "待播影视日历-魔改版 0.6.13 通过 Web 面板发布"
     },
     "v2": true
+  },
+  "wYw": {
+    "name": "自动删种115版",
+    "description": "自动删除下载器中的下载任务。",
+    "labels": "影视,工具",
+    "version": "2.5",
+    "icon": "delete.jpg",
+    "author": "污妖王",
+    "level": 2,
+    "history": {
+      "v2.5": "自动删种115版 2.5 通过 Web 面板发布"
+    },
+    "v2": true
   }
 }
