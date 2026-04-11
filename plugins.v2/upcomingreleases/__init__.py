@@ -371,8 +371,8 @@ class UpcomingReleases(_PluginBase):
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
     plugin_version = "0.6.13"
-    plugin_author = "污妖王"
-    author_url = ""
+    plugin_author = "wYw"
+    author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
     plugin_order = 26
     auth_level = 1
