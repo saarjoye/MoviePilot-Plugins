@@ -19,6 +19,11 @@ class SiteHRConfig(BaseModel):
     # H&R满足要求的期限（天数）
     hr_deadline_days: int = Field(default=0, description="H&R满足要求的期限（天数），需在此天数内满足H&R要求")
 
+    # 告警级别（只读扩展字段）
+    alert_level: Optional[str] = Field(default=None, description="告警级别：normal/warning/urgent/timeout")
+    # 优先级分数（只读扩展字段）
+    priority_score: Optional[float] = Field(default=None, description="优先级分数，越高越紧急")
+
 
 class HRManagerConfig(BaseModel):
     """
@@ -34,3 +39,5 @@ class HRManagerConfig(BaseModel):
     check_interval: int = Field(default=3600, description="检查HR种子条件的时间间隔（秒）")
     # 站点HR配置列表
     sites_config: list[SiteHRConfig] = Field(default_factory=list, description="各站点的HR标准配置列表")
+    # 监控下载器
+    monitor_downloaders: list[str] = Field(default_factory=list, description="需要监控的下载器名称列表，空表示监控全部")

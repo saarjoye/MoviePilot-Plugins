@@ -14,21 +14,27 @@ from app.helper.downloader import DownloaderHelper
 
 class HRManager(_PluginBase):
     # 插件名称
-    plugin_name = "HR管理"
+    plugin_name = "HR管理-魔改版"
     # 插件描述
     plugin_desc = "自动管理下载种子的HR标签，监控种子的做种时间和分享率，满足条件后自动更改标签并通知用户"
     # 插件图标
-    plugin_icon = "seedling.png"
+    plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "2.0"
     # 插件作者
-    plugin_author = "wYw"
+    plugin_author = "污妖王"
     # 插件配置项ID前缀
     plugin_config_prefix = "hrmanager_"
     # 加载顺序
     plugin_order = 20
     # 可使用的用户级别
     auth_level = 1
+
+    # 告警级别常量
+    ALERT_NORMAL = "normal"      # 正常
+    ALERT_WARNING = "warning"    # 警告
+    ALERT_URGENT = "urgent"      # 紧急
+    ALERT_TIMEOUT = "timeout"    # 超期
 
     # 私有属性
     _enabled = False
@@ -56,11 +62,27 @@ class HRManager(_PluginBase):
         # 移除SitesHelper的初始化，使用SiteOper代替
 
         if config:
-            self._enabled = config.get("enabled")
-            self._hr_tag = config.get("hr_tag", "HR")
-            self._finished_tag = config.get("finished_tag", "已完成")
-            self._check_interval = config.get("check_interval", 3600)
-            self._monitor_downloaders = config.get("monitor_downloaders", [])
+            self._enabled = bool(config.get("enabled"))
+            self._hr_tag = str(config.get("hr_tag", "HR") or "HR").strip() or "HR"
+            self._finished_tag = str(config.get("finished_tag", "已完成") or "已完成").strip() or "已完成"
+            raw_check_interval = config.get("check_interval", 3600)
+            try:
+                if isinstance(raw_check_interval, str):
+                    raw_check_interval = raw_check_interval.strip()
+                check_interval = int(float(raw_check_interval))
+                if check_interval <= 0:
+                    raise ValueError("check_interval must be > 0")
+                self._check_interval = check_interval
+            except (TypeError, ValueError):
+                self._check_interval = 3600
+                logger.warning(
+                    f"check_interval 配置无效：{raw_check_interval}，已回退默认值 {self._check_interval} 秒"
+                )
+            monitor_downloaders = config.get("monitor_downloaders", [])
+            if isinstance(monitor_downloaders, list):
+                self._monitor_downloaders = [str(item).strip() for item in monitor_downloaders if str(item).strip()]
+            else:
+                self._monitor_downloaders = []
             
             # 处理站点HR配置
             self._sites_config = []
@@ -104,6 +126,8 @@ class HRManager(_PluginBase):
                             "hr_deadline_days": config.get(f"site_{i}_deadline", 0)
                         }
                         self._sites_config.append(site_config)
+
+            self._sites_config = self._validate_and_normalize_sites_config(self._sites_config)
 
         # 初始化下载器帮助类
         self._downloaderhelper = DownloaderHelper()
@@ -1048,14 +1072,241 @@ class HRManager(_PluginBase):
         
         return has_hr or has_hr_with_slash
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return default
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            value_str = value.strip().lower()
+            if value_str in ["1", "true", "yes", "y", "on", "是"]:
+                return True
+            if value_str in ["0", "false", "no", "n", "off", "否"]:
+                return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        return default
+
+    def _validate_and_normalize_sites_config(self, sites_config: Any) -> List[dict]:
+        """
+        校验并标准化站点配置
+        """
+        if not isinstance(sites_config, list):
+            logger.warning("站点配置格式无效，已回退为空列表")
+            return []
+
+        normalized_sites: List[dict] = []
+        seen_site_names = set()
+
+        for index, site in enumerate(sites_config, start=1):
+            if not isinstance(site, dict):
+                logger.warning(f"第 {index} 个站点配置不是字典，已跳过")
+                continue
+
+            site_name = str(site.get("site_name", "") or "").strip()
+            if not site_name:
+                logger.warning(f"第 {index} 个站点缺少 site_name，已跳过")
+                continue
+
+            site_key = site_name.lower()
+            if site_key in seen_site_names:
+                logger.warning(f"检测到重复站点配置：{site_name}，仅保留首次配置")
+                continue
+            seen_site_names.add(site_key)
+
+            base_time = self._safe_float(site.get("time", site.get("hr_duration", 0.0)), 0.0)
+            base_time = max(0.0, base_time)
+
+            additional_seed_time_raw = site.get("additional_seed_time")
+            additional_seed_time = None
+            if additional_seed_time_raw not in [None, ""]:
+                additional_seed_time = max(0.0, self._safe_float(additional_seed_time_raw, 0.0))
+
+            final_time = base_time + (additional_seed_time or 0.0)
+            hr_ratio = max(0.0, self._safe_float(site.get("hr_ratio", 0.0), 0.0))
+            hr_deadline_days = max(0, self._safe_int(site.get("hr_deadline_days", 0), 0))
+            hr_active = self._safe_bool(site.get("hr_active", False), False)
+
+            normalized_site = {
+                "site_name": site_name,
+                "time": final_time,
+                "hr_duration": final_time,
+                "additional_seed_time": additional_seed_time,
+                "hr_ratio": hr_ratio,
+                "hr_active": hr_active,
+                "hr_deadline_days": hr_deadline_days,
+            }
+            normalized_sites.append(normalized_site)
+
+        logger.info(f"站点配置标准化完成，有效站点数：{len(normalized_sites)}")
+        return normalized_sites
+
+    def _get_torrent_added_time(self, torrent: dict) -> int:
+        """
+        获取种子添加时间戳（秒）
+        """
+        possible_time_fields = [
+            "added_time", "created_at", "start_time", "time_added", "date_added",
+            "addedOn", "add_time", "added", "added_on"
+        ]
+        for field in possible_time_fields:
+            raw_value = torrent.get(field)
+            if raw_value in [None, "", 0, "0"]:
+                continue
+            ts = self._safe_int(raw_value, 0)
+            if ts > 0:
+                return ts
+        return 0
+
+    def _calculate_priority_score(
+            self,
+            seeding_time: float,
+            ratio: float,
+            time_requirement: float,
+            ratio_requirement: float,
+            hr_deadline_days: int,
+            added_time: int,
+            is_timeout: bool = False) -> float:
+        """
+        计算优先级分数（0-100，越高越紧急）
+        优先级 = 期限权重 * 0.5 + 时间权重 * 0.3 + 分享率权重 * 0.2
+        """
+        if is_timeout:
+            return 100.0
+
+        time_gap = max(0.0, time_requirement - seeding_time)
+        ratio_gap = max(0.0, ratio_requirement - ratio)
+
+        time_pressure = min(1.0, time_gap / max(time_requirement, 1.0))
+        ratio_pressure = min(1.0, ratio_gap / max(ratio_requirement, 1.0)) if ratio_requirement > 0 else 0.0
+
+        deadline_pressure = 0.0
+        if hr_deadline_days > 0 and added_time > 0:
+            elapsed_hours = max(0.0, (time.time() - added_time) / 3600)
+            total_deadline_hours = hr_deadline_days * 24
+            deadline_pressure = min(1.0, elapsed_hours / max(total_deadline_hours, 1.0))
+
+        score = (deadline_pressure * 0.5 + time_pressure * 0.3 + ratio_pressure * 0.2) * 100
+        return round(min(100.0, max(0.0, score)), 2)
+
+    def _calculate_alert_info(
+            self,
+            seeding_time: float,
+            ratio: float,
+            time_requirement: float,
+            ratio_requirement: float,
+            hr_deadline_days: int,
+            added_time: int) -> Dict[str, Any]:
+        """
+        计算告警信息与展示字段
+        """
+        time_progress = 1.0 if time_requirement <= 0 else min(1.0, seeding_time / max(time_requirement, 1.0))
+        ratio_progress = 1.0 if ratio_requirement <= 0 else min(1.0, ratio / max(ratio_requirement, 1.0))
+        progress = min(time_progress, ratio_progress)
+        progress_percent = round(progress * 100, 1)
+
+        time_ok = seeding_time >= time_requirement
+        ratio_ok = ratio >= ratio_requirement
+        finished = time_ok and ratio_ok
+
+        remaining_deadline_days = None
+        is_timeout = False
+        if hr_deadline_days > 0 and added_time > 0:
+            deadline_ts = added_time + hr_deadline_days * 24 * 3600
+            remaining_seconds = deadline_ts - int(time.time())
+            remaining_deadline_days = round(remaining_seconds / 86400, 2)
+            if remaining_seconds <= 0 and not finished:
+                is_timeout = True
+
+        alert_level = self.ALERT_NORMAL
+        if is_timeout:
+            alert_level = self.ALERT_TIMEOUT
+        elif remaining_deadline_days is not None and remaining_deadline_days <= 3 and not finished:
+            alert_level = self.ALERT_URGENT
+        elif progress < 0.5 and not finished:
+            alert_level = self.ALERT_WARNING
+
+        alert_text_map = {
+            self.ALERT_NORMAL: "正常",
+            self.ALERT_WARNING: "警告",
+            self.ALERT_URGENT: "紧急",
+            self.ALERT_TIMEOUT: "超期",
+        }
+        alert_text = alert_text_map.get(alert_level, "正常")
+
+        priority_score = self._calculate_priority_score(
+            seeding_time=seeding_time,
+            ratio=ratio,
+            time_requirement=time_requirement,
+            ratio_requirement=ratio_requirement,
+            hr_deadline_days=hr_deadline_days,
+            added_time=added_time,
+            is_timeout=is_timeout,
+        )
+
+        star_level = 1
+        if priority_score >= 80:
+            star_level = 5
+        elif priority_score >= 60:
+            star_level = 4
+        elif priority_score >= 40:
+            star_level = 3
+        elif priority_score >= 20:
+            star_level = 2
+
+        priority_stars = "★" * star_level + "☆" * (5 - star_level)
+
+        return {
+            "alert_level": alert_level,
+            "alert_text": alert_text,
+            "progress_percent": progress_percent,
+            "priority_score": priority_score,
+            "priority_stars": priority_stars,
+            "remaining_deadline_days": remaining_deadline_days,
+            "is_timeout": is_timeout,
+        }
+
     def get_state(self) -> bool:
         return self._enabled
 
     def get_command(self) -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return [
+            {
+                "path": "/hr_seeds",
+                "endpoint": self.get_hr_seeds_data,
+                "methods": ["GET"],
+                "summary": "获取HR种子数据",
+                "description": "返回HR种子看板数据（总数、详情、站点分布）",
+            }
+        ]
 
     def get_service(self) -> List[Dict[str, Any]]:
         """
@@ -1069,6 +1320,7 @@ class HRManager(_PluginBase):
                 "func": self.check_hr_seeds,
                 "kwargs": {"seconds": self._check_interval}
             }]
+        return []
 
     def __get_demo_config(self):
         """
@@ -1640,501 +1892,364 @@ class HRManager(_PluginBase):
         """
         拼装插件详情页面，展示HR种子数据看板
         """
-        try:
-            # 获取HR种子数据
-            hr_seeds_data = self.get_hr_seeds_data()
-            
-            return [
-                {
-                    'component': 'VContainer',
-                    'props': {
-                        'fluid': True,
-                        'class': 'pa-0'
-                    },
-                    'content': [
-                        # 站点分布表格区域
-                        {
-                            'component': 'VCard',
-                            'props': {
-                                'variant': 'flat',
-                                'class': 'mb-4'
+        # 辅助函数：构建统计卡片
+        def _stat_card(icon: str, color: str, value: str, label: str) -> dict:
+            return {
+                'component': 'VCol',
+                'props': {'cols': 6, 'md': 3},
+                'content': [{
+                    'component': 'VCard',
+                    'props': {'variant': 'tonal', 'color': color, 'class': 'pa-4'},
+                    'content': [{
+                        'component': 'div',
+                        'props': {'class': 'd-flex align-center'},
+                        'content': [
+                            {
+                                'component': 'VIcon',
+                                'props': {'size': 'x-large', 'color': color, 'class': 'mr-4'},
+                                'text': icon
                             },
+                            {
+                                'component': 'div',
+                                'content': [
+                                    {
+                                        'component': 'div',
+                                        'props': {'class': 'text-h4 font-weight-bold'},
+                                        'text': value
+                                    },
+                                    {
+                                        'component': 'div',
+                                        'props': {'class': 'text-caption text-medium-emphasis'},
+                                        'text': label
+                                    }
+                                ]
+                            }
+                        ]
+                    }]
+                }]
+            }
+
+        # 辅助函数：告警级别对应的 VChip 颜色
+        def _alert_chip(alert_level: str, alert_text: str) -> dict:
+            color_map = {
+                'normal': 'success', 'warning': 'warning',
+                'urgent': 'error', 'timeout': 'error'
+            }
+            variant = 'flat' if alert_level == 'timeout' else 'tonal'
+            return {
+                'component': 'VChip',
+                'props': {
+                    'color': color_map.get(alert_level, 'success'),
+                    'variant': variant, 'size': 'small', 'label': True
+                },
+                'text': alert_text
+            }
+
+        # 辅助函数：进度条颜色
+        def _progress_color(pct: float) -> str:
+            if pct >= 80: return 'success'
+            if pct >= 50: return 'info'
+            if pct >= 30: return 'warning'
+            return 'error'
+
+        # 辅助函数：剩余时间单元格内容
+        def _remaining_cell(remaining_time: str) -> dict:
+            if remaining_time == '已满足':
+                return {
+                    'component': 'td',
+                    'props': {'class': 'text-center'},
+                    'content': [{
+                        'component': 'VChip',
+                        'props': {'color': 'success', 'variant': 'tonal', 'size': 'small', 'prepend-icon': 'mdi-check-circle'},
+                        'text': '已满足'
+                    }]
+                }
+            return {
+                'component': 'td',
+                'props': {'class': 'text-center text-high-emphasis'},
+                'text': remaining_time
+            }
+
+        # 辅助函数：进度单元格（进度条 + 百分比）
+        def _progress_cell(pct: float) -> dict:
+            return {
+                'component': 'td',
+                'props': {'class': 'text-center', 'style': 'min-width: 120px;'},
+                'content': [
+                    {
+                        'component': 'VProgressLinear',
+                        'props': {
+                            'model-value': pct,
+                            'color': _progress_color(pct),
+                            'height': 8,
+                            'rounded': True
+                        }
+                    },
+                    {
+                        'component': 'div',
+                        'props': {'class': 'text-caption text-medium-emphasis mt-1'},
+                        'text': f'{pct}%'
+                    }
+                ]
+            }
+
+        try:
+            hr_seeds_data = self.get_hr_seeds_data()
+            seeds = hr_seeds_data.get('seeds', [])
+            site_stats = hr_seeds_data.get('site_stats', {})
+            total = hr_seeds_data.get('total_count', 0)
+
+            # 计算统计数据
+            alert_count = sum(1 for s in seeds if s.get('alert_level') in ('warning', 'urgent', 'timeout'))
+            timeout_count = sum(1 for s in seeds if s.get('alert_level') == 'timeout')
+            avg_progress = round(sum(s.get('progress_percent', 0) for s in seeds) / max(len(seeds), 1), 1)
+
+            # 站点分布芯片颜色轮换
+            chip_colors = ['primary', 'success', 'info', 'warning', 'secondary']
+
+            # 如果没有种子数据，显示空状态
+            if not seeds:
+                return [{
+                    'component': 'VContainer',
+                    'props': {'fluid': True, 'class': 'pa-0'},
+                    'content': [
+                        # 统计概览（全零）
+                        {
+                            'component': 'VRow',
+                            'props': {'class': 'mb-4'},
                             'content': [
-                                {
-                                    'component': 'VCardItem',
-                                    'props': {
-                                        'class': 'pa-6'
-                                    },
-                                    'content': [
-                                        {
-                                            'component': 'VCardTitle',
-                                            'props': {
-                                                'class': 'd-flex align-center text-h6'
-                                            },
-                                            'content': [
-                                                {
-                                                    'component': 'VIcon',
-                                                    'props': {
-                                                        'color': 'primary',
-                                                        'class': 'mr-3',
-                                                        'size': 'default'
-                                                    },
-                                                    'text': 'mdi-map-marker'
-                                                },
-                                                {
-                                                    'component': 'span',
-                                                    'text': 'HR种子站点分布'
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    'component': 'VCardText',
-                                    'props': {
-                                        'class': 'pa-6'
-                                    },
-                                    'content': [
-                                        {
-                                            'component': 'VRow',
-                                            'content': [
-                                                {
-                                                    'component': 'VCol',
-                                                    'props': {
-                                                        'cols': 12
-                                                    },
-                                                    'content': [
-                                                        {
-                                                            'component': 'VTable',
-                                                            'props': {
-                                                                'hover': True
-                                                            },
-                                                            'content': [
-                                                                {
-                                                                    'component': 'thead',
-                                                                    'content': [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '站点名称'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': 'HR种子数量'
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                    ]
-                                                                },
-                                                                {
-                                                                    'component': 'tbody',
-                                                                    'content': [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'props': {
-                                                                                'class': 'text-sm'
-                                                                            },
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': site
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': count
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                        for site, count in hr_seeds_data.get('site_stats', {}).items()
-                                                                    ] if hr_seeds_data.get('site_stats') else [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'colspan': 2,
-                                                                                        'class': 'text-center text-grey py-8'
-                                                                                    },
-                                                                                    'content': [
-                                                                                        {
-                                                                                            'component': 'VIcon',
-                                                                                            'props': {
-                                                                                                'size': 'large',
-                                                                                                'color': 'grey lighten-1'
-                                                                                            },
-                                                                                            'text': 'mdi-database-off'
-                                                                                        },
-                                                                                        {
-                                                                                            'component': 'div',
-                                                                                            'props': {
-                                                                                                'class': 'mt-2'
-                                                                                            },
-                                                                                            'text': '暂无HR种子站点数据'
-                                                                                        }
-                                                                                    ]
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                }
+                                _stat_card('mdi-seed', 'primary', '0', 'HR种子总数'),
+                                _stat_card('mdi-alert', 'warning', '0', '告警种子'),
+                                _stat_card('mdi-clock-alert', 'error', '0', '超期种子'),
+                                _stat_card('mdi-percent', 'success', '0%', '平均进度'),
                             ]
                         },
-                        # HR种子详细列表区域
+                        # 空状态提示
                         {
                             'component': 'VCard',
-                            'props': {
-                                'variant': 'flat',
-                                'class': 'mb-4'
-                            },
-                            'content': [
-                                {
-                                    'component': 'VCardItem',
-                                    'props': {
-                                        'class': 'pa-6'
+                            'props': {'variant': 'flat'},
+                            'content': [{
+                                'component': 'VCardText',
+                                'props': {'class': 'text-center py-16'},
+                                'content': [
+                                    {
+                                        'component': 'VIcon',
+                                        'props': {'size': '80', 'color': 'grey-lighten-1', 'class': 'mb-4'},
+                                        'text': 'mdi-seed-off'
                                     },
-                                    'content': [
-                                        {
-                                            'component': 'VCardTitle',
-                                            'props': {
-                                                'class': 'd-flex align-center text-h6'
-                                            },
-                                            'content': [
-                                                {
-                                                    'component': 'VIcon',
-                                                    'props': {
-                                                        'color': 'primary',
-                                                        'class': 'mr-3',
-                                                        'size': 'default'
-                                                    },
-                                                    'text': 'mdi-file-document-multiple'
-                                                },
-                                                {
-                                                    'component': 'span',
-                                                    'text': 'HR种子列表'
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    'component': 'VCardText',
-                                    'props': {
-                                        'class': 'pa-6'
+                                    {
+                                        'component': 'div',
+                                        'props': {'class': 'text-h6 text-medium-emphasis mb-2'},
+                                        'text': '暂无HR种子'
                                     },
-                                    'content': [
-                                        {
-                                            'component': 'VRow',
-                                            'content': [
-                                                {
-                                                    'component': 'VCol',
-                                                    'props': {
-                                                        'cols': 12
-                                                    },
-                                                    'content': [
-                                                        {
-                                                            'component': 'VTable',
-                                                            'props': {
-                                                                'hover': True
-                                                            },
-                                                            'content': [
-                                                                {
-                                                                    'component': 'thead',
-                                                                    'content': [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-left text-body-1 font-weight-bold',
-                                                                                        'width': '180px'
-                                                                                    },
-                                                                                    'text': '种子名称'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '所属站点'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '所属下载器'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '添加时间'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '当前做种时间'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '剩余做种时间'
-                                                                                },
-                                                                                {
-                                                                                    'component': 'th',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-body-1 font-weight-bold'
-                                                                                    },
-                                                                                    'text': '要求做种时间'
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                    ]
-                                                                },
-                                                                {
-                                                                    'component': 'tbody',
-                                                                    'content': [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'props': {
-                                                                                'class': 'text-sm'
-                                                                            },
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-left text-high-emphasis',
-                                                                                        'width': '180px'
-                                                                                    },
-                                                                                    'text': seed.get('name')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': seed.get('site')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': seed.get('downloader')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': seed.get('added_time')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': seed.get('seeding_time')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center ' + ('text-success' if seed.get('remaining_time') == '已满足' else 'text-high-emphasis')
-                                                                                    },
-                                                                                    'text': seed.get('remaining_time')
-                                                                                },
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'class': 'text-center text-high-emphasis'
-                                                                                    },
-                                                                                    'text': seed.get('required_time')
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                        for seed in hr_seeds_data.get('seeds', [])
-                                                                    ] if hr_seeds_data.get('seeds') else [
-                                                                        {
-                                                                            'component': 'tr',
-                                                                            'content': [
-                                                                                {
-                                                                                    'component': 'td',
-                                                                                    'props': {
-                                                                                        'colspan': 7,
-                                                                                        'class': 'text-center text-grey py-8'
-                                                                                    },
-                                                                                    'content': [
-                                                                                        {
-                                                                                            'component': 'VIcon',
-                                                                                            'props': {
-                                                                                                'size': 'large',
-                                                                                                'color': 'grey lighten-1'
-                                                                                            },
-                                                                                            'text': 'mdi-file-document-multiple-outline'
-                                                                                        },
-                                                                                        {
-                                                                                            'component': 'div',
-                                                                                            'props': {
-                                                                                                'class': 'mt-2'
-                                                                                            },
-                                                                                            'text': '暂无HR种子数据'
-                                                                                        }
-                                                                                    ]
-                                                                                }
-                                                                            ]
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        },
-                                                        {
-                                                            'component': 'div',
-                                                            'props': {
-                                                                'class': 'text-caption text-grey mt-2'
-                                                            },
-                                                            'text': f'共显示 {len(hr_seeds_data.get("seeds", []))} 条记录'
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
+                                    {
+                                        'component': 'div',
+                                        'props': {'class': 'text-body-2 text-disabled'},
+                                        'text': '当前没有正在监控的HR种子，请确认插件已启用并正确配置站点'
+                                    }
+                                ]
+                            }]
                         }
                     ]
-                }
-            ]
-        except Exception as e:
-            logger.error(f"获取HR种子详情页数据失败：{str(e)}")
-            # 返回一个详细的错误提示页面
-            return [
-                {
-                    'component': 'VContainer',
-                    'props': {
-                        'fluid': True,
-                        'class': 'pa-4'
+                }]
+
+            # 有数据时的完整看板
+            return [{
+                'component': 'VContainer',
+                'props': {'fluid': True, 'class': 'pa-0'},
+                'content': [
+                    # ===== 统计概览 =====
+                    {
+                        'component': 'VRow',
+                        'props': {'class': 'mb-4'},
+                        'content': [
+                            _stat_card('mdi-seed', 'primary', str(total), 'HR种子总数'),
+                            _stat_card('mdi-alert', 'warning', str(alert_count), '告警种子'),
+                            _stat_card('mdi-clock-alert', 'error', str(timeout_count), '超期种子'),
+                            _stat_card('mdi-percent', 'success', f'{avg_progress}%', '平均进度'),
+                        ]
                     },
-                    'content': [
-                        {
-                            'component': 'VCard',
-                            'props': {
-                                'class': 'mb-4'
-                            },
-                            'content': [
-                                {
+                    # ===== 站点分布 =====
+                    {
+                        'component': 'VCard',
+                        'props': {'variant': 'flat', 'class': 'mb-4'},
+                        'content': [
+                            {
+                                'component': 'VCardItem',
+                                'props': {'class': 'pa-4 pb-0'},
+                                'content': [{
                                     'component': 'VCardTitle',
-                                    'props': {
-                                        'title': '数据加载失败',
-                                        'class': 'text-h6'
+                                    'props': {'class': 'd-flex align-center text-subtitle-1'},
+                                    'content': [
+                                        {'component': 'VIcon', 'props': {'color': 'primary', 'class': 'mr-2', 'size': 'small'}, 'text': 'mdi-map-marker'},
+                                        {'component': 'span', 'text': '站点分布'}
+                                    ]
+                                }]
+                            },
+                            {
+                                'component': 'VCardText',
+                                'props': {'class': 'pa-4 d-flex flex-wrap ga-2'},
+                                'content': [
+                                    {
+                                        'component': 'VChip',
+                                        'props': {
+                                            'color': chip_colors[i % len(chip_colors)],
+                                            'variant': 'tonal',
+                                            'label': True
+                                        },
+                                        'text': f'{site} ({count})'
                                     }
-                                },
-                                {
-                                    'component': 'VCardText',
-                                    'props': {},
+                                    for i, (site, count) in enumerate(site_stats.items())
+                                ] if site_stats else [{
+                                    'component': 'span',
+                                    'props': {'class': 'text-disabled'},
+                                    'text': '暂无站点数据'
+                                }]
+                            }
+                        ]
+                    },
+                    # ===== HR种子列表 =====
+                    {
+                        'component': 'VCard',
+                        'props': {'variant': 'flat'},
+                        'content': [
+                            {
+                                'component': 'VCardItem',
+                                'props': {'class': 'pa-4 pb-0'},
+                                'content': [{
+                                    'component': 'VCardTitle',
+                                    'props': {'class': 'd-flex align-center justify-space-between'},
                                     'content': [
                                         {
-                                            'component': 'VAlert',
-                                            'props': {
-                                                'type': 'error',
-                                                'variant': 'tonal',
-                                                'class': 'mb-4'
-                                            },
+                                            'component': 'div',
+                                            'props': {'class': 'd-flex align-center text-subtitle-1'},
                                             'content': [
-                                                f"无法加载HR种子数据：{str(e)}"
+                                                {'component': 'VIcon', 'props': {'color': 'primary', 'class': 'mr-2', 'size': 'small'}, 'text': 'mdi-format-list-bulleted'},
+                                                {'component': 'span', 'text': 'HR种子列表'}
                                             ]
                                         },
                                         {
-                                            'component': 'VCard',
-                                            'props': {
-                                                'class': 'mt-4',
-                                                'elevation': 1
-                                            },
+                                            'component': 'VChip',
+                                            'props': {'size': 'small', 'variant': 'text', 'color': 'default'},
+                                            'text': f'共 {len(seeds)} 条'
+                                        }
+                                    ]
+                                }]
+                            },
+                            {
+                                'component': 'VCardText',
+                                'props': {'class': 'pa-4'},
+                                'content': [{
+                                    'component': 'VTable',
+                                    'props': {'hover': True, 'density': 'comfortable'},
+                                    'content': [
+                                        {
+                                            'component': 'thead',
+                                            'content': [{
+                                                'component': 'tr',
+                                                'content': [
+                                                    {'component': 'th', 'props': {'class': 'text-left font-weight-bold', 'style': 'min-width: 200px;'}, 'text': '种子名称'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '站点'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '下载器'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '添加时间'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '做种时间'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '剩余时间'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '要求时间'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '告警'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold', 'style': 'min-width: 120px;'}, 'text': '进度'},
+                                                    {'component': 'th', 'props': {'class': 'text-center font-weight-bold'}, 'text': '优先级'},
+                                                ]
+                                            }]
+                                        },
+                                        {
+                                            'component': 'tbody',
                                             'content': [
                                                 {
-                                                    'component': 'VCardTitle',
-                                                    'props': {
-                                                        'title': '可能的原因',
-                                                        'class': 'text-subtitle-1'
-                                                    }
-                                                },
-                                                {
-                                                    'component': 'VCardText',
-                                                    'props': {},
+                                                    'component': 'tr',
                                                     'content': [
+                                                        # 种子名称（溢出省略）
                                                         {
-                                                            'component': 'div',
+                                                            'component': 'td',
                                                             'props': {
-                                                                'class': 'text-body-1'
+                                                                'class': 'text-left',
+                                                                'style': 'max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
                                                             },
-                                                            'content': [
-                                                                {
-                                                                    'component': 'div',
-                                                                    'props': {
-                                                                        'class': 'mb-2'
-                                                                    },
-                                                                    'text': '• 插件未启用'
-                                                                },
-                                                                {
-                                                                    'component': 'div',
-                                                                    'props': {
-                                                                        'class': 'mb-2'
-                                                                    },
-                                                                    'text': '• 下载器连接失败'
-                                                                },
-                                                                {
-                                                                    'component': 'div',
-                                                                    'props': {
-                                                                        'class': 'mb-2'
-                                                                    },
-                                                                    'text': '• 站点配置错误'
-                                                                },
-                                                                {
-                                                                    'component': 'div',
-                                                                    'text': '• 系统内部错误'
-                                                                }
-                                                            ]
-                                                        }
+                                                            'text': seed.get('name')
+                                                        },
+                                                        # 站点
+                                                        {'component': 'td', 'props': {'class': 'text-center'}, 'text': seed.get('site')},
+                                                        # 下载器
+                                                        {'component': 'td', 'props': {'class': 'text-center'}, 'text': seed.get('downloader')},
+                                                        # 添加时间
+                                                        {'component': 'td', 'props': {'class': 'text-center text-caption'}, 'text': seed.get('added_time')},
+                                                        # 做种时间
+                                                        {'component': 'td', 'props': {'class': 'text-center'}, 'text': seed.get('seeding_time')},
+                                                        # 剩余时间（带图标）
+                                                        _remaining_cell(seed.get('remaining_time', '')),
+                                                        # 要求时间
+                                                        {'component': 'td', 'props': {'class': 'text-center'}, 'text': seed.get('required_time')},
+                                                        # 告警（VChip 徽章）
+                                                        {
+                                                            'component': 'td',
+                                                            'props': {'class': 'text-center'},
+                                                            'content': [_alert_chip(seed.get('alert_level', 'normal'), seed.get('alert_text', '正常'))]
+                                                        },
+                                                        # 进度（进度条）
+                                                        _progress_cell(seed.get('progress_percent', 0)),
+                                                        # 优先级
+                                                        {'component': 'td', 'props': {'class': 'text-center'}, 'text': seed.get('priority_stars')},
                                                     ]
                                                 }
+                                                for seed in seeds
                                             ]
                                         }
                                     ]
+                                }]
+                            }
+                        ]
+                    }
+                ]
+            }]
+
+        except Exception as e:
+            logger.error(f"获取HR种子详情页数据失败：{str(e)}")
+            return [{
+                'component': 'VContainer',
+                'props': {'fluid': True, 'class': 'pa-4'},
+                'content': [
+                    {
+                        'component': 'VAlert',
+                        'props': {'type': 'error', 'variant': 'tonal', 'class': 'mb-4'},
+                        'text': f'数据加载失败：{str(e)}'
+                    },
+                    {
+                        'component': 'VCard',
+                        'props': {'variant': 'flat'},
+                        'content': [{
+                            'component': 'VCardText',
+                            'content': [
+                                {
+                                    'component': 'div',
+                                    'props': {'class': 'text-subtitle-2 mb-2'},
+                                    'text': '可能的原因：'
+                                },
+                                {
+                                    'component': 'VList',
+                                    'props': {'density': 'compact'},
+                                    'content': [
+                                        {
+                                            'component': 'VListItem',
+                                            'props': {'prepend-icon': 'mdi-circle-small'},
+                                            'text': reason
+                                        }
+                                        for reason in ['插件未启用', '下载器连接失败', '站点配置错误', '系统内部错误']
+                                    ]
                                 }
                             ]
-                        }
-                    ]
-                }
-            ]
+                        }]
+                    }
+                ]
+            }]
 
     def _get_hr_info_from_db(self, torrent_hash: str, torrent_name: str) -> dict:
         """
@@ -2333,24 +2448,11 @@ class HRManager(_PluginBase):
                     seeding_time = torrent.get("seeding_time", 0) / 3600  # 转换为小时
                     ratio = torrent.get("ratio", 0)
                     state = torrent.get("state", "")
-                    # 尝试多种可能的添加时间字段名称，包括qBittorrent的added_on字段
-                    possible_time_fields = ['added_time', 'created_at', 'start_time', 'time_added', 'date_added', 'addedOn', 'add_time', 'added', 'added_on']
-                    added_time = 0
-                    found_field = None
-                    
-                    for field in possible_time_fields:
-                        time_val = torrent.get(field)
-                        if time_val and time_val != 0:
-                            added_time = time_val
-                            found_field = field
-                            logger.debug(f"✓ 种子 {torrent_name} 找到时间字段 {field}: {added_time}")
-                            break
-                    
-                    if not found_field:
-                        logger.debug(f"✗ 种子 {torrent_name} 未找到任何有效的时间字段，尝试的字段：{possible_time_fields}")
+                    added_time = self._get_torrent_added_time(torrent)
+                    if not added_time:
+                        logger.debug(f"✗ 种子 {torrent_name} 未找到有效添加时间字段")
                         logger.debug(f"  种子所有可用字段：{list(torrent.keys())}")
-                    
-                    logger.info(f"  添加时间（尝试多种字段后）：{added_time} (来自字段：{found_field if found_field else '未知'})")
+                    logger.info(f"  添加时间：{added_time} (timestamp)")
                     
                     logger.info(f"\n处理HR种子：{torrent_name} (hash: {torrent_hash})")
                     logger.info(f"  状态：{state}")
@@ -2379,7 +2481,7 @@ class HRManager(_PluginBase):
                         }
                     
                     # 计算剩余时间
-                    time_requirement = site_config.get("time", 0)
+                    time_requirement = self._safe_float(site_config.get("time", 0), 0.0)
                     remaining_time = time_requirement - seeding_time
                     logger.info(f"  要求做种时间：{time_requirement}小时，剩余做种时间：{remaining_time:.2f}小时")
                     
@@ -2397,9 +2499,19 @@ class HRManager(_PluginBase):
                         logger.info(f"  ⏳ 还需做种 {remaining_time_str}")
                     
                     # 计算分享率状态
-                    ratio_requirement = site_config.get("hr_ratio", 0)
+                    ratio_requirement = self._safe_float(site_config.get("hr_ratio", 0), 0.0)
                     ratio_status = "已满足" if ratio >= ratio_requirement else "未满足"
                     logger.info(f"  要求分享率：{ratio_requirement}，当前状态：{ratio_status}")
+
+                    hr_deadline_days = self._safe_int(site_config.get("hr_deadline_days", 0), 0)
+                    alert_info = self._calculate_alert_info(
+                        seeding_time=seeding_time,
+                        ratio=ratio,
+                        time_requirement=time_requirement,
+                        ratio_requirement=ratio_requirement,
+                        hr_deadline_days=hr_deadline_days,
+                        added_time=added_time,
+                    )
                     
                     # 格式化添加时间
                     from datetime import datetime
@@ -2420,15 +2532,33 @@ class HRManager(_PluginBase):
                         "current_ratio": f"{ratio:.2f}",
                         "required_ratio": f"{ratio_requirement}",
                         "ratio_status": ratio_status,
-                        "state": state
+                        "state": state,
+                        "alert_level": alert_info.get("alert_level"),
+                        "alert_text": alert_info.get("alert_text"),
+                        "progress_percent": alert_info.get("progress_percent"),
+                        "priority_score": alert_info.get("priority_score"),
+                        "priority_stars": alert_info.get("priority_stars"),
+                        "remaining_deadline_days": alert_info.get("remaining_deadline_days"),
                     }
                     
                     all_hr_seeds.append(seed_info)
                     logger.info(f"  ✅ 种子 {torrent_name} 信息处理完成")
             
-            # 按剩余时间排序（正序，时间少的排在前面）
+            # 按告警等级+优先级+剩余时间排序
             logger.info(f"✓ 所有HR种子处理完成，开始排序（共 {len(all_hr_seeds)} 个）")
-            all_hr_seeds.sort(key=lambda x: x["remaining_time_hours"])
+            level_weight = {
+                self.ALERT_TIMEOUT: 0,
+                self.ALERT_URGENT: 1,
+                self.ALERT_WARNING: 2,
+                self.ALERT_NORMAL: 3,
+            }
+            all_hr_seeds.sort(
+                key=lambda x: (
+                    level_weight.get(x.get("alert_level"), 4),
+                    -self._safe_float(x.get("priority_score"), 0.0),
+                    self._safe_float(x.get("remaining_time_hours"), 999999.0),
+                )
+            )
             
             # 统计按站点分类的HR种子数量
             logger.info(f"✓ 开始统计HR种子站点分布")

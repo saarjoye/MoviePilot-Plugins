@@ -10,5 +10,17 @@
     "history": {
       "v0.6.13": "待播影视日历 0.6.13 通过 Web 面板发布"
     }
+  },
+  "HRManager": {
+    "name": "HR管理-魔改版",
+    "description": "自动管理下载种子的HR标签，监控种子的做种时间和分享率，满足条件后自动更改标签并通知用户",
+    "labels": "影视,工具",
+    "version": "2.0",
+    "icon": "seed.png",
+    "author": "污妖王",
+    "level": 1,
+    "history": {
+      "v2.0": "HR管理-魔改版 2.0 通过 Web 面板发布"
+    }
   }
 }
