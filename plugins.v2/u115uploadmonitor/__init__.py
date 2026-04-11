@@ -18,8 +18,8 @@ class u115uploadmonitor(_PluginBase):
     plugin_desc = "实时监听 115 上传开始/成功/失败事件，支持过滤、去重和统计。"
     plugin_icon = "upload.png"
     plugin_version = "1.3.0"
-    plugin_author = "污妖王"
-    author_url = ""
+    plugin_author = "wYw"
+    author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "u115uploadmonitor_"
     plugin_order = 100
     auth_level = 1
