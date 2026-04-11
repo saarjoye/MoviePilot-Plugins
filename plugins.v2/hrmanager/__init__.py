@@ -22,7 +22,9 @@ class HRManager(_PluginBase):
     # 插件版本
     plugin_version = "2.0"
     # 插件作者
-    plugin_author = "污妖王"
+    plugin_author = "wYw"
+    # 作者主页
+    author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "hrmanager_"
     # 加载顺序
