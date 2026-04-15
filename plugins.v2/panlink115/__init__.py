@@ -24,7 +24,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，按详情页展示 115 网盘资源，并预留下载到 115 的接口。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
