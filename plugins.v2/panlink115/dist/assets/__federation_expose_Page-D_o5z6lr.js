@@ -22,54 +22,63 @@ const _hoisted_15 = { class: "result-tail" };
 const _hoisted_16 = { key: 1 };
 const _hoisted_17 = { class: "detail-stack" };
 const _hoisted_18 = { class: "detail-header" };
-const _hoisted_19 = ["src", "alt"];
-const _hoisted_20 = { class: "detail-copy" };
-const _hoisted_21 = { class: "detail-title-row" };
-const _hoisted_22 = { class: "detail-title" };
-const _hoisted_23 = ["href"];
-const _hoisted_24 = { class: "detail-tags" };
-const _hoisted_25 = { class: "detail-meta-grid" };
-const _hoisted_26 = { class: "meta-label" };
-const _hoisted_27 = { class: "meta-value" };
-const _hoisted_28 = {
+const _hoisted_19 = { class: "detail-poster-wrap" };
+const _hoisted_20 = ["src", "alt"];
+const _hoisted_21 = { class: "detail-copy" };
+const _hoisted_22 = { class: "detail-title-row" };
+const _hoisted_23 = { class: "detail-title" };
+const _hoisted_24 = ["href"];
+const _hoisted_25 = { class: "detail-tags" };
+const _hoisted_26 = { class: "detail-meta-grid" };
+const _hoisted_27 = { class: "meta-label" };
+const _hoisted_28 = { class: "meta-value" };
+const _hoisted_29 = {
   key: 0,
   class: "meta-item full-width"
 };
-const _hoisted_29 = { class: "meta-value" };
-const _hoisted_30 = {
+const _hoisted_30 = { class: "meta-value" };
+const _hoisted_31 = {
   key: 0,
   class: "plot-panel"
 };
-const _hoisted_31 = { class: "plot-text" };
-const _hoisted_32 = {
+const _hoisted_32 = { class: "plot-text" };
+const _hoisted_33 = {
   key: 0,
   class: "text-caption text-medium-emphasis"
 };
-const _hoisted_33 = ["onClick"];
-const _hoisted_34 = { class: "resource-name" };
-const _hoisted_35 = { class: "resource-count" };
-const _hoisted_36 = { class: "resource-hint" };
-const _hoisted_37 = { class: "queue-name" };
-const _hoisted_38 = { class: "queue-path" };
-const _hoisted_39 = { class: "queue-meta" };
-const _hoisted_40 = { class: "queue-status" };
-const _hoisted_41 = { class: "queue-url" };
-const _hoisted_42 = { class: "queue-pass" };
-const _hoisted_43 = { class: "dialog-entry-title" };
-const _hoisted_44 = { class: "dialog-entry-subtitle" };
-const _hoisted_45 = { class: "dialog-entry-url" };
-const _hoisted_46 = { class: "dialog-entry-pass" };
-const _hoisted_47 = { class: "dialog-actions" };
-const _hoisted_48 = { class: "download-summary" };
-const _hoisted_49 = { class: "download-row" };
-const _hoisted_50 = { class: "download-row" };
-const _hoisted_51 = { class: "download-row" };
-const _hoisted_52 = {
+const _hoisted_34 = ["onClick"];
+const _hoisted_35 = { class: "resource-name" };
+const _hoisted_36 = { class: "resource-count" };
+const _hoisted_37 = { class: "resource-hint" };
+const _hoisted_38 = { class: "queue-name" };
+const _hoisted_39 = { class: "queue-path" };
+const _hoisted_40 = {
+  key: 0,
+  class: "queue-path"
+};
+const _hoisted_41 = {
+  key: 1,
+  class: "queue-path"
+};
+const _hoisted_42 = { class: "queue-meta" };
+const _hoisted_43 = { class: "queue-status" };
+const _hoisted_44 = { class: "queue-url" };
+const _hoisted_45 = { class: "queue-pass" };
+const _hoisted_46 = { class: "dialog-entry-title" };
+const _hoisted_47 = { class: "dialog-entry-subtitle" };
+const _hoisted_48 = { class: "dialog-entry-url" };
+const _hoisted_49 = { class: "dialog-entry-pass" };
+const _hoisted_50 = { class: "dialog-actions" };
+const _hoisted_51 = { class: "download-summary" };
+const _hoisted_52 = { class: "download-row" };
+const _hoisted_53 = { class: "download-row" };
+const _hoisted_54 = { class: "download-row" };
+const _hoisted_55 = {
   key: 0,
   class: "selection-preview"
 };
 
-const {computed,onMounted,ref} = await importShared('vue');
+const {computed,nextTick,onMounted,ref} = await importShared('vue');
 
 
 
@@ -110,6 +119,8 @@ const activeEntries = ref([]);
 const selectedEntry = ref(null);
 const categoryOptions = ref([]);
 const selectedCategoryKey = ref("");
+const queueSectionRef = ref(null);
+const latestQueueKey = ref("");
 
 const resultCountText = computed(() => `共 ${searchResults.value.length} 条候选结果`);
 const queueCountText = computed(() => `任务队列 ${queueItems.value.length} 条`);
@@ -234,6 +245,7 @@ function pickDefaultCategoryKey() {
 }
 
 async function fetchMpApi(path, init = {}) {
+
   let auth = {};
   try {
     auth = JSON.parse(localStorage.getItem("auth") || "{}");
@@ -267,6 +279,33 @@ async function fetchMpApi(path, init = {}) {
 }
 
 async function fetchCategories(force = false) {
+function inferPreferredGroup(item) {
+  const text = [item?.type_name, item?.vod_name, item?.vod_remarks].filter(Boolean).join(" ");
+  if (/剧|综艺|纪录|动漫|国漫|日番|番/.test(text)) {
+    return "电视剧";
+  }
+  return "电影";
+}
+
+function matchesPreferredGroup(group, preferredGroup) {
+  if (preferredGroup === "电影") {
+    return ["电影", "電影"].includes(group);
+  }
+  if (preferredGroup === "电视剧") {
+    return ["电视剧", "剧集", "劇集", "连续剧", "電視劇"].includes(group);
+  }
+  return group === preferredGroup;
+}
+
+function pickDefaultCategoryKey() {
+  if (!categoryOptions.value.length) {
+    return "";
+  }
+  const preferredGroup = inferPreferredGroup(selectedMedia.value);
+  const exact = categoryOptions.value.find((item) => matchesPreferredGroup(item.group, preferredGroup));
+  return exact?.key || categoryOptions.value[0].key;
+}
+
   if (!force && categoryOptions.value.length) {
     return;
   }
@@ -285,6 +324,7 @@ async function fetchCategories(force = false) {
 }
 
 async function fetchState() {
+
   try {
     const payload = normalizePayload(await props.api.get("plugin/Panlink115/state"));
     if (payload?.message) {
@@ -405,8 +445,12 @@ async function queue115() {
       })
     );
     queueItems.value = payload?.queue || queueItems.value;
+    const queuedItem = payload?.item || queueItems.value?.[0];
+    latestQueueKey.value = queuedItem ? `${queuedItem.url}-${queuedItem.category_name}` : "";
     statusMessage.value = payload?.message || "已创建下载任务。";
     downloadDialog.value = false;
+    await nextTick();
+    queueSectionRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
     emit("action");
   } catch (error) {
     statusMessage.value = error?.message || "创建下载任务失败。";
@@ -457,7 +501,7 @@ return (_ctx, _cache) => {
       _createElementVNode("div", _hoisted_3, [
         _cache[7] || (_cache[7] = _createElementVNode("div", { class: "hero-kicker" }, "PANLIAN x MOVIEPILOT", -1)),
         _cache[8] || (_cache[8] = _createElementVNode("h1", { class: "hero-title" }, "盘链搜索与 115 下载任务面板", -1)),
-        _cache[9] || (_cache[9] = _createElementVNode("p", { class: "hero-text" }, " 手动查询电视剧或电影，按盘链详情页方式查看资源，并把 115 链接投递到基于 MoviePilot 当前分类的下载任务里。 ", -1)),
+        _cache[9] || (_cache[9] = _createElementVNode("p", { class: "hero-text" }, " 手动查询电视剧或电影，按盘链详情页方式查看资源，并把 115 链接真实提交到 CD2 对应目录中。 ", -1)),
         _createElementVNode("div", _hoisted_4, [
           _createVNode(_component_VChip, {
             color: pluginState.value.enabled ? 'success' : 'warning',
@@ -640,21 +684,26 @@ return (_ctx, _cache) => {
               rounded: "xl"
             }, {
               default: _withCtx(() => [
-                _createElementVNode("div", {
-                  class: "detail-banner",
-                  style: _normalizeStyle({ backgroundImage: `url(${selectedMedia.value.vod_pic || 'https://115.com/favicon.ico'})` })
-                }, null, 4),
                 _createVNode(_component_VCardText, { class: "detail-content" }, {
                   default: _withCtx(() => [
+                    _createElementVNode("div", {
+                      class: "detail-deco",
+                      style: _normalizeStyle({ backgroundImage: `url(${selectedMedia.value.vod_pic || 'https://115.com/favicon.ico'})` })
+                    }, null, 4),
                     _createElementVNode("div", _hoisted_18, [
-                      _createElementVNode("img", {
-                        class: "detail-poster",
-                        src: selectedMedia.value.vod_pic || 'https://115.com/favicon.ico',
-                        alt: selectedMedia.value.vod_name
-                      }, null, 8, _hoisted_19),
-                      _createElementVNode("div", _hoisted_20, [
-                        _createElementVNode("div", _hoisted_21, [
-                          _createElementVNode("h2", _hoisted_22, _toDisplayString(selectedMedia.value.vod_name), 1),
+                      _createElementVNode("div", _hoisted_19, [
+                        _createElementVNode("img", {
+                          class: "detail-poster",
+                          src: selectedMedia.value.vod_pic || 'https://115.com/favicon.ico',
+                          alt: selectedMedia.value.vod_name
+                        }, null, 8, _hoisted_20)
+                      ]),
+                      _createElementVNode("div", _hoisted_21, [
+                        _createElementVNode("div", _hoisted_22, [
+                          _createElementVNode("div", null, [
+                            _cache[16] || (_cache[16] = _createElementVNode("div", { class: "detail-eyebrow" }, "盘链详情", -1)),
+                            _createElementVNode("h2", _hoisted_23, _toDisplayString(selectedMedia.value.vod_name), 1)
+                          ]),
                           (selectedMedia.value.detail_url)
                             ? (_openBlock(), _createElementBlock("a", {
                                 key: 0,
@@ -662,10 +711,10 @@ return (_ctx, _cache) => {
                                 href: selectedMedia.value.detail_url,
                                 target: "_blank",
                                 rel: "noopener noreferrer"
-                              }, " 盘链原页 ", 8, _hoisted_23))
+                              }, " 盘链原页 ", 8, _hoisted_24))
                             : _createCommentVNode("", true)
                         ]),
-                        _createElementVNode("div", _hoisted_24, [
+                        _createElementVNode("div", _hoisted_25, [
                           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(mediaFacts(selectedMedia.value), (fact) => {
                             return (_openBlock(), _createElementBlock("span", {
                               key: fact,
@@ -673,27 +722,27 @@ return (_ctx, _cache) => {
                             }, _toDisplayString(fact), 1))
                           }), 128))
                         ]),
-                        _createElementVNode("div", _hoisted_25, [
+                        _createElementVNode("div", _hoisted_26, [
                           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(mediaMeta(selectedMedia.value), (meta) => {
                             return (_openBlock(), _createElementBlock("div", {
                               key: meta.label,
                               class: "meta-item"
                             }, [
-                              _createElementVNode("span", _hoisted_26, _toDisplayString(meta.label), 1),
-                              _createElementVNode("span", _hoisted_27, _toDisplayString(meta.value), 1)
+                              _createElementVNode("span", _hoisted_27, _toDisplayString(meta.label), 1),
+                              _createElementVNode("span", _hoisted_28, _toDisplayString(meta.value), 1)
                             ]))
                           }), 128)),
                           (selectedMedia.value.vod_actor)
-                            ? (_openBlock(), _createElementBlock("div", _hoisted_28, [
-                                _cache[16] || (_cache[16] = _createElementVNode("span", { class: "meta-label" }, "主演", -1)),
-                                _createElementVNode("span", _hoisted_29, _toDisplayString(selectedMedia.value.vod_actor), 1)
+                            ? (_openBlock(), _createElementBlock("div", _hoisted_29, [
+                                _cache[17] || (_cache[17] = _createElementVNode("span", { class: "meta-label" }, "主演", -1)),
+                                _createElementVNode("span", _hoisted_30, _toDisplayString(selectedMedia.value.vod_actor), 1)
                               ]))
                             : _createCommentVNode("", true)
                         ]),
                         (selectedMedia.value.vod_content)
-                          ? (_openBlock(), _createElementBlock("div", _hoisted_30, [
-                              _cache[17] || (_cache[17] = _createElementVNode("div", { class: "plot-title" }, "剧情简介", -1)),
-                              _createElementVNode("p", _hoisted_31, _toDisplayString(selectedMedia.value.vod_content), 1)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_31, [
+                              _cache[18] || (_cache[18] = _createElementVNode("div", { class: "plot-title" }, "剧情简介", -1)),
+                              _createElementVNode("p", _hoisted_32, _toDisplayString(selectedMedia.value.vod_content), 1)
                             ]))
                           : _createCommentVNode("", true)
                       ])
@@ -712,9 +761,9 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VCardTitle, { class: "d-flex align-center justify-space-between flex-wrap ga-3" }, {
               default: _withCtx(() => [
-                _cache[18] || (_cache[18] = _createElementVNode("span", null, "资源展示", -1)),
+                _cache[19] || (_cache[19] = _createElementVNode("span", null, "资源展示", -1)),
                 (preferredCategoryHint.value)
-                  ? (_openBlock(), _createElementBlock("span", _hoisted_32, " 默认推荐分类组：" + _toDisplayString(preferredCategoryHint.value), 1))
+                  ? (_openBlock(), _createElementBlock("span", _hoisted_33, " 默认推荐分类组：" + _toDisplayString(preferredCategoryHint.value), 1))
                   : _createCommentVNode("", true)
               ]),
               _: 1
@@ -732,10 +781,10 @@ return (_ctx, _cache) => {
                         class: _normalizeClass(["resource-card", { primary: group.name === '115' }]),
                         onClick: $event => (openGroupDialog(group.name))
                       }, [
-                        _createElementVNode("div", _hoisted_34, _toDisplayString(group.label), 1),
-                        _createElementVNode("div", _hoisted_35, _toDisplayString(group.count) + " 条", 1),
-                        _createElementVNode("div", _hoisted_36, _toDisplayString(group.name === "115" ? "点击查看并创建下载任务" : "点击查看原始链接"), 1)
-                      ], 10, _hoisted_33))
+                        _createElementVNode("div", _hoisted_35, _toDisplayString(group.label), 1),
+                        _createElementVNode("div", _hoisted_36, _toDisplayString(group.count) + " 条", 1),
+                        _createElementVNode("div", _hoisted_37, _toDisplayString(group.name === "115" ? "点击查看并创建下载任务" : "点击查看原始链接"), 1)
+                      ], 10, _hoisted_34))
                     }), 128))
                   ]),
                   _: 1
@@ -746,7 +795,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+                      default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
                         _createTextVNode(" 先从左侧选择一个搜索结果，这里就会展示对应的网盘资源分组。 ", -1)
                       ]))]),
                       _: 1
@@ -758,13 +807,15 @@ return (_ctx, _cache) => {
           _: 1
         }),
         _createVNode(_component_VCard, {
+          ref_key: "queueSectionRef",
+          ref: queueSectionRef,
           class: "queue-panel",
           rounded: "xl"
         }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardTitle, { class: "d-flex align-center justify-space-between flex-wrap ga-3" }, {
               default: _withCtx(() => [
-                _cache[21] || (_cache[21] = _createElementVNode("span", null, "下载任务", -1)),
+                _cache[22] || (_cache[22] = _createElementVNode("span", null, "下载任务", -1)),
                 _createVNode(_component_VBtn, {
                   color: "warning",
                   variant: "text",
@@ -772,7 +823,7 @@ return (_ctx, _cache) => {
                   loading: queueLoading.value,
                   onClick: clearQueue
                 }, {
-                  default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+                  default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
                     _createTextVNode(" 清空队列 ", -1)
                   ]))]),
                   _: 1
@@ -787,29 +838,36 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_VAlert, {
-                      type: "warning",
+                      type: "success",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
-                        _createTextVNode(" 当前“下载”仍是占位任务，只会记录你选择的 115 链接和 MoviePilot 分类。下一阶段再接真实 115 转存与 MP 整理入库。 ", -1)
+                      default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+                        _createTextVNode(" 当前“下载”会真实调用 CD2，把盘链 115 链接提交到你配置的目录中。队列里会保留本次提交记录，便于继续跟进整理链路。 ", -1)
                       ]))]),
                       _: 1
                     }),
+                    _cache[24] || (_cache[24] = _createElementVNode("div", { class: "task-note" }, " 新建任务后页面会自动滚动到这里；如果 CD2 成功检测到新目录，也会把新目录名称一起显示出来。 ", -1)),
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(queueItems.value, (item) => {
                       return (_openBlock(), _createElementBlock("article", {
                         key: `${item.url}-${item.category_name}`,
-                        class: "queue-card"
+                        class: _normalizeClass(["queue-card", { latest: latestQueueKey.value === `${item.url}-${item.category_name}` }])
                       }, [
-                        _createElementVNode("div", _hoisted_37, _toDisplayString(item.vod_name || item.title), 1),
-                        _createElementVNode("div", _hoisted_38, _toDisplayString(queueSubtitle(item)), 1),
-                        _createElementVNode("div", _hoisted_39, [
+                        _createElementVNode("div", _hoisted_38, _toDisplayString(item.vod_name || item.title), 1),
+                        _createElementVNode("div", _hoisted_39, _toDisplayString(queueSubtitle(item)), 1),
+                        (item.target_path)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_40, "CD2 目录：" + _toDisplayString(item.target_path), 1))
+                          : _createCommentVNode("", true),
+                        (item.created_path)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_41, "检测到新目录：" + _toDisplayString(item.created_path), 1))
+                          : _createCommentVNode("", true),
+                        _createElementVNode("div", _hoisted_42, [
                           _createElementVNode("span", null, "来源：" + _toDisplayString(item.source || "未知"), 1),
                           _createElementVNode("span", null, "创建时间：" + _toDisplayString(item.queued_at), 1)
                         ]),
-                        _createElementVNode("div", _hoisted_40, _toDisplayString(item.status), 1),
-                        _createElementVNode("div", _hoisted_41, _toDisplayString(item.url), 1),
-                        _createElementVNode("div", _hoisted_42, "提取码：" + _toDisplayString(item.password || "无"), 1)
-                      ]))
+                        _createElementVNode("div", _hoisted_43, _toDisplayString(item.status), 1),
+                        _createElementVNode("div", _hoisted_44, _toDisplayString(item.url), 1),
+                        _createElementVNode("div", _hoisted_45, "提取码：" + _toDisplayString(item.password || "无"), 1)
+                      ], 2))
                     }), 128))
                   ]),
                   _: 1
@@ -820,8 +878,8 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
-                        _createTextVNode(" 还没有下载任务。打开 115 资源弹层后点击“下载”，并选择一个 MoviePilot 分类即可创建任务。 ", -1)
+                      default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                        _createTextVNode(" 还没有下载任务。打开 115 资源弹层后点击“下载”，并选择一个 MoviePilot 分类即可提交到 115。 ", -1)
                       ]))]),
                       _: 1
                     })
@@ -830,7 +888,7 @@ return (_ctx, _cache) => {
                 }))
           ]),
           _: 1
-        })
+        }, 512)
       ])
     ]),
     _createVNode(_component_VDialog, {
@@ -867,11 +925,11 @@ return (_ctx, _cache) => {
                         key: entry.url,
                         class: "dialog-entry"
                       }, [
-                        _createElementVNode("div", _hoisted_43, _toDisplayString(entry.title || "未命名资源"), 1),
-                        _createElementVNode("div", _hoisted_44, _toDisplayString(entrySubtitle(entry)), 1),
-                        _createElementVNode("div", _hoisted_45, _toDisplayString(entry.url), 1),
-                        _createElementVNode("div", _hoisted_46, "提取码：" + _toDisplayString(entry.password || "无"), 1),
-                        _createElementVNode("div", _hoisted_47, [
+                        _createElementVNode("div", _hoisted_46, _toDisplayString(entry.title || "未命名资源"), 1),
+                        _createElementVNode("div", _hoisted_47, _toDisplayString(entrySubtitle(entry)), 1),
+                        _createElementVNode("div", _hoisted_48, _toDisplayString(entry.url), 1),
+                        _createElementVNode("div", _hoisted_49, "提取码：" + _toDisplayString(entry.password || "无"), 1),
+                        _createElementVNode("div", _hoisted_50, [
                           (activeGroupName.value === '115')
                             ? (_openBlock(), _createBlock(_component_VBtn, {
                                 key: 0,
@@ -879,7 +937,7 @@ return (_ctx, _cache) => {
                                 variant: "flat",
                                 onClick: $event => (openDownloadDialog(entry))
                               }, {
-                                default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
+                                default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
                                   _createTextVNode(" 下载 ", -1)
                                 ]))]),
                                 _: 1
@@ -891,7 +949,7 @@ return (_ctx, _cache) => {
                             rel: "noopener noreferrer",
                             variant: "text"
                           }, {
-                            default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                            default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
                               _createTextVNode(" 打开链接 ", -1)
                             ]))]),
                             _: 1
@@ -908,7 +966,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                         _createTextVNode(" 当前分组没有可展示的链接。 ", -1)
                       ]))]),
                       _: 1
@@ -931,7 +989,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCard, { rounded: "xl" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardTitle, null, {
-              default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+              default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
                 _createTextVNode("创建 115 下载任务", -1)
               ]))]),
               _: 1
@@ -942,22 +1000,22 @@ return (_ctx, _cache) => {
                   type: "info",
                   variant: "tonal"
                 }, {
-                  default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
-                    _createTextVNode(" 分类直接读取 MoviePilot 当前配置，后续真实接入整理链路时会以这里选中的分类作为落库目标。 ", -1)
+                  default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                    _createTextVNode(" 分类直接读取 MoviePilot 当前配置；提交时会按“电影 / 剧集根目录 + 分类名称”计算 CD2 目标路径。 ", -1)
                   ]))]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_48, [
-                  _createElementVNode("div", _hoisted_49, [
-                    _cache[29] || (_cache[29] = _createElementVNode("span", { class: "download-label" }, "影视条目", -1)),
+                _createElementVNode("div", _hoisted_51, [
+                  _createElementVNode("div", _hoisted_52, [
+                    _cache[31] || (_cache[31] = _createElementVNode("span", { class: "download-label" }, "影视条目", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedMedia.value?.vod_name || "未选择"), 1)
                   ]),
-                  _createElementVNode("div", _hoisted_50, [
-                    _cache[30] || (_cache[30] = _createElementVNode("span", { class: "download-label" }, "资源标题", -1)),
+                  _createElementVNode("div", _hoisted_53, [
+                    _cache[32] || (_cache[32] = _createElementVNode("span", { class: "download-label" }, "资源标题", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedEntry.value?.title || "未选择"), 1)
                   ]),
-                  _createElementVNode("div", _hoisted_51, [
-                    _cache[31] || (_cache[31] = _createElementVNode("span", { class: "download-label" }, "推荐分类组", -1)),
+                  _createElementVNode("div", _hoisted_54, [
+                    _cache[33] || (_cache[33] = _createElementVNode("span", { class: "download-label" }, "推荐分类组", -1)),
                     _createElementVNode("span", null, _toDisplayString(preferredCategoryHint.value || "未识别"), 1)
                   ])
                 ]),
@@ -973,8 +1031,9 @@ return (_ctx, _cache) => {
                   "hide-details": "auto"
                 }, null, 8, ["modelValue", "items", "loading"]),
                 (selectedCategoryLabel.value)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_52, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
-                  : _createCommentVNode("", true)
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_55, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
+                  : _createCommentVNode("", true),
+                _cache[34] || (_cache[34] = _createElementVNode("div", { class: "task-note" }, " 点确认后会真实调用 CD2，把当前 115 分享链接提交到对应目录。 ", -1))
               ]),
               _: 1
             }),
@@ -985,7 +1044,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[5] || (_cache[5] = $event => (downloadDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                  default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -996,8 +1055,8 @@ return (_ctx, _cache) => {
                   loading: queueLoading.value,
                   onClick: queue115
                 }, {
-                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
-                    _createTextVNode(" 创建任务 ", -1)
+                  default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                    _createTextVNode(" 提交到 115 ", -1)
                   ]))]),
                   _: 1
                 }, 8, ["loading"])
@@ -1015,6 +1074,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1198f81f"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-962461ba"]]);
 
 export { Page as default };

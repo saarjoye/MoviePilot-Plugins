@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+import time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, unquote, urljoin
 
 import requests
 
@@ -306,3 +307,233 @@ class PinglianClient:
         text = html.unescape(text)
         text = text.replace("\xa0", " ").replace("\u3000", " ")
         return re.sub(r"\s+", " ", text).strip()
+
+
+class CloudDrive2Client:
+    def __init__(
+        self,
+        base_url: str = "",
+        token: str = "",
+        timeout: int = 20,
+        detect_delay: float = 1.2,
+    ):
+        self.base_url = self._normalize_base_url(base_url)
+        self.token = (token or "").strip()
+        self.timeout = timeout or 20
+        self.detect_delay = max(float(detect_delay or 1.2), 0.2)
+        self._session = requests.Session()
+
+    def update_config(
+        self,
+        base_url: str = "",
+        token: str = "",
+        timeout: int = 20,
+        detect_delay: float = 1.2,
+    ) -> None:
+        self.base_url = self._normalize_base_url(base_url)
+        self.token = (token or "").strip()
+        self.timeout = timeout or 20
+        self.detect_delay = max(float(detect_delay or 1.2), 0.2)
+
+    def add_offline_file(self, url: str, target_path: str) -> Dict[str, str]:
+        link = (url or "").strip()
+        target = self.normalize_path(target_path)
+        if not link:
+            raise RuntimeError("缺少 CD2 需要提交的 115 链接")
+        if not target:
+            raise RuntimeError("缺少 CD2 目标目录")
+
+        before_paths = {item.get("full_path"): item for item in self.list_subfiles(target)}
+        payload = self._wrap_request(
+            [
+                self._encode_string_field(1, link),
+                self._encode_string_field(2, target),
+            ]
+        )
+        self._post_grpc("AddOfflineFiles", payload)
+
+        created_item: Dict[str, str] = {}
+        for _ in range(4):
+            time.sleep(self.detect_delay)
+            after_items = self.list_subfiles(target)
+            new_items = [
+                item
+                for item in after_items
+                if item.get("full_path") and item.get("full_path") not in before_paths
+            ]
+            if new_items:
+                created_item = new_items[0]
+                break
+
+        return {
+            "target_path": target,
+            "created_name": str(created_item.get("name") or "").strip(),
+            "created_path": str(created_item.get("full_path") or "").strip(),
+        }
+
+    def list_subfiles(self, path: str) -> List[Dict[str, str]]:
+        target = self.normalize_path(path)
+        payload = self._wrap_request([self._encode_string_field(1, target)])
+        body = self._post_grpc("GetSubFiles", payload)
+        items: List[Dict[str, str]] = []
+        for frame in self._iter_grpc_frames(body):
+            for field_number, wire_type, value in self._iter_message_fields(frame):
+                if field_number != 1 or wire_type != 2:
+                    continue
+                item = self._parse_subfile(value)
+                if item:
+                    items.append(item)
+        return items
+
+    def _post_grpc(self, method: str, body: bytes) -> bytes:
+        if not self.base_url:
+            raise RuntimeError("请先在插件配置中填写 CD2 地址")
+        if not self.token:
+            raise RuntimeError("请先在插件配置中填写 CD2 API Token")
+
+        response = self._session.post(
+            f"{self.base_url}/clouddrive.CloudDriveFileSrv/{method}",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "accept": "application/grpc-web+proto",
+                "content-type": "application/grpc-web+proto",
+                "x-grpc-web": "1",
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
+        grpc_status = str(response.headers.get("Grpc-Status") or "").strip()
+        grpc_message = unquote(str(response.headers.get("Grpc-Message") or "").strip())
+        if grpc_status and grpc_status != "0":
+            raise RuntimeError(grpc_message or f"CD2 调用失败（grpc-status={grpc_status}）")
+        return bytes(response.content or b"")
+
+    @staticmethod
+    def _wrap_request(parts: Iterable[bytes]) -> bytes:
+        payload = b"".join(parts)
+        return b"\x00" + len(payload).to_bytes(4, "big") + payload
+
+    @staticmethod
+    def _encode_string_field(field_number: int, value: str) -> bytes:
+        text = (value or "").strip()
+        encoded = text.encode("utf-8")
+        return CloudDrive2Client._encode_tag(field_number, 2) + CloudDrive2Client._encode_varint(len(encoded)) + encoded
+
+    @staticmethod
+    def _encode_tag(field_number: int, wire_type: int) -> bytes:
+        return CloudDrive2Client._encode_varint((field_number << 3) | wire_type)
+
+    @staticmethod
+    def _encode_varint(value: int) -> bytes:
+        number = int(value or 0)
+        chunks = bytearray()
+        while True:
+            current = number & 0x7F
+            number >>= 7
+            if number:
+                chunks.append(current | 0x80)
+            else:
+                chunks.append(current)
+                break
+        return bytes(chunks)
+
+    @staticmethod
+    def _iter_grpc_frames(body: bytes) -> Iterable[bytes]:
+        data = body or b""
+        cursor = 0
+        length = len(data)
+        while cursor + 5 <= length:
+            flag = data[cursor]
+            frame_len = int.from_bytes(data[cursor + 1 : cursor + 5], "big")
+            cursor += 5
+            frame = data[cursor : cursor + frame_len]
+            cursor += frame_len
+            # grpc-web trailers use 0x80; only message frames matter here.
+            if flag == 0x80:
+                break
+            yield frame
+
+    @staticmethod
+    def _iter_message_fields(payload: bytes) -> Iterable[Tuple[int, int, Any]]:
+        cursor = 0
+        length = len(payload or b"")
+        while cursor < length:
+            tag, cursor = CloudDrive2Client._read_varint(payload, cursor)
+            field_number = tag >> 3
+            wire_type = tag & 0x07
+            if wire_type == 0:
+                value, cursor = CloudDrive2Client._read_varint(payload, cursor)
+                yield field_number, wire_type, value
+                continue
+            if wire_type == 2:
+                item_length, cursor = CloudDrive2Client._read_varint(payload, cursor)
+                value = payload[cursor : cursor + item_length]
+                cursor += item_length
+                yield field_number, wire_type, value
+                continue
+            if wire_type == 5:
+                value = payload[cursor : cursor + 4]
+                cursor += 4
+                yield field_number, wire_type, value
+                continue
+            if wire_type == 1:
+                value = payload[cursor : cursor + 8]
+                cursor += 8
+                yield field_number, wire_type, value
+                continue
+            raise RuntimeError(f"CD2 protobuf 解析失败，暂不支持 wire_type={wire_type}")
+
+    @staticmethod
+    def _read_varint(payload: bytes, cursor: int) -> Tuple[int, int]:
+        shift = 0
+        result = 0
+        while cursor < len(payload):
+            current = payload[cursor]
+            cursor += 1
+            result |= (current & 0x7F) << shift
+            if not current & 0x80:
+                return result, cursor
+            shift += 7
+        raise RuntimeError("CD2 protobuf 数据不完整，无法继续解析")
+
+    @staticmethod
+    def _parse_subfile(payload: bytes) -> Optional[Dict[str, str]]:
+        name = ""
+        full_path = ""
+        for field_number, wire_type, value in CloudDrive2Client._iter_message_fields(payload):
+            if wire_type != 2:
+                continue
+            if field_number == 2:
+                name = value.decode("utf-8", errors="ignore").strip()
+            elif field_number == 3:
+                full_path = value.decode("utf-8", errors="ignore").strip()
+        if not name and not full_path:
+            return None
+        return {
+            "name": name,
+            "full_path": full_path,
+        }
+
+    @staticmethod
+    def normalize_path(path: str) -> str:
+        text = str(path or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        parts = [segment for segment in text.split("/") if segment]
+        normalized = "/" + "/".join(parts)
+        return normalized or "/"
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        return str(url or "").strip().rstrip("/")
+
+    @staticmethod
+    def append_share_password(url: str, password: str) -> str:
+        link = (url or "").strip()
+        secret = (password or "").strip()
+        if not link or not secret or "password=" in link:
+            return link
+        joiner = "&" if "?" in link else "?"
+        return f"{link}{joiner}password={quote(secret)}"

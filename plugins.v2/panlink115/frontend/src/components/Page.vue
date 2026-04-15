@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 
 const emit = defineEmits(["action", "switch", "close"]);
 
@@ -32,6 +32,8 @@ const activeEntries = ref([]);
 const selectedEntry = ref(null);
 const categoryOptions = ref([]);
 const selectedCategoryKey = ref("");
+const queueSectionRef = ref(null);
+const latestQueueKey = ref("");
 
 const resultCountText = computed(() => `共 ${searchResults.value.length} 条候选结果`);
 const queueCountText = computed(() => `任务队列 ${queueItems.value.length} 条`);
@@ -156,6 +158,33 @@ function pickDefaultCategoryKey() {
 }
 
 async function fetchMpApi(path, init = {}) {
+function inferPreferredGroup(item) {
+  const text = [item?.type_name, item?.vod_name, item?.vod_remarks].filter(Boolean).join(" ");
+  if (/剧|综艺|纪录|动漫|国漫|日番|番/.test(text)) {
+    return "电视剧";
+  }
+  return "电影";
+}
+
+function matchesPreferredGroup(group, preferredGroup) {
+  if (preferredGroup === "电影") {
+    return ["电影", "電影"].includes(group);
+  }
+  if (preferredGroup === "电视剧") {
+    return ["电视剧", "剧集", "劇集", "连续剧", "電視劇"].includes(group);
+  }
+  return group === preferredGroup;
+}
+
+function pickDefaultCategoryKey() {
+  if (!categoryOptions.value.length) {
+    return "";
+  }
+  const preferredGroup = inferPreferredGroup(selectedMedia.value);
+  const exact = categoryOptions.value.find((item) => matchesPreferredGroup(item.group, preferredGroup));
+  return exact?.key || categoryOptions.value[0].key;
+}
+
   let auth = {};
   try {
     auth = JSON.parse(localStorage.getItem("auth") || "{}");
@@ -189,6 +218,33 @@ async function fetchMpApi(path, init = {}) {
 }
 
 async function fetchCategories(force = false) {
+function inferPreferredGroup(item) {
+  const text = [item?.type_name, item?.vod_name, item?.vod_remarks].filter(Boolean).join(" ");
+  if (/剧|综艺|纪录|动漫|国漫|日番|番/.test(text)) {
+    return "电视剧";
+  }
+  return "电影";
+}
+
+function matchesPreferredGroup(group, preferredGroup) {
+  if (preferredGroup === "电影") {
+    return ["电影", "電影"].includes(group);
+  }
+  if (preferredGroup === "电视剧") {
+    return ["电视剧", "剧集", "劇集", "连续剧", "電視劇"].includes(group);
+  }
+  return group === preferredGroup;
+}
+
+function pickDefaultCategoryKey() {
+  if (!categoryOptions.value.length) {
+    return "";
+  }
+  const preferredGroup = inferPreferredGroup(selectedMedia.value);
+  const exact = categoryOptions.value.find((item) => matchesPreferredGroup(item.group, preferredGroup));
+  return exact?.key || categoryOptions.value[0].key;
+}
+
   if (!force && categoryOptions.value.length) {
     return;
   }
@@ -207,6 +263,33 @@ async function fetchCategories(force = false) {
 }
 
 async function fetchState() {
+function inferPreferredGroup(item) {
+  const text = [item?.type_name, item?.vod_name, item?.vod_remarks].filter(Boolean).join(" ");
+  if (/剧|综艺|纪录|动漫|国漫|日番|番/.test(text)) {
+    return "电视剧";
+  }
+  return "电影";
+}
+
+function matchesPreferredGroup(group, preferredGroup) {
+  if (preferredGroup === "电影") {
+    return ["电影", "電影"].includes(group);
+  }
+  if (preferredGroup === "电视剧") {
+    return ["电视剧", "剧集", "劇集", "连续剧", "電視劇"].includes(group);
+  }
+  return group === preferredGroup;
+}
+
+function pickDefaultCategoryKey() {
+  if (!categoryOptions.value.length) {
+    return "";
+  }
+  const preferredGroup = inferPreferredGroup(selectedMedia.value);
+  const exact = categoryOptions.value.find((item) => matchesPreferredGroup(item.group, preferredGroup));
+  return exact?.key || categoryOptions.value[0].key;
+}
+
   try {
     const payload = normalizePayload(await props.api.get("plugin/Panlink115/state"));
     if (payload?.message) {
@@ -327,8 +410,12 @@ async function queue115() {
       })
     );
     queueItems.value = payload?.queue || queueItems.value;
+    const queuedItem = payload?.item || queueItems.value?.[0];
+    latestQueueKey.value = queuedItem ? `${queuedItem.url}-${queuedItem.category_name}` : "";
     statusMessage.value = payload?.message || "已创建下载任务。";
     downloadDialog.value = false;
+    await nextTick();
+    queueSectionRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
     emit("action");
   } catch (error) {
     statusMessage.value = error?.message || "创建下载任务失败。";
@@ -368,7 +455,7 @@ onMounted(async () => {
         <div class="hero-kicker">PANLIAN x MOVIEPILOT</div>
         <h1 class="hero-title">盘链搜索与 115 下载任务面板</h1>
         <p class="hero-text">
-          手动查询电视剧或电影，按盘链详情页方式查看资源，并把 115 链接投递到基于 MoviePilot 当前分类的下载任务里。
+          手动查询电视剧或电影，按盘链详情页方式查看资源，并把 115 链接真实提交到 CD2 对应目录中。
         </p>
         <div class="hero-chips">
           <VChip :color="pluginState.enabled ? 'success' : 'warning'" size="small" variant="flat">
@@ -457,13 +544,21 @@ onMounted(async () => {
 
       <div class="detail-stack">
         <VCard v-if="selectedMedia" class="detail-panel" rounded="xl">
-          <div class="detail-banner" :style="{ backgroundImage: `url(${selectedMedia.vod_pic || 'https://115.com/favicon.ico'})` }"></div>
           <VCardText class="detail-content">
+            <div
+              class="detail-deco"
+              :style="{ backgroundImage: `url(${selectedMedia.vod_pic || 'https://115.com/favicon.ico'})` }"
+            ></div>
             <div class="detail-header">
-              <img class="detail-poster" :src="selectedMedia.vod_pic || 'https://115.com/favicon.ico'" :alt="selectedMedia.vod_name">
+              <div class="detail-poster-wrap">
+                <img class="detail-poster" :src="selectedMedia.vod_pic || 'https://115.com/favicon.ico'" :alt="selectedMedia.vod_name">
+              </div>
               <div class="detail-copy">
                 <div class="detail-title-row">
-                  <h2 class="detail-title">{{ selectedMedia.vod_name }}</h2>
+                  <div>
+                    <div class="detail-eyebrow">盘链详情</div>
+                    <h2 class="detail-title">{{ selectedMedia.vod_name }}</h2>
+                  </div>
                   <a
                     v-if="selectedMedia.detail_url"
                     class="detail-link"
@@ -526,7 +621,7 @@ onMounted(async () => {
           </VCardText>
         </VCard>
 
-        <VCard class="queue-panel" rounded="xl">
+        <VCard ref="queueSectionRef" class="queue-panel" rounded="xl">
           <VCardTitle class="d-flex align-center justify-space-between flex-wrap ga-3">
             <span>下载任务</span>
             <VBtn
@@ -539,13 +634,23 @@ onMounted(async () => {
               清空队列
             </VBtn>
           </VCardTitle>
-          <VCardText v-if="queueItems.length" class="queue-list">
-            <VAlert type="warning" variant="tonal">
-              当前“下载”仍是占位任务，只会记录你选择的 115 链接和 MoviePilot 分类。下一阶段再接真实 115 转存与 MP 整理入库。
+        <VCardText v-if="queueItems.length" class="queue-list">
+            <VAlert type="success" variant="tonal">
+              当前“下载”会真实调用 CD2，把盘链 115 链接提交到你配置的目录中。队列里会保留本次提交记录，便于继续跟进整理链路。
             </VAlert>
-            <article v-for="item in queueItems" :key="`${item.url}-${item.category_name}`" class="queue-card">
+            <div class="task-note">
+              新建任务后页面会自动滚动到这里；如果 CD2 成功检测到新目录，也会把新目录名称一起显示出来。
+            </div>
+            <article
+              v-for="item in queueItems"
+              :key="`${item.url}-${item.category_name}`"
+              class="queue-card"
+              :class="{ latest: latestQueueKey === `${item.url}-${item.category_name}` }"
+            >
               <div class="queue-name">{{ item.vod_name || item.title }}</div>
               <div class="queue-path">{{ queueSubtitle(item) }}</div>
+              <div v-if="item.target_path" class="queue-path">CD2 目录：{{ item.target_path }}</div>
+              <div v-if="item.created_path" class="queue-path">检测到新目录：{{ item.created_path }}</div>
               <div class="queue-meta">
                 <span>来源：{{ item.source || "未知" }}</span>
                 <span>创建时间：{{ item.queued_at }}</span>
@@ -557,7 +662,7 @@ onMounted(async () => {
           </VCardText>
           <VCardText v-else>
             <VAlert type="info" variant="tonal">
-              还没有下载任务。打开 115 资源弹层后点击“下载”，并选择一个 MoviePilot 分类即可创建任务。
+              还没有下载任务。打开 115 资源弹层后点击“下载”，并选择一个 MoviePilot 分类即可提交到 115。
             </VAlert>
           </VCardText>
         </VCard>
@@ -611,7 +716,7 @@ onMounted(async () => {
         <VCardTitle>创建 115 下载任务</VCardTitle>
         <VCardText class="dialog-list">
           <VAlert type="info" variant="tonal">
-            分类直接读取 MoviePilot 当前配置，后续真实接入整理链路时会以这里选中的分类作为落库目标。
+            分类直接读取 MoviePilot 当前配置；提交时会按“电影 / 剧集根目录 + 分类名称”计算 CD2 目标路径。
           </VAlert>
 
           <div class="download-summary">
@@ -643,12 +748,15 @@ onMounted(async () => {
           <div v-if="selectedCategoryLabel" class="selection-preview">
             当前任务将写入：{{ selectedCategoryLabel }}
           </div>
+          <div class="task-note">
+            点确认后会真实调用 CD2，把当前 115 分享链接提交到对应目录。
+          </div>
         </VCardText>
         <VCardActions class="px-6 pb-5">
           <VSpacer />
           <VBtn variant="text" @click="downloadDialog = false">取消</VBtn>
           <VBtn color="primary" variant="flat" :loading="queueLoading" @click="queue115">
-            创建任务
+            提交到 115
           </VBtn>
         </VCardActions>
       </VCard>
@@ -747,6 +855,10 @@ onMounted(async () => {
   backdrop-filter: blur(10px);
 }
 
+.detail-panel {
+  overflow: hidden;
+}
+
 .detail-stack {
   display: flex;
   flex-direction: column;
@@ -821,42 +933,57 @@ onMounted(async () => {
   font-weight: 700;
 }
 
-.detail-banner {
-  height: 160px;
-  background-size: cover;
-  background-position: center;
-  filter: saturate(1.08);
+.detail-content {
   position: relative;
+  overflow: hidden;
+  padding: 22px !important;
 }
 
-.detail-banner::after {
+.detail-deco {
+  position: absolute;
+  inset: 0 0 auto auto;
+  width: 46%;
+  min-width: 280px;
+  height: 220px;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.2;
+  filter: blur(2px) saturate(1.05);
+  border-bottom-left-radius: 28px;
+}
+
+.detail-deco::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(7, 18, 35, 0.12) 0%, rgba(7, 18, 35, 0.78) 100%);
-}
-
-.detail-content {
-  margin-top: -72px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.72) 58%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.98) 100%);
   position: relative;
-  z-index: 1;
 }
 
 .detail-header {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   gap: 22px;
   align-items: start;
+  position: relative;
+  z-index: 1;
+}
+
+.detail-poster-wrap {
+  display: flex;
+  justify-content: center;
 }
 
 .detail-poster {
   width: 100%;
-  max-width: 180px;
+  max-width: 200px;
   aspect-ratio: 2 / 3;
   object-fit: cover;
   border-radius: 20px;
-  border: 4px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 18px 50px rgba(16, 35, 61, 0.24);
+  border: 4px solid rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 40px rgba(16, 35, 61, 0.18);
   background: #dde6f6;
 }
 
@@ -868,10 +995,19 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.detail-eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--panlink-muted);
+  margin-bottom: 8px;
+}
+
 .detail-title {
   margin: 0;
   font-size: 32px;
   line-height: 1.12;
+  color: var(--panlink-ink);
 }
 
 .detail-link {
@@ -890,8 +1026,8 @@ onMounted(async () => {
 .detail-tag {
   padding: 7px 12px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(60, 86, 138, 0.1);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(60, 86, 138, 0.12);
   font-size: 12px;
 }
 
@@ -1004,6 +1140,20 @@ onMounted(async () => {
   border: 1px solid rgba(60, 86, 138, 0.12);
 }
 
+.queue-card.latest {
+  border-color: rgba(33, 100, 243, 0.42);
+  box-shadow: 0 0 0 3px rgba(33, 100, 243, 0.08);
+}
+
+.task-note {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(33, 100, 243, 0.08);
+  color: var(--panlink-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .queue-name {
   font-size: 16px;
 }
@@ -1060,12 +1210,19 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 
-  .detail-content {
-    margin-top: -48px;
-  }
-
   .detail-poster {
     max-width: 160px;
+  }
+
+  .detail-deco {
+    width: 100%;
+    min-width: 0;
+    height: 160px;
+    opacity: 0.14;
+  }
+
+  .detail-poster-wrap {
+    justify-content: flex-start;
   }
 }
 
