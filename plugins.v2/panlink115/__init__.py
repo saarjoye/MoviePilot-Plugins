@@ -9,13 +9,22 @@ from app.plugins import _PluginBase
 from .client import PinglianClient
 
 
+_PAGE_STATE: Dict[str, Any] = {
+    "last_keyword": "",
+    "search_results": [],
+    "current_links": {},
+    "queued_115": [],
+    "last_message": "尚未开始搜索。",
+}
+
+
 class Panlink115(_PluginBase):
     plugin_name = "盘链 115 搜索"
     plugin_desc = "手动搜索盘链影视资源，优先展示 115 链接，并预留加入 115 接口。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.1.0"
-    plugin_author = "Codex"
+    plugin_version = "0.1.1"
+    plugin_author = "wYw"
     author_url = "https://github.com/openai"
     plugin_config_prefix = "panlink115_"
     plugin_order = 66
@@ -42,11 +51,7 @@ class Panlink115(_PluginBase):
         self._timeout = self._to_int(config.get("timeout"), default=20, minimum=5)
         self._max_results = self._to_int(config.get("max_results"), default=10, minimum=1)
         self._only_show_115 = bool(config.get("only_show_115", True))
-        self._last_keyword = ""
-        self._search_results = []
-        self._current_links = {}
-        self._queued_115 = []
-        self._last_message = "尚未开始搜索。"
+        self._restore_page_state()
         self._client = self._build_client()
         logger.info("Panlink115 plugin initialized")
 
@@ -225,20 +230,24 @@ class Panlink115(_PluginBase):
         keyword = (keyword or "").strip()
         if not keyword:
             self._last_message = "请输入影视名称后再搜索。"
+            self._persist_page_state()
             return {"success": False, "message": self._last_message}
 
         try:
+            logger.info("Panlink115 search requested: %s", keyword)
             client = self._build_client()
             self._search_results = client.search(keyword=keyword, limit=self._max_results)
             self._last_keyword = keyword
             self._current_links = {}
             self._last_message = f"搜索完成：关键词“{keyword}”，命中 {len(self._search_results)} 条结果。"
+            self._persist_page_state()
             return {"success": True, "message": self._last_message, "results": self._search_results}
         except Exception as err:
             logger.error("Panlink115 search failed: %s", err)
             self._search_results = []
             self._current_links = {}
             self._last_message = f"搜索失败：{err}"
+            self._persist_page_state()
             return {"success": False, "message": self._last_message}
 
     def api_load_links(self, vod_id: str = "", keyword: str = "") -> Dict[str, Any]:
@@ -246,9 +255,11 @@ class Panlink115(_PluginBase):
         vod_id = str(vod_id or "").strip()
         if not keyword or not vod_id:
             self._last_message = "缺少资源详情参数，无法加载盘链链接。"
+            self._persist_page_state()
             return {"success": False, "message": self._last_message}
 
         try:
+            logger.info("Panlink115 load links requested: keyword=%s vod_id=%s", keyword, vod_id)
             client = self._build_client()
             links = client.search_pan_links(keyword=keyword, vod_id=vod_id)
             if self._only_show_115:
@@ -256,11 +267,13 @@ class Panlink115(_PluginBase):
             self._current_links = links
             total = sum(len(items) for items in links.values())
             self._last_message = f"资源加载完成：{keyword} 共展示 {total} 条资源。"
+            self._persist_page_state()
             return {"success": True, "message": self._last_message, "links": links}
         except Exception as err:
             logger.error("Panlink115 load links failed: %s", err)
             self._current_links = {}
             self._last_message = f"加载资源失败：{err}"
+            self._persist_page_state()
             return {"success": False, "message": self._last_message}
 
     def api_queue_115(self, title: str = "", url: str = "", password: str = "", source: str = "") -> Dict[str, Any]:
@@ -268,6 +281,7 @@ class Panlink115(_PluginBase):
         url = (url or "").strip()
         if not url:
             self._last_message = "缺少 115 链接，无法加入待转存队列。"
+            self._persist_page_state()
             return {"success": False, "message": self._last_message}
 
         item = {
@@ -282,11 +296,14 @@ class Panlink115(_PluginBase):
             self._queued_115.insert(0, item)
 
         self._last_message = f"已加入待转存队列：{title}。当前版本仍为占位接口。"
+        self._persist_page_state()
+        logger.info("Panlink115 queued 115 link: %s", title)
         return {"success": True, "message": self._last_message, "item": item}
 
     def api_clear_queue(self) -> Dict[str, Any]:
         self._queued_115 = []
         self._last_message = "已清空待转存队列。"
+        self._persist_page_state()
         return {"success": True, "message": self._last_message}
 
     def stop_service(self):
@@ -304,6 +321,20 @@ class Panlink115(_PluginBase):
         mode = "仅 115" if self._only_show_115 else "全部网盘"
         return f"{status}。当前显示模式：{mode}。{self._last_message}"
 
+    def _restore_page_state(self) -> None:
+        self._last_keyword = str(_PAGE_STATE.get("last_keyword") or "")
+        self._search_results = list(_PAGE_STATE.get("search_results") or [])
+        self._current_links = dict(_PAGE_STATE.get("current_links") or {})
+        self._queued_115 = list(_PAGE_STATE.get("queued_115") or [])
+        self._last_message = str(_PAGE_STATE.get("last_message") or "尚未开始搜索。")
+
+    def _persist_page_state(self) -> None:
+        _PAGE_STATE["last_keyword"] = self._last_keyword
+        _PAGE_STATE["search_results"] = self._search_results
+        _PAGE_STATE["current_links"] = self._current_links
+        _PAGE_STATE["queued_115"] = self._queued_115
+        _PAGE_STATE["last_message"] = self._last_message
+
     @staticmethod
     def _to_int(value: Any, default: int, minimum: int) -> int:
         try:
@@ -319,6 +350,14 @@ class Panlink115(_PluginBase):
             "content": [
                 {"component": "VCardTitle", "text": "盘链搜索"},
                 {"component": "VCardText", "text": "输入电影或电视剧名称后点击搜索，优先展示 115 资源。"},
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "text": "按钮说明：搜索盘链 = 按关键词查影视；加载资源 = 读取该影视的网盘资源；加入 115 = 先放入待转存队列。",
+                    },
+                },
                 {
                     "component": "VRow",
                     "content": [
@@ -342,7 +381,8 @@ class Panlink115(_PluginBase):
                             "content": [
                                 {
                                     "component": "VBtn",
-                                    "props": {"text": "搜索盘链", "color": "primary", "block": True},
+                                    "text": "搜索盘链",
+                                    "props": {"color": "primary", "block": True},
                                     "events": {
                                         "click": {
                                             "api": "plugin/Panlink115/search",
@@ -391,7 +431,8 @@ class Panlink115(_PluginBase):
                             "content": [
                                 {
                                     "component": "VBtn",
-                                    "props": {"text": "加载资源", "color": "primary", "variant": "flat"},
+                                    "text": "加载资源",
+                                    "props": {"color": "primary", "variant": "flat"},
                                     "events": {
                                         "click": {
                                             "api": "plugin/Panlink115/load_links",
@@ -431,14 +472,16 @@ class Panlink115(_PluginBase):
                 actions: List[Dict[str, Any]] = [
                     {
                         "component": "VBtn",
-                        "props": {"text": "打开链接", "href": entry.get("url"), "target": "_blank", "variant": "text"},
+                        "text": "打开链接",
+                        "props": {"href": entry.get("url"), "target": "_blank", "variant": "text"},
                     }
                 ]
                 if group_name == "115":
                     actions.append(
                         {
                             "component": "VBtn",
-                            "props": {"text": "加入 115", "color": "primary", "variant": "flat"},
+                            "text": "加入 115",
+                            "props": {"color": "primary", "variant": "flat"},
                             "events": {
                                 "click": {
                                     "api": "plugin/Panlink115/queue_115",
@@ -494,7 +537,8 @@ class Panlink115(_PluginBase):
                         "content": [
                             {
                                 "component": "VBtn",
-                                "props": {"text": "清空队列", "color": "warning", "variant": "text"},
+                                "text": "清空队列",
+                                "props": {"color": "warning", "variant": "text"},
                                 "events": {
                                     "click": {
                                         "api": "plugin/Panlink115/clear_queue",
