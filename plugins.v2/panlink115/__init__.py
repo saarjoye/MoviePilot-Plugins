@@ -23,7 +23,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，优先展示 115 链接，并预留加入 115 接口。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "wYw"
     author_url = "https://github.com/openai"
     plugin_config_prefix = "panlink115_"
@@ -368,7 +368,7 @@ class Panlink115(_PluginBase):
                                 {
                                     "component": "VTextField",
                                     "props": {
-                                        "model": "keyword_input",
+                                        "model": "keyword",
                                         "label": "影视名称",
                                         "placeholder": "例如：流浪地球、庆余年、狂飙",
                                     },
@@ -387,7 +387,7 @@ class Panlink115(_PluginBase):
                                         "click": {
                                             "api": "plugin/Panlink115/search",
                                             "method": "get",
-                                            "params": {"keyword": "{{keyword_input}}"},
+                                            "params": {"keyword": ""},
                                         }
                                     },
                                 }
