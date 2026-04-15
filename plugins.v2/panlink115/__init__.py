@@ -26,7 +26,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.4"
+    plugin_version = "0.4.5"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -582,6 +582,9 @@ class Panlink115(_PluginBase):
 
         mp_target = self._resolve_mp_target_directory(group, name)
         if mp_target:
+            mp_direct_path = self._resolve_direct_cd2_path(mp_target)
+            if mp_direct_path:
+                return mp_direct_path
             mp_mapped_path = self._resolve_cd2_path_from_mp_target(mp_target)
             if mp_mapped_path:
                 return mp_mapped_path
@@ -731,6 +734,20 @@ class Panlink115(_PluginBase):
         if not relative_path:
             return self._normalize_path(cd2_root)
         return self._join_cd2_path(cd2_root, relative_path)
+
+    def _resolve_direct_cd2_path(self, mp_target: Dict[str, Any]) -> str:
+        target_path = self._normalize_fs_path(mp_target.get("target_path"))
+        library_storage = str(mp_target.get("library_storage") or "").strip()
+        if not target_path.startswith("/"):
+            return ""
+
+        storage_name = library_storage.lower()
+        if "clouddrive" in storage_name or "cd2" in storage_name:
+            return self._normalize_path(target_path)
+
+        if target_path.startswith("/115open/"):
+            return self._normalize_path(target_path)
+        return ""
 
     def _restore_state(self) -> None:
         self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
