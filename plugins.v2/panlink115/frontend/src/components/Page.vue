@@ -355,7 +355,7 @@ onMounted(async () => {
           <div>
             <div class="hero-kicker">PANLIAN x MOVIEPILOT</div>
             <h1 class="hero-title">盘链搜索与 115 提交</h1>
-            <p class="hero-text">搜索盘链资源，查看 115 链接，并按你在 MoviePilot 中选择的分类提交到 CD2。</p>
+            <p class="hero-text">搜索盘链资源，查看 115 链接，并优先按 MoviePilot 的“存储 & 目录”映射结果提交到 CD2。</p>
           </div>
           <div class="hero-chips">
             <VChip :color="pluginState.enabled ? 'success' : 'warning'" size="small" variant="flat">
@@ -502,7 +502,7 @@ onMounted(async () => {
             <VBtn color="warning" variant="text" :disabled="!queueItems.length" :loading="queueLoading" @click="clearQueue">清空队列</VBtn>
           </VCardTitle>
           <VCardText v-if="queueItems.length" class="queue-list">
-            <VAlert type="success" variant="tonal">当前“下载”会真实调用 CD2，把盘链 115 链接提交到你配置的目录中。</VAlert>
+            <VAlert type="success" variant="tonal">当前“下载”会真实调用 CD2，并优先按 MoviePilot 的目录映射把盘链 115 链接提交到目标目录中。</VAlert>
             <article
               v-for="item in queueItems"
               :key="`${item.url}-${item.category_name}`"
@@ -558,7 +558,7 @@ onMounted(async () => {
         <VCardTitle>创建 115 下载任务</VCardTitle>
         <VCardText class="dialog-list">
           <VAlert type="info" variant="tonal">
-            分类直接读取 MoviePilot 当前配置；提交时不会内置任何固定目录规则，而是按你的插件映射配置计算 CD2 目标路径。
+            分类直接读取 MoviePilot 当前配置；提交时会先匹配 MoviePilot 的“存储 & 目录”，再按“CD2 MP目录映射”换算目标路径，最后才回退到分类映射和默认根目录。
           </VAlert>
 
           <div class="download-summary">

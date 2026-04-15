@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.helper.directory import DirectoryHelper
 from app.log import logger
 from app.plugins import _PluginBase
+from app.schemas.types import MediaType
 
 from .client import CloudDrive2Client, PinglianClient
 
@@ -24,7 +26,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.3"
+    plugin_version = "0.4.4"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -40,6 +42,7 @@ class Panlink115(_PluginBase):
     _cd2_url: str = ""
     _cd2_token: str = ""
     _cd2_default_root: str = ""
+    _cd2_directory_roots: Dict[str, str] = {}
     _cd2_category_roots: Dict[str, str] = {}
     _cd2_detect_delay: float = 1.2
     _client: Optional[PinglianClient] = None
@@ -62,6 +65,7 @@ class Panlink115(_PluginBase):
         self._cd2_url = str(config.get("cd2_url") or "").strip()
         self._cd2_token = str(config.get("cd2_token") or "").strip()
         self._cd2_default_root = self._normalize_path(config.get("cd2_default_root"))
+        self._cd2_directory_roots = self._parse_directory_roots(config.get("cd2_directory_roots"))
         self._cd2_category_roots = self._parse_category_roots(config.get("cd2_category_roots"))
         self._merge_legacy_category_roots(config)
         self._cd2_detect_delay = self._to_float(config.get("cd2_detect_delay"), default=1.2, minimum=0.2)
@@ -247,6 +251,27 @@ class Panlink115(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "cd2_directory_roots",
+                                            "label": "CD2 MP目录映射",
+                                            "rows": 5,
+                                            "autoGrow": True,
+                                            "placeholder": "每行一个映射，例如：\nlocal:D:/115挂载/媒体库=/115open/媒体库\nlocal:D:/115挂载/媒体库/电影=/115open/媒体库/电影",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cd2_token",
@@ -338,6 +363,7 @@ class Panlink115(_PluginBase):
             "cd2_url": "",
             "cd2_token": "",
             "cd2_default_root": "",
+            "cd2_directory_roots": "",
             "cd2_category_roots": "",
             "cd2_detect_delay": 1.2,
         }
@@ -554,6 +580,12 @@ class Panlink115(_PluginBase):
         if not group or not name:
             raise RuntimeError("缺少 MoviePilot 分类信息，无法计算 CD2 目录")
 
+        mp_target = self._resolve_mp_target_directory(group, name)
+        if mp_target:
+            mp_mapped_path = self._resolve_cd2_path_from_mp_target(mp_target)
+            if mp_mapped_path:
+                return mp_mapped_path
+
         exact_mapping = self._cd2_category_roots.get(self._category_key(group, name))
         if exact_mapping:
             return self._render_mapping_path(exact_mapping, group, name, mode="exact")
@@ -568,6 +600,14 @@ class Panlink115(_PluginBase):
 
         if self._cd2_default_root:
             return self._join_cd2_path(self._join_cd2_path(self._cd2_default_root, group), name)
+
+        if mp_target:
+            matched_storage = mp_target.get("library_storage") or "local"
+            matched_path = mp_target.get("target_path") or mp_target.get("library_path") or ""
+            raise RuntimeError(
+                f"已匹配到 MoviePilot 目录“{matched_storage}:{matched_path}”，但未找到对应的 CD2 目录。"
+                f"请优先配置“CD2 MP目录映射”，或改用“CD2 分类目录映射/默认根目录”回退。"
+            )
 
         raise RuntimeError(
             f"未找到分类“{group} / {name}”对应的 CD2 目录，请配置“CD2 分类目录映射”或填写“CD2 默认根目录”。"
@@ -596,6 +636,101 @@ class Panlink115(_PluginBase):
         for key, value in legacy_pairs.items():
             if value and key not in self._cd2_category_roots:
                 self._cd2_category_roots[key] = value
+
+    def _resolve_mp_target_directory(self, category_group: str, category_name: str) -> Optional[Dict[str, Any]]:
+        candidates: List[Tuple[int, int, Dict[str, Any]]] = []
+        for directory in sorted(DirectoryHelper().get_dirs(), key=lambda item: item.priority or 0):
+            library_path = self._normalize_fs_path(getattr(directory, "library_path", None))
+            if not library_path:
+                continue
+
+            score = self._score_mp_directory(directory, category_group, category_name)
+            if score <= 0:
+                continue
+
+            candidates.append(
+                (
+                    score,
+                    int(getattr(directory, "priority", 0) or 0),
+                    {
+                        "name": str(getattr(directory, "name", "") or "").strip(),
+                        "library_storage": str(getattr(directory, "library_storage", "") or "local").strip() or "local",
+                        "library_path": library_path,
+                        "target_path": self._build_mp_library_target_path(directory, category_group, category_name),
+                        "media_type": str(getattr(directory, "media_type", "") or "").strip(),
+                        "media_category": str(getattr(directory, "media_category", "") or "").strip(),
+                    },
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return candidates[0][2]
+
+    def _score_mp_directory(self, directory: Any, category_group: str, category_name: str) -> int:
+        media_type = str(getattr(directory, "media_type", "") or "").strip()
+        media_category = str(getattr(directory, "media_category", "") or "").strip()
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+
+        if media_type and media_type != group:
+            return 0
+        if media_category and media_category != name:
+            return 0
+        if media_type == group and media_category == name:
+            return 400
+        if media_type == group and not media_category:
+            return 300
+        if not media_type and media_category == name:
+            return 200
+        if not media_type and not media_category:
+            return 100
+        return 0
+
+    def _build_mp_library_target_path(self, directory: Any, category_group: str, category_name: str) -> str:
+        library_dir = self._normalize_fs_path(getattr(directory, "library_path", None))
+        if not library_dir:
+            return ""
+
+        media_type = str(getattr(directory, "media_type", "") or "").strip()
+        media_category = str(getattr(directory, "media_category", "") or "").strip()
+
+        if bool(getattr(directory, "library_type_folder", False)):
+            library_dir = self._join_fs_path(library_dir, media_type or category_group)
+        if bool(getattr(directory, "library_category_folder", False)):
+            library_dir = self._join_fs_path(library_dir, media_category or category_name)
+        return library_dir
+
+    def _resolve_cd2_path_from_mp_target(self, mp_target: Dict[str, Any]) -> str:
+        target_path = self._normalize_fs_path(mp_target.get("target_path"))
+        library_storage = str(mp_target.get("library_storage") or "local").strip() or "local"
+        best_match: Optional[Tuple[int, int, str, str]] = None
+
+        for raw_key, cd2_root in self._cd2_directory_roots.items():
+            mapping_storage, mapping_path = self._split_storage_path(raw_key)
+            if not mapping_path:
+                continue
+            if mapping_storage and mapping_storage != library_storage:
+                continue
+
+            relative_path = self._relative_fs_path(target_path, mapping_path)
+            if relative_path is None:
+                continue
+
+            score = len(mapping_path)
+            storage_score = 1 if mapping_storage else 0
+            if not best_match or (score, storage_score) > (best_match[0], best_match[1]):
+                best_match = (score, storage_score, cd2_root, relative_path)
+
+        if not best_match:
+            return ""
+
+        _, _, cd2_root, relative_path = best_match
+        if not relative_path:
+            return self._normalize_path(cd2_root)
+        return self._join_cd2_path(cd2_root, relative_path)
 
     def _restore_state(self) -> None:
         self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
@@ -653,6 +788,29 @@ class Panlink115(_PluginBase):
                 mapping[key] = root
         return mapping
 
+    @classmethod
+    def _parse_directory_roots(cls, value: Any) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = None
+            for separator in ("=", "＝"):
+                if separator in line:
+                    parts = line.split(separator, 1)
+                    break
+
+            if not parts:
+                continue
+
+            key = str(parts[0] or "").strip()
+            root = cls._normalize_path(parts[1])
+            if key and root:
+                mapping[key] = root
+        return mapping
+
     @staticmethod
     def _category_key(group: str, name: str) -> str:
         return f"{str(group or '').strip()}/{str(name or '').strip()}"
@@ -670,3 +828,58 @@ class Panlink115(_PluginBase):
         if not child:
             return base
         return f"{base}/{child}"
+
+    @staticmethod
+    def _normalize_fs_path(value: Any) -> str:
+        path = str(value or "").strip().replace("\\", "/")
+        if not path:
+            return ""
+        if path == "/":
+            return path
+        if len(path) == 3 and path[1] == ":" and path.endswith("/"):
+            return path
+        return path.rstrip("/")
+
+    @classmethod
+    def _join_fs_path(cls, base_root: str, child_name: str) -> str:
+        base = cls._normalize_fs_path(base_root)
+        child = str(child_name or "").strip().replace("\\", "/").strip("/")
+        if not base:
+            return child
+        if not child:
+            return base
+        if base == "/":
+            return f"/{child}"
+        return f"{base}/{child}"
+
+    @classmethod
+    def _split_storage_path(cls, value: str) -> Tuple[str, str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return "", ""
+        if len(raw) >= 3 and raw[1] == ":" and raw[2] in ("/", "\\"):
+            return "", cls._normalize_fs_path(raw)
+        if ":" in raw and not raw.startswith("/"):
+            storage, path = raw.split(":", 1)
+            return storage.strip(), cls._normalize_fs_path(path)
+        return "", cls._normalize_fs_path(raw)
+
+    @classmethod
+    def _relative_fs_path(cls, full_path: str, root_path: str) -> Optional[str]:
+        full_norm = cls._normalize_fs_path(full_path)
+        root_norm = cls._normalize_fs_path(root_path)
+        if not full_norm or not root_norm:
+            return None
+
+        full_cmp = full_norm.lower()
+        root_cmp = root_norm.lower()
+        if full_cmp == root_cmp:
+            return ""
+
+        prefix = f"{root_cmp}/" if root_norm != "/" else "/"
+        if not full_cmp.startswith(prefix):
+            return None
+
+        if root_norm == "/":
+            return full_norm[1:]
+        return full_norm[len(root_norm) + 1:]

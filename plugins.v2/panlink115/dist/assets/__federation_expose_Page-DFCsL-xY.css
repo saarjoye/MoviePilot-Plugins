@@ -7,91 +7,91 @@
   --panlink-muted: #62748c;
   --panlink-primary: #2164f3;
 }
-.page-shell[data-v-b39fb8ff] {
+.page-shell[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 18px;
   padding: 8px;
   color: var(--panlink-ink);
 }
-.hero-panel[data-v-b39fb8ff],
-.result-panel[data-v-b39fb8ff],
-.detail-panel[data-v-b39fb8ff],
-.resource-panel[data-v-b39fb8ff],
-.queue-panel[data-v-b39fb8ff] {
+.hero-panel[data-v-dc6e7afe],
+.result-panel[data-v-dc6e7afe],
+.detail-panel[data-v-dc6e7afe],
+.resource-panel[data-v-dc6e7afe],
+.queue-panel[data-v-dc6e7afe] {
   background: var(--panlink-card);
   border: 1px solid var(--panlink-border);
 }
-.hero-content[data-v-b39fb8ff] {
+.hero-content[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.hero-head[data-v-b39fb8ff] {
+.hero-head[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-.hero-kicker[data-v-b39fb8ff] {
+.hero-kicker[data-v-dc6e7afe] {
   font-size: 12px;
   letter-spacing: 0.24em;
   text-transform: uppercase;
   color: var(--panlink-muted);
 }
-.hero-title[data-v-b39fb8ff] {
+.hero-title[data-v-dc6e7afe] {
   margin: 6px 0 8px;
   font-size: 30px;
   line-height: 1.1;
 }
-.hero-text[data-v-b39fb8ff] {
+.hero-text[data-v-dc6e7afe] {
   margin: 0;
   color: var(--panlink-muted);
   line-height: 1.7;
 }
-.hero-chips[data-v-b39fb8ff],
-.hero-buttons[data-v-b39fb8ff],
-.detail-tags[data-v-b39fb8ff],
-.queue-meta[data-v-b39fb8ff],
-.dialog-actions[data-v-b39fb8ff] {
+.hero-chips[data-v-dc6e7afe],
+.hero-buttons[data-v-dc6e7afe],
+.detail-tags[data-v-dc6e7afe],
+.queue-meta[data-v-dc6e7afe],
+.dialog-actions[data-v-dc6e7afe] {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-.hero-actions[data-v-b39fb8ff] {
+.hero-actions[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-.content-grid[data-v-b39fb8ff] {
+.content-grid[data-v-dc6e7afe] {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }
-.detail-stack[data-v-b39fb8ff] {
+.detail-stack[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 18px;
 }
-.panel-title[data-v-b39fb8ff] {
+.panel-title[data-v-dc6e7afe] {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
-.panel-subtitle[data-v-b39fb8ff] {
+.panel-subtitle[data-v-dc6e7afe] {
   font-size: 12px;
   color: var(--panlink-muted);
 }
-.result-list[data-v-b39fb8ff],
-.queue-list[data-v-b39fb8ff],
-.dialog-list[data-v-b39fb8ff] {
+.result-list[data-v-dc6e7afe],
+.queue-list[data-v-dc6e7afe],
+.dialog-list[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-.result-card[data-v-b39fb8ff],
-.resource-card[data-v-b39fb8ff] {
+.result-card[data-v-dc6e7afe],
+.resource-card[data-v-dc6e7afe] {
   width: 100%;
   border: 1px solid var(--panlink-border);
   background: rgba(255, 255, 255, 0.95);
@@ -100,134 +100,134 @@
   text-align: left;
   cursor: pointer;
 }
-.result-card[data-v-b39fb8ff] {
+.result-card[data-v-dc6e7afe] {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
 }
-.result-card.active[data-v-b39fb8ff] {
+.result-card.active[data-v-dc6e7afe] {
   border-color: rgba(33, 100, 243, 0.4);
   box-shadow: 0 0 0 3px rgba(33, 100, 243, 0.1);
 }
-.result-thumb[data-v-b39fb8ff],
-.detail-poster[data-v-b39fb8ff] {
+.result-thumb[data-v-dc6e7afe],
+.detail-poster[data-v-dc6e7afe] {
   object-fit: cover;
   border-radius: 12px;
   background: #dbe5f4;
 }
-.result-thumb[data-v-b39fb8ff] {
+.result-thumb[data-v-dc6e7afe] {
   width: 64px;
   height: 92px;
 }
-.result-name[data-v-b39fb8ff],
-.queue-name[data-v-b39fb8ff],
-.dialog-entry-title[data-v-b39fb8ff],
-.resource-name[data-v-b39fb8ff] {
+.result-name[data-v-dc6e7afe],
+.queue-name[data-v-dc6e7afe],
+.dialog-entry-title[data-v-dc6e7afe],
+.resource-name[data-v-dc6e7afe] {
   font-weight: 700;
 }
-.result-subtitle[data-v-b39fb8ff],
-.resource-hint[data-v-b39fb8ff],
-.queue-path[data-v-b39fb8ff],
-.dialog-entry-subtitle[data-v-b39fb8ff],
-.dialog-entry-pass[data-v-b39fb8ff],
-.queue-url[data-v-b39fb8ff],
-.queue-pass[data-v-b39fb8ff] {
+.result-subtitle[data-v-dc6e7afe],
+.resource-hint[data-v-dc6e7afe],
+.queue-path[data-v-dc6e7afe],
+.dialog-entry-subtitle[data-v-dc6e7afe],
+.dialog-entry-pass[data-v-dc6e7afe],
+.queue-url[data-v-dc6e7afe],
+.queue-pass[data-v-dc6e7afe] {
   color: var(--panlink-muted);
   font-size: 13px;
   line-height: 1.5;
 }
-.result-tail[data-v-b39fb8ff] {
+.result-tail[data-v-dc6e7afe] {
   font-size: 13px;
   color: var(--panlink-primary);
 }
-.detail-header[data-v-b39fb8ff] {
+.detail-header[data-v-dc6e7afe] {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
   gap: 18px;
 }
-.detail-poster[data-v-b39fb8ff] {
+.detail-poster[data-v-dc6e7afe] {
   width: 100%;
   aspect-ratio: 2 / 3;
 }
-.detail-copy[data-v-b39fb8ff] {
+.detail-copy[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
-.detail-title-row[data-v-b39fb8ff] {
+.detail-title-row[data-v-dc6e7afe] {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
-.detail-eyebrow[data-v-b39fb8ff],
-.meta-label[data-v-b39fb8ff],
-.download-label[data-v-b39fb8ff] {
+.detail-eyebrow[data-v-dc6e7afe],
+.meta-label[data-v-dc6e7afe],
+.download-label[data-v-dc6e7afe] {
   font-size: 12px;
   color: var(--panlink-muted);
 }
-.detail-title[data-v-b39fb8ff] {
+.detail-title[data-v-dc6e7afe] {
   margin: 6px 0 0;
   font-size: 28px;
   line-height: 1.2;
 }
-.detail-link[data-v-b39fb8ff] {
+.detail-link[data-v-dc6e7afe] {
   color: var(--panlink-primary);
   text-decoration: none;
 }
-.detail-tag[data-v-b39fb8ff] {
+.detail-tag[data-v-dc6e7afe] {
   padding: 4px 10px;
   border-radius: 999px;
   background: rgba(33, 100, 243, 0.08);
   color: var(--panlink-primary);
   font-size: 12px;
 }
-.detail-meta-grid[data-v-b39fb8ff] {
+.detail-meta-grid[data-v-dc6e7afe] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
-.meta-item[data-v-b39fb8ff] {
+.meta-item[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.meta-item.full-width[data-v-b39fb8ff] {
+.meta-item.full-width[data-v-dc6e7afe] {
   grid-column: 1 / -1;
 }
-.plot-panel[data-v-b39fb8ff] {
+.plot-panel[data-v-dc6e7afe] {
   padding: 14px;
   border-radius: 14px;
   background: rgba(24, 49, 79, 0.04);
 }
-.plot-title[data-v-b39fb8ff] {
+.plot-title[data-v-dc6e7afe] {
   font-weight: 700;
   margin-bottom: 8px;
 }
-.plot-text[data-v-b39fb8ff] {
+.plot-text[data-v-dc6e7afe] {
   margin: 0;
   color: var(--panlink-muted);
   line-height: 1.7;
 }
-.resource-grid[data-v-b39fb8ff] {
+.resource-grid[data-v-dc6e7afe] {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
-.resource-card.primary[data-v-b39fb8ff] {
+.resource-card.primary[data-v-dc6e7afe] {
   border-color: rgba(33, 100, 243, 0.35);
 }
-.resource-count[data-v-b39fb8ff],
-.queue-status[data-v-b39fb8ff],
-.selection-preview[data-v-b39fb8ff] {
+.resource-count[data-v-dc6e7afe],
+.queue-status[data-v-dc6e7afe],
+.selection-preview[data-v-dc6e7afe] {
   font-size: 13px;
   font-weight: 600;
   color: var(--panlink-primary);
 }
-.queue-card[data-v-b39fb8ff],
-.dialog-entry[data-v-b39fb8ff],
-.download-summary[data-v-b39fb8ff] {
+.queue-card[data-v-dc6e7afe],
+.dialog-entry[data-v-dc6e7afe],
+.download-summary[data-v-dc6e7afe] {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -236,24 +236,24 @@
   border: 1px solid var(--panlink-border);
   background: rgba(255, 255, 255, 0.96);
 }
-.queue-card.latest[data-v-b39fb8ff] {
+.queue-card.latest[data-v-dc6e7afe] {
   border-color: rgba(33, 100, 243, 0.4);
   box-shadow: 0 0 0 3px rgba(33, 100, 243, 0.08);
 }
-.download-row[data-v-b39fb8ff] {
+.download-row[data-v-dc6e7afe] {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 @media (max-width: 960px) {
-.content-grid[data-v-b39fb8ff] {
+.content-grid[data-v-dc6e7afe] {
     grid-template-columns: 1fr;
 }
-.detail-header[data-v-b39fb8ff] {
+.detail-header[data-v-dc6e7afe] {
     grid-template-columns: 1fr;
 }
-.detail-poster[data-v-b39fb8ff] {
+.detail-poster[data-v-dc6e7afe] {
     max-width: 220px;
 }
 }

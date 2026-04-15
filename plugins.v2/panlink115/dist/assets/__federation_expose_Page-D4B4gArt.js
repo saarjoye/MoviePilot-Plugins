@@ -452,7 +452,7 @@ return (_ctx, _cache) => {
               _cache[7] || (_cache[7] = _createElementVNode("div", null, [
                 _createElementVNode("div", { class: "hero-kicker" }, "PANLIAN x MOVIEPILOT"),
                 _createElementVNode("h1", { class: "hero-title" }, "盘链搜索与 115 提交"),
-                _createElementVNode("p", { class: "hero-text" }, "搜索盘链资源，查看 115 链接，并按你在 MoviePilot 中选择的分类提交到 CD2。")
+                _createElementVNode("p", { class: "hero-text" }, "搜索盘链资源，查看 115 链接，并优先按 MoviePilot 的“存储 & 目录”映射结果提交到 CD2。")
               ], -1)),
               _createElementVNode("div", _hoisted_3, [
                 _createVNode(_component_VChip, {
@@ -790,7 +790,7 @@ return (_ctx, _cache) => {
                       variant: "tonal"
                     }, {
                       default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
-                        _createTextVNode("当前“下载”会真实调用 CD2，把盘链 115 链接提交到你配置的目录中。", -1)
+                        _createTextVNode("当前“下载”会真实调用 CD2，并优先按 MoviePilot 的目录映射把盘链 115 链接提交到目标目录中。", -1)
                       ]))]),
                       _: 1
                     }),
@@ -948,7 +948,7 @@ return (_ctx, _cache) => {
                   variant: "tonal"
                 }, {
                   default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
-                    _createTextVNode(" 分类直接读取 MoviePilot 当前配置；提交时不会内置任何固定目录规则，而是按你的插件映射配置计算 CD2 目标路径。 ", -1)
+                    _createTextVNode(" 分类直接读取 MoviePilot 当前配置；提交时会先匹配 MoviePilot 的“存储 & 目录”，再按“CD2 MP目录映射”换算目标路径，最后才回退到分类映射和默认根目录。 ", -1)
                   ]))]),
                   _: 1
                 }),
@@ -1016,6 +1016,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b39fb8ff"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-dc6e7afe"]]);
 
 export { Page as default };
