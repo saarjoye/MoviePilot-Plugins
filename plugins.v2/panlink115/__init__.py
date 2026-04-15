@@ -3,10 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.helper.directory import DirectoryHelper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import MediaType
 
 from .client import CloudDrive2Client, PinglianClient
 
@@ -26,7 +24,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.5"
+    plugin_version = "0.4.6"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -641,6 +639,12 @@ class Panlink115(_PluginBase):
                 self._cd2_category_roots[key] = value
 
     def _resolve_mp_target_directory(self, category_group: str, category_name: str) -> Optional[Dict[str, Any]]:
+        try:
+            from app.helper.directory import DirectoryHelper
+        except Exception as err:
+            logger.warning("Panlink115 failed to import DirectoryHelper, fallback to plugin mappings only: %s", err)
+            return None
+
         candidates: List[Tuple[int, int, Dict[str, Any]]] = []
         for directory in sorted(DirectoryHelper().get_dirs(), key=lambda item: item.priority or 0):
             library_path = self._normalize_fs_path(getattr(directory, "library_path", None))
