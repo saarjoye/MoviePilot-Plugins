@@ -343,7 +343,11 @@ class CloudDrive2Client:
         if not target:
             raise RuntimeError("缺少 CD2 目标目录")
 
-        before_paths = {item.get("full_path"): item for item in self.list_subfiles(target)}
+        before_paths: Dict[str, Dict[str, str]] = {}
+        try:
+            before_paths = {item.get("full_path"): item for item in self.list_subfiles(target)}
+        except Exception:
+            before_paths = {}
         payload = self._wrap_request(
             [
                 self._encode_string_field(1, link),
@@ -355,7 +359,10 @@ class CloudDrive2Client:
         created_item: Dict[str, str] = {}
         for _ in range(4):
             time.sleep(self.detect_delay)
-            after_items = self.list_subfiles(target)
+            try:
+                after_items = self.list_subfiles(target)
+            except Exception:
+                break
             new_items = [
                 item
                 for item in after_items
@@ -522,8 +529,24 @@ class CloudDrive2Client:
         if not text:
             return ""
         parts = [segment for segment in text.split("/") if segment]
+        parts = CloudDrive2Client._collapse_repeated_prefix(parts)
         normalized = "/" + "/".join(parts)
         return normalized or "/"
+
+    @staticmethod
+    def _collapse_repeated_prefix(parts: List[str]) -> List[str]:
+        items = list(parts or [])
+        while len(items) >= 2:
+            collapsed = False
+            max_prefix = len(items) // 2
+            for prefix_len in range(max_prefix, 0, -1):
+                if items[:prefix_len] == items[prefix_len:prefix_len * 2]:
+                    items = items[:prefix_len] + items[prefix_len * 2:]
+                    collapsed = True
+                    break
+            if not collapsed:
+                break
+        return items
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:
