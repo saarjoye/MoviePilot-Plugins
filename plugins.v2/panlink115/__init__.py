@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.config import settings
 from app.log import logger
 from app.plugins import _PluginBase
 
@@ -23,7 +24,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，优先展示 115 链接，并预留加入 115 接口。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "wYw"
     author_url = "https://github.com/openai"
     plugin_config_prefix = "panlink115_"
@@ -36,6 +37,7 @@ class Panlink115(_PluginBase):
     _timeout: int = 20
     _max_results: int = 10
     _only_show_115: bool = True
+    _api_token: str = ""
     _client: Optional[PinglianClient] = None
     _last_keyword: str = ""
     _search_results: List[Dict[str, Any]] = []
@@ -51,6 +53,7 @@ class Panlink115(_PluginBase):
         self._timeout = self._to_int(config.get("timeout"), default=20, minimum=5)
         self._max_results = self._to_int(config.get("max_results"), default=10, minimum=1)
         self._only_show_115 = bool(config.get("only_show_115", True))
+        self._api_token = str(getattr(settings, "API_TOKEN", "") or "").strip()
         self._restore_page_state()
         self._client = self._build_client()
         logger.info("Panlink115 plugin initialized")
@@ -319,7 +322,8 @@ class Panlink115(_PluginBase):
     def _build_status_text(self) -> str:
         status = "已启用" if self._enabled else "未启用"
         mode = "仅 115" if self._only_show_115 else "全部网盘"
-        return f"{status}。当前显示模式：{mode}。{self._last_message}"
+        token_state = "已注入 API_TOKEN" if self._api_token else "缺少 API_TOKEN"
+        return f"{status}。当前显示模式：{mode}。{token_state}。{self._last_message}"
 
     def _restore_page_state(self) -> None:
         self._last_keyword = str(_PAGE_STATE.get("last_keyword") or "")
@@ -355,7 +359,7 @@ class Panlink115(_PluginBase):
                     "props": {
                         "type": "info",
                         "variant": "tonal",
-                        "text": "按钮说明：搜索盘链 = 按关键词查影视；加载资源 = 读取该影视的网盘资源；加入 115 = 先放入待转存队列。",
+                        "text": "按钮说明：搜索盘链 = 按关键词查影视；加载资源 = 读取该影视的网盘资源；加入 115 = 先放入待转存队列。当前版本会自动携带 MP 的 API_TOKEN 调插件接口。",
                     },
                 },
                 {
@@ -387,7 +391,10 @@ class Panlink115(_PluginBase):
                                         "click": {
                                             "api": "plugin/Panlink115/search",
                                             "method": "get",
-                                            "params": {"keyword": ""},
+                                            "params": {
+                                                "keyword": "{{keyword}}",
+                                                "apikey": self._api_token,
+                                            },
                                         }
                                     },
                                 }
@@ -437,7 +444,11 @@ class Panlink115(_PluginBase):
                                         "click": {
                                             "api": "plugin/Panlink115/load_links",
                                             "method": "get",
-                                            "params": {"vod_id": item.get("vod_id"), "keyword": item.get("vod_name")},
+                                            "params": {
+                                                "vod_id": item.get("vod_id"),
+                                                "keyword": item.get("vod_name"),
+                                                "apikey": self._api_token,
+                                            },
                                         }
                                     },
                                 }
@@ -491,6 +502,7 @@ class Panlink115(_PluginBase):
                                         "url": entry.get("url"),
                                         "password": entry.get("password"),
                                         "source": entry.get("source"),
+                                        "apikey": self._api_token,
                                     },
                                 }
                             },
@@ -543,7 +555,7 @@ class Panlink115(_PluginBase):
                                     "click": {
                                         "api": "plugin/Panlink115/clear_queue",
                                         "method": "get",
-                                        "params": {},
+                                        "params": {"apikey": self._api_token},
                                     }
                                 },
                             }
