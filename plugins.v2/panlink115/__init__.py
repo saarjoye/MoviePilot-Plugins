@@ -21,10 +21,10 @@ _PLUGIN_STATE: Dict[str, Any] = {
 
 class Panlink115(_PluginBase):
     plugin_name = "盘链 115 搜索"
-    plugin_desc = "手动搜索盘链影视资源，按详情页展示 115 网盘资源，并预留下载到 115 的接口。"
+    plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.3"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -39,8 +39,6 @@ class Panlink115(_PluginBase):
     _only_show_115: bool = True
     _cd2_url: str = ""
     _cd2_token: str = ""
-    _cd2_movie_root: str = ""
-    _cd2_tv_root: str = ""
     _cd2_default_root: str = ""
     _cd2_category_roots: Dict[str, str] = {}
     _cd2_detect_delay: float = 1.2
@@ -63,10 +61,9 @@ class Panlink115(_PluginBase):
         self._only_show_115 = bool(config.get("only_show_115", True))
         self._cd2_url = str(config.get("cd2_url") or "").strip()
         self._cd2_token = str(config.get("cd2_token") or "").strip()
-        self._cd2_movie_root = self._normalize_path(config.get("cd2_movie_root"))
-        self._cd2_tv_root = self._normalize_path(config.get("cd2_tv_root"))
         self._cd2_default_root = self._normalize_path(config.get("cd2_default_root"))
         self._cd2_category_roots = self._parse_category_roots(config.get("cd2_category_roots"))
+        self._merge_legacy_category_roots(config)
         self._cd2_detect_delay = self._to_float(config.get("cd2_detect_delay"), default=1.2, minimum=0.2)
         self._restore_state()
         self._client = self._build_client()
@@ -111,274 +108,20 @@ class Panlink115(_PluginBase):
                 "path": "/queue_115",
                 "endpoint": self.api_queue_115,
                 "methods": ["GET"],
-                "summary": "加入 115 下载任务队列",
+                "summary": "提交到 115/CD2",
                 "auth": "bear",
             },
             {
                 "path": "/clear_queue",
                 "endpoint": self.api_clear_queue,
                 "methods": ["GET"],
-                "summary": "清空下载任务队列",
+                "summary": "清空任务队列",
                 "auth": "bear",
             },
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
         return []
-
-    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "enabled", "label": "启用插件"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "only_show_115", "label": "仅展示 115 资源"},
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "username",
-                                            "label": "盘链账号",
-                                            "placeholder": "填写盘链用户名",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "password",
-                                            "label": "盘链密码",
-                                            "type": "password",
-                                            "placeholder": "填写盘链密码",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "timeout",
-                                            "label": "请求超时秒数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "max_results",
-                                            "label": "搜索结果数量",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_url",
-                                            "label": "CD2 地址",
-                                            "placeholder": "例如：https://cd2.example.com:5555",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_default_root",
-                                            "label": "CD2 默认分类根目录",
-                                            "placeholder": "例如：/115open/媒体库",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "cd2_category_roots",
-                                            "label": "按顶层分类映射 CD2 根目录",
-                                            "rows": 4,
-                                            "autoGrow": True,
-                                            "placeholder": "每行一个映射，例如：\n电影=/115open/媒体库/电影\n电视剧=/115open/媒体库/剧集\n综艺=/115open/媒体库/综艺",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_token",
-                                            "label": "CD2 API Token",
-                                            "type": "password",
-                                            "placeholder": "填写 CD2 的 API Token",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_movie_root",
-                                            "label": "CD2 电影根目录",
-                                            "placeholder": "例如：/115open/媒体库/电影",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_tv_root",
-                                            "label": "CD2 剧集根目录",
-                                            "placeholder": "例如：/115open/媒体库/电视剧",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_detect_delay",
-                                            "label": "CD2 检测等待秒数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": "当前版本已接入 CD2 真动作：会把盘链 115 分享链接提交到你配置的 CD2 目录中。目录由 MoviePilot 分类名和上面的 CD2 电影/剧集根目录共同决定；MP 自动整理与重命名链路仍作为下一阶段增强。",
-                        },
-                    },
-                ],
-            }
-        ], {
-            "enabled": False,
-            "username": "",
-            "password": "",
-            "timeout": 20,
-            "max_results": 10,
-            "only_show_115": True,
-            "cd2_url": "",
-            "cd2_token": "",
-            "cd2_movie_root": "",
-            "cd2_tv_root": "",
-            "cd2_default_root": "",
-            "cd2_category_roots": "",
-            "cd2_detect_delay": 1.2,
-        }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -521,46 +264,13 @@ class Panlink115(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_movie_root",
-                                            "label": "CD2 电影根目录",
-                                            "placeholder": "例如：/115open/媒体库/电影",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_tv_root",
-                                            "label": "CD2 剧集根目录",
-                                            "placeholder": "例如：/115open/媒体库/剧集",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cd2_default_root",
-                                            "label": "CD2 默认分类根目录",
+                                            "label": "CD2 默认根目录",
                                             "placeholder": "例如：/115open/媒体库",
                                         },
                                     }
@@ -579,10 +289,10 @@ class Panlink115(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "cd2_category_roots",
-                                            "label": "按顶层分类映射 CD2 根目录",
-                                            "rows": 4,
+                                            "label": "CD2 分类目录映射",
+                                            "rows": 5,
                                             "autoGrow": True,
-                                            "placeholder": "每行一个映射，例如：\n电影=/115open/媒体库/电影\n电视剧=/115open/媒体库/剧集\n综艺=/115open/媒体库/综艺",
+                                            "placeholder": "每行一个映射，例如：\n综艺节目=/115open/媒体库/综艺节目\n电视剧/国产剧=/115open/媒体库/剧集/国产剧\n*=/115open/媒体库",
                                         },
                                     }
                                 ],
@@ -613,7 +323,7 @@ class Panlink115(_PluginBase):
                         "props": {
                             "type": "info",
                             "variant": "tonal",
-                            "text": "当前版本会把盘链 115 分享链接直接提交到 CD2。目录解析顺序为：1）按顶层分类映射；2）电影/剧集兼容根目录；3）默认分类根目录 + 顶层分类 + 子分类。这样除了电影和剧集外，其他与它们同级的 MoviePilot 分类也能正常落盘。",
+                            "text": "插件不会再内置任何电影、剧集或综艺目录假设。目录解析顺序为：1）精确分类映射（顶层/子分类）；2）顶层分类映射；3）通配映射 *；4）默认根目录/顶层分类/子分类。",
                         },
                     },
                 ],
@@ -627,8 +337,6 @@ class Panlink115(_PluginBase):
             "only_show_115": True,
             "cd2_url": "",
             "cd2_token": "",
-            "cd2_movie_root": "",
-            "cd2_tv_root": "",
             "cd2_default_root": "",
             "cd2_category_roots": "",
             "cd2_detect_delay": 1.2,
@@ -696,7 +404,7 @@ class Panlink115(_PluginBase):
         keyword = (keyword or "").strip()
         vod_id = str(vod_id or "").strip()
         if not keyword or not vod_id:
-            self._last_message = "缺少资源详情参数，无法加载盘链接。"
+            self._last_message = "缺少资源详情参数，无法加载盘链链接。"
             self._persist_state()
             return {"success": False, "message": self._last_message, "detail": {}, "links": {}}
 
@@ -754,6 +462,7 @@ class Panlink115(_PluginBase):
             self._last_message = "请选择当前 MoviePilot 已配置的分类后再创建下载任务。"
             self._persist_state()
             return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
         try:
             share_url = CloudDrive2Client.append_share_password(raw_url, password)
             target_path = self._resolve_cd2_target_path(category_group, category_name)
@@ -781,7 +490,7 @@ class Panlink115(_PluginBase):
             "status": "已提交到 115",
         }
         if item["created_path"]:
-            item["status"] = "已提交到 115，已检测到新目录"
+            item["status"] = "已提交到 115，并检测到新目录"
 
         if not any(
             existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
@@ -791,7 +500,8 @@ class Panlink115(_PluginBase):
 
         if item["created_path"]:
             self._last_message = (
-                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 {item['created_name'] or item['created_path']}。"
+                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
+                f"{item['created_name'] or item['created_path']}。"
             )
         else:
             self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
@@ -844,42 +554,48 @@ class Panlink115(_PluginBase):
         if not group or not name:
             raise RuntimeError("缺少 MoviePilot 分类信息，无法计算 CD2 目录")
 
-        if group == "电影":
-            base_root = self._cd2_movie_root
-            missing_hint = "请先在插件配置中填写 CD2 电影根目录"
-        elif group == "电视剧":
-            base_root = self._cd2_tv_root
-            missing_hint = "请先在插件配置中填写 CD2 剧集根目录"
-        else:
-            raise RuntimeError(f"暂不支持的 MoviePilot 分类分组：{group}")
+        exact_mapping = self._cd2_category_roots.get(self._category_key(group, name))
+        if exact_mapping:
+            return self._render_mapping_path(exact_mapping, group, name, mode="exact")
 
-        if not base_root:
-            raise RuntimeError(missing_hint)
-        return self._join_cd2_path(base_root, name)
+        group_mapping = self._cd2_category_roots.get(group)
+        if group_mapping:
+            return self._render_mapping_path(group_mapping, group, name, mode="group")
 
-    def _resolve_cd2_target_path(self, category_group: str, category_name: str) -> str:
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-        if not group or not name:
-            raise RuntimeError("缺少 MoviePilot 分类信息，无法计算 CD2 目录")
-
-        explicit_root = self._cd2_category_roots.get(group)
-        if explicit_root:
-            return self._join_cd2_path(explicit_root, name)
-
-        if self._is_movie_group(group) and self._cd2_movie_root:
-            return self._join_cd2_path(self._cd2_movie_root, name)
-
-        if self._is_tv_group(group) and self._cd2_tv_root:
-            return self._join_cd2_path(self._cd2_tv_root, name)
+        wildcard_mapping = self._cd2_category_roots.get("*")
+        if wildcard_mapping:
+            return self._render_mapping_path(wildcard_mapping, group, name, mode="wildcard")
 
         if self._cd2_default_root:
             return self._join_cd2_path(self._join_cd2_path(self._cd2_default_root, group), name)
 
         raise RuntimeError(
-            f"未找到顶层分类“{group}”对应的 CD2 根目录，请配置“按顶层分类映射 CD2 根目录”，"
-            "或填写默认分类根目录。"
+            f"未找到分类“{group} / {name}”对应的 CD2 目录，请配置“CD2 分类目录映射”或填写“CD2 默认根目录”。"
         )
+
+    def _render_mapping_path(self, mapping_value: str, group: str, name: str, mode: str) -> str:
+        template = self._normalize_path(mapping_value)
+        if not template:
+            raise RuntimeError("CD2 分类目录映射中存在空路径，请检查插件配置。")
+
+        if "{group}" in template or "{name}" in template:
+            rendered = template.replace("{group}", group).replace("{name}", name)
+            return self._normalize_path(rendered)
+
+        if mode == "exact":
+            return template
+        if mode == "group":
+            return self._join_cd2_path(template, name)
+        return self._join_cd2_path(self._join_cd2_path(template, group), name)
+
+    def _merge_legacy_category_roots(self, config: Dict[str, Any]) -> None:
+        legacy_pairs = {
+            "电影": self._normalize_path(config.get("cd2_movie_root")),
+            "电视剧": self._normalize_path(config.get("cd2_tv_root")),
+        }
+        for key, value in legacy_pairs.items():
+            if value and key not in self._cd2_category_roots:
+                self._cd2_category_roots[key] = value
 
     def _restore_state(self) -> None:
         self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
@@ -931,21 +647,15 @@ class Panlink115(_PluginBase):
             if not parts:
                 continue
 
-            group = str(parts[0] or "").strip()
+            key = str(parts[0] or "").strip()
             root = cls._normalize_path(parts[1])
-            if group and root:
-                mapping[group] = root
+            if key and root:
+                mapping[key] = root
         return mapping
 
     @staticmethod
-    def _is_movie_group(group: str) -> bool:
-        normalized = str(group or "").strip()
-        return normalized in {"电影", "電影"}
-
-    @staticmethod
-    def _is_tv_group(group: str) -> bool:
-        normalized = str(group or "").strip()
-        return normalized in {"电视剧", "剧集", "劇集", "连续剧", "電視劇"}
+    def _category_key(group: str, name: str) -> str:
+        return f"{str(group or '').strip()}/{str(name or '').strip()}"
 
     @staticmethod
     def _normalize_path(value: Any) -> str:
