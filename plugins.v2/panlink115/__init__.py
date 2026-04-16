@@ -24,10 +24,10 @@ _TASK_QUEUE_DATA_KEY = "task_queue_v2"
 
 class Panlink115(_PluginBase):
     plugin_name = "盘链 115 搜索"
-    plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
+    plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持提交到 CD2 / 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.12"
+    plugin_version = "0.4.13"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -100,339 +100,19 @@ class Panlink115(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
-            {
-                "path": "/state",
-                "endpoint": self.api_state,
-                "methods": ["GET"],
-                "summary": "读取插件状态",
-                "auth": "bear",
-            },
-            {
-                "path": "/search",
-                "endpoint": self.api_search,
-                "methods": ["GET"],
-                "summary": "盘链搜索",
-                "auth": "bear",
-            },
-            {
-                "path": "/load_links",
-                "endpoint": self.api_load_links,
-                "methods": ["GET"],
-                "summary": "加载资源详情与链接",
-                "auth": "bear",
-            },
-            {
-                "path": "/queue_115",
-                "endpoint": self.api_queue_115,
-                "methods": ["GET"],
-                "summary": "提交到 115/CD2",
-                "auth": "bear",
-            },
-            {
-                "path": "/clear_queue",
-                "endpoint": self.api_clear_queue,
-                "methods": ["GET"],
-                "summary": "清空任务队列",
-                "auth": "bear",
-            },
+            {"path": "/state", "endpoint": self.api_state, "methods": ["GET"], "summary": "读取插件状态", "auth": "bear"},
+            {"path": "/search", "endpoint": self.api_search, "methods": ["GET"], "summary": "盘链搜索", "auth": "bear"},
+            {"path": "/load_links", "endpoint": self.api_load_links, "methods": ["GET"], "summary": "加载资源详情与分享链接", "auth": "bear"},
+            {"path": "/queue_115", "endpoint": self.api_queue_115, "methods": ["GET"], "summary": "提交到 115 / CD2", "auth": "bear"},
+            {"path": "/diagnose_cd2", "endpoint": self.api_diagnose_cd2, "methods": ["GET"], "summary": "诊断当前 CD2 目录", "auth": "bear"},
+            {"path": "/clear_queue", "endpoint": self.api_clear_queue, "methods": ["GET"], "summary": "清空任务队列", "auth": "bear"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "enabled", "label": "启用插件"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "only_show_115", "label": "仅显示 115 资源"},
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "username",
-                                            "label": "盘链账号",
-                                            "placeholder": "填写盘链用户名",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "password",
-                                            "label": "盘链密码",
-                                            "type": "password",
-                                            "placeholder": "填写盘链密码",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "timeout",
-                                            "label": "请求超时秒数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "max_results",
-                                            "label": "搜索结果数量",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "cd2_auth_mode",
-                                            "label": "CD2 鉴权模式",
-                                            "items": [
-                                                {"title": "API Token", "value": "api_token"},
-                                                {"title": "网页登录 Token", "value": "web_token"},
-                                            ],
-                                            "itemTitle": "title",
-                                            "itemValue": "value",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_web_token",
-                                            "label": "CD2 网页登录 Token",
-                                            "type": "password",
-                                            "placeholder": "填写浏览器 localStorage.token",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_url",
-                                            "label": "CD2 地址",
-                                            "placeholder": "例如：https://cd2.example.com:5555",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_pending_root",
-                                            "label": "115 待整理目录",
-                                            "placeholder": "例如：/115open/待整理/Panlink115",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "cd2_directory_roots",
-                                            "label": "CD2 MP目录映射",
-                                            "rows": 5,
-                                            "autoGrow": True,
-                                            "placeholder": "每行一个映射，例如：\nlocal:D:/115挂载/媒体库=/115open/媒体库\nlocal:D:/115挂载/媒体库/电影=/115open/媒体库/电影",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_token",
-                                            "label": "CD2 API Token",
-                                            "type": "password",
-                                            "placeholder": "填写 CD2 的 API Token",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_default_root",
-                                            "label": "CD2 默认根目录",
-                                            "placeholder": "例如：/115open/媒体库",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "cd2_category_roots",
-                                            "label": "CD2 分类目录映射",
-                                            "rows": 5,
-                                            "autoGrow": True,
-                                            "placeholder": "每行一个映射，例如：\n综艺节目=/115open/媒体库/综艺节目\n电视剧/国产剧=/115open/媒体库/剧集/国产剧\n*=/115open/媒体库",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cd2_detect_delay",
-                                            "label": "CD2 检测等待秒数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": "插件不会再内置任何电影、剧集或综艺目录假设。目录解析顺序为：1）精确分类映射（顶层/子分类）；2）顶层分类映射；3）通配映射 *；4）默认根目录/顶层分类/子分类。",
-                        },
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "warning",
-                            "variant": "tonal",
-                            "text": "配置“115 待整理目录”后，插件会先把资源提交到该目录；页面里选择的 MoviePilot 分类只作为后续整理入库意图，不再直接作为下载落点。",
-                        },
-                    },
-                ],
-            }
-        ], {
+        return ([{"component": "VForm", "content": []}], {
             "enabled": False,
             "username": "",
             "password": "",
@@ -448,195 +128,191 @@ class Panlink115(_PluginBase):
             "cd2_directory_roots": "",
             "cd2_category_roots": "",
             "cd2_detect_delay": 1.2,
-        }
-
-    def get_page(self) -> List[dict]:
-        return [
-            {
-                "component": "VAlert",
-                "props": {
-                    "type": "info",
-                    "variant": "tonal",
-                    "text": "当前插件详情页使用 Vue 远程组件渲染。如果看到此提示，说明 MoviePilot 前端版本较旧或前端构建文件未完整安装。",
-                },
-            }
-        ]
+        })
 
     def api_state(self) -> Dict[str, Any]:
+        auth_info = self._get_cd2_auth_info()
         return {
             "success": True,
             "message": self._last_message,
-            "queue": list(self._queued_115),
-            "enabled": self._enabled,
-            "only_show_115": self._only_show_115,
-            "max_results": self._max_results,
-            "cd2_configured": bool(self._cd2_url and self._cd2_token),
             "keyword": self._last_keyword,
             "results": list(self._search_results),
             "selected_media": dict(self._selected_media or {}),
             "link_groups": dict(self._link_groups),
+            "queue": list(self._queued_115),
+            "diagnosis": dict(self._last_diagnosis or {}),
+            "enabled": self._enabled,
+            "only_show_115": self._only_show_115,
+            "max_results": self._max_results,
+            "cd2_configured": bool(self._cd2_url and auth_info.get("configured")),
+            "cd2_auth_mode": auth_info.get("mode"),
+            "cd2_auth_label": auth_info.get("label"),
+            "cd2_has_api_token": auth_info.get("has_api_token"),
+            "cd2_has_web_token": auth_info.get("has_web_token"),
+            "workflow_mode": self._get_workflow_mode(),
+            "workflow_label": self._get_workflow_label(),
+            "cd2_pending_root": self._cd2_pending_root,
+            "cd2_pending_root_configured": bool(self._cd2_pending_root),
         }
 
     def api_search(self, keyword: str = "") -> Dict[str, Any]:
         keyword = (keyword or "").strip()
+        logger.info("Panlink115 search requested: %s", keyword)
         if not keyword:
-            self._last_message = "请输入影视名称后再搜索。"
+            self._last_message = "请输入关键词后再搜索。"
             self._persist_state()
-            return {"success": False, "message": self._last_message, "results": []}
-
+            return self.api_state()
         try:
-            logger.info("Panlink115 search requested: %s", keyword)
-            client = self._build_client()
-            results = client.search(keyword=keyword, limit=self._max_results)
-            self._last_keyword = keyword
-            self._search_results = results
-            self._selected_media = results[0] if results else None
-            self._link_groups = {}
-            self._last_message = f"搜索完成：关键词“{keyword}”，命中 {len(results)} 条结果。"
-            self._persist_state()
-            return {
-                "success": True,
-                "message": self._last_message,
-                "keyword": self._last_keyword,
-                "results": results,
-                "selected_media": dict(self._selected_media or {}),
-                "link_groups": {},
-            }
+            results = self._build_client().search(keyword=keyword, limit=self._max_results)
         except Exception as err:
-            logger.error("Panlink115 search failed: %s", err)
+            self._search_results = []
+            self._selected_media = None
+            self._link_groups = {}
+            self._last_keyword = keyword
             self._last_message = f"搜索失败：{err}"
             self._persist_state()
-            return {"success": False, "message": self._last_message, "results": []}
+            return self.api_state()
+        self._last_keyword = keyword
+        self._search_results = results
+        self._selected_media = dict(results[0]) if results else None
+        self._link_groups = {}
+        self._last_message = f"搜索完成，共 {len(results)} 条候选结果。"
+        self._persist_state()
+        return self.api_state()
 
-    def api_load_links(self, vod_id: str = "", keyword: str = "") -> Dict[str, Any]:
+    def api_load_links(self, keyword: str = "", vod_id: str = "") -> Dict[str, Any]:
         keyword = (keyword or "").strip()
         vod_id = str(vod_id or "").strip()
-        if not keyword or not vod_id:
-            self._last_message = "缺少资源详情参数，无法加载盘链链接。"
+        logger.info("Panlink115 load links requested: keyword=%s vod_id=%s", keyword, vod_id)
+        if not vod_id:
+            self._last_message = "缺少 vod_id，无法加载资源详情。"
             self._persist_state()
-            return {"success": False, "message": self._last_message, "detail": {}, "links": {}}
-
+            return {"success": False, "message": self._last_message}
+        fallback = next((item for item in self._search_results if str(item.get("vod_id")) == vod_id), None)
         try:
-            logger.info("Panlink115 load links requested: keyword=%s vod_id=%s", keyword, vod_id)
             client = self._build_client()
-            basic_item = next(
-                (item for item in self._search_results if str(item.get("vod_id")) == vod_id),
-                {"vod_id": vod_id, "vod_name": keyword},
-            )
-            detail = client.get_video_detail(vod_id=vod_id, fallback=basic_item)
-            links = client.search_pan_links(keyword=keyword, vod_id=vod_id)
+            detail = client.get_video_detail(vod_id=vod_id, fallback=fallback)
+            search_keyword = keyword or detail.get("vod_name") or (fallback or {}).get("vod_name") or ""
+            links = client.search_pan_links(keyword=search_keyword, vod_id=vod_id)
             if self._only_show_115:
-                links = {"115": links.get("115", [])} if links.get("115") else {}
-
-            total = sum(len(items) for items in links.values())
-            self._selected_media = detail
-            self._link_groups = links
-            self._last_message = f"资源加载完成：{detail.get('vod_name') or keyword} 共展示 {total} 条资源。"
-            self._persist_state()
-            return {
-                "success": True,
-                "message": self._last_message,
-                "detail": detail,
-                "links": links,
-            }
+                links = {"115": list(links.get("115") or [])} if links.get("115") else {}
         except Exception as err:
-            logger.error("Panlink115 load links failed: %s", err)
+            self._selected_media = dict(fallback or {}) if fallback else None
+            self._link_groups = {}
             self._last_message = f"加载资源失败：{err}"
             self._persist_state()
-            return {"success": False, "message": self._last_message, "detail": {}, "links": {}}
+            return {"success": False, "message": self._last_message}
+        self._selected_media = detail
+        self._link_groups = links
+        self._last_message = f"资源加载完成，共 {sum(len(v) for v in links.values())} 条分享链接。"
+        self._persist_state()
+        return {"success": True, "message": self._last_message, "detail": detail, "links": links}
 
-    def api_queue_115(
-        self,
-        title: str = "",
-        url: str = "",
-        password: str = "",
-        source: str = "",
-        vod_id: str = "",
-        vod_name: str = "",
-        type_name: str = "",
-        category_group: str = "",
-        category_name: str = "",
-    ) -> Dict[str, Any]:
+    def api_diagnose_cd2(self, category_group: str = "", category_name: str = "") -> Dict[str, Any]:
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        if not group or not name:
+            self._last_message = "请先选择 MoviePilot 分类，再执行 CD2 诊断。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message}
+        try:
+            submit_path = self._resolve_cd2_submit_path(group, name)
+            organize_path = self._resolve_cd2_target_path(group, name)
+            client = self._build_cd2_client()
+            logger.info("Panlink115 CD2 diagnose requested: %s / %s -> %s", group, name, submit_path)
+            diagnosis = client.diagnose_target(submit_path, has_alternate_auth=self._has_alternate_cd2_auth())
+            diagnosis.update({
+                "category_group": group,
+                "category_name": name,
+                "organize_path": organize_path,
+                "workflow_mode": self._get_workflow_mode(),
+                "workflow_label": self._get_workflow_label(),
+            })
+            self._last_diagnosis = diagnosis
+            self._last_message = diagnosis.get("message") or "CD2 诊断完成。"
+            self._persist_state()
+            return {"success": True, "message": self._last_message, "diagnosis": diagnosis}
+        except Exception as err:
+            self._last_diagnosis = {"status": "error", "category_group": group, "category_name": name, "message": str(err)}
+            self._last_message = f"CD2 诊断失败：{err}"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "diagnosis": dict(self._last_diagnosis)}
+
+    def api_queue_115(self, title: str = "", url: str = "", password: str = "", source: str = "", vod_id: str = "", vod_name: str = "", type_name: str = "", category_group: str = "", category_name: str = "") -> Dict[str, Any]:
         title = (title or "").strip() or "未命名资源"
         vod_name = (vod_name or "").strip() or title
         raw_url = (url or "").strip()
-        category_group = (category_group or "").strip()
-        category_name = (category_name or "").strip()
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        workflow_mode = self._get_workflow_mode()
         if not raw_url:
-            self._last_message = "缺少 115 链接，无法加入下载任务。"
+            self._last_message = "缺少 115 分享链接，无法创建任务。"
             self._persist_state()
             return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-        if not category_group or not category_name:
-            self._last_message = "请选择当前 MoviePilot 已配置的分类后再创建下载任务。"
+        if not group or not name:
+            self._last_message = "请先选择 MoviePilot 入库分类。"
             self._persist_state()
             return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
         try:
-            share_url = CloudDrive2Client.append_share_password(raw_url, password)
-            target_path = self._resolve_cd2_target_path(category_group, category_name)
-            result = self._build_cd2_client().add_offline_file(url=share_url, target_path=target_path)
+            share_url, share_password = CloudDrive2Client.normalize_share_link(raw_url, password)
+            organize_path = self._resolve_cd2_target_path(group, name)
+            submit_path = self._resolve_cd2_submit_path(group, name)
+            client = self._build_cd2_client()
+            logger.info("Panlink115 submit via CD2 AddSharedLink: auth_mode=%s auth_label=%s submit=%s organize=%s workflow=%s", self._cd2_auth_mode, client.get_auth_label(), submit_path, organize_path, workflow_mode)
+            result = client.add_shared_link(url=share_url, target_path=submit_path, password=share_password)
         except Exception as err:
-            logger.error(
-                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
-                self._cd2_auth_mode,
-                bool(self._cd2_token),
-                bool(self._cd2_web_token),
-                err,
-            )
-            self._last_message = f"提交到 115 失败：{err}"
+            logger.error("Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s", self._cd2_auth_mode, bool(self._cd2_token), bool(self._cd2_web_token), err)
+            self._last_message = self._append_cd2_auth_hint(f"提交 115 分享转存失败：{err}")
             self._persist_state()
             return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
+        already_exists = bool(result.get("already_exists"))
         item = {
             "title": title,
             "vod_id": str(vod_id or "").strip(),
             "vod_name": vod_name,
             "type_name": (type_name or "").strip(),
             "url": share_url,
-            "password": (password or "").strip(),
+            "password": share_password,
             "source": (source or "").strip(),
-            "category_group": category_group,
-            "category_name": category_name,
-            "target_path": result.get("target_path") or target_path,
+            "category_group": group,
+            "category_name": name,
+            "target_path": result.get("target_path") or submit_path,
+            "submit_path": result.get("target_path") or submit_path,
+            "organize_path": organize_path,
+            "submit_method": "shared_link",
+            "workflow_mode": workflow_mode,
+            "workflow_label": self._get_workflow_label(),
             "created_name": result.get("created_name") or "",
             "created_path": result.get("created_path") or "",
+            "already_exists": already_exists,
+            "auth_label": client.get_auth_label(),
             "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "已提交到 115",
+            "organize_status": "等待资源落地后整理入库" if workflow_mode == "staging" else "当前仍为分类直投，尚未接入整理链",
+            "status": "已提交 115 分享转存",
         }
-        if item["created_path"]:
-            item["status"] = "已提交到 115，并检测到新目录"
-
-        if not any(
-            existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
-            for existing in self._queued_115
-        ):
+        if already_exists:
+            item["status"] = "115 待整理转存任务已存在" if workflow_mode == "staging" else "115 分享转存任务已存在"
+        elif item["created_path"]:
+            item["status"] = "已提交 115 待整理转存，并检测到新目录" if workflow_mode == "staging" else "已提交 115 分享转存，并检测到新目录"
+        elif workflow_mode == "staging":
+            item["status"] = "已提交 115 待整理转存"
+        if not any(existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"] and existing.get("category_group") == item["category_group"] and existing.get("category_name") == item["category_name"] for existing in self._queued_115):
             self._queued_115.insert(0, item)
-
-        if item["created_path"]:
-            self._last_message = (
-                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
-                f"{item['created_name'] or item['created_path']}。"
-            )
+        if already_exists:
+            self._last_message = f"{item['status']}：{vod_name} -> {item['target_path']}。"
+        elif item["created_path"]:
+            self._last_message = f"{item['status']}：{vod_name} -> {item['target_path']}，检测到新目录 {item['created_name'] or item['created_path']}。"
         else:
-            self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
+            self._last_message = f"{item['status']}：{vod_name} -> {item['target_path']}。"
         self._persist_state()
-        logger.info("Panlink115 submitted 115 task via CD2: %s -> %s", vod_name, item["target_path"])
-        return {
-            "success": True,
-            "message": self._last_message,
-            "item": item,
-            "queue": list(self._queued_115),
-        }
+        logger.info("Panlink115 submitted 115 shared-link task via CD2: %s -> %s (workflow=%s already_exists=%s)", vod_name, item["target_path"], workflow_mode, already_exists)
+        return {"success": True, "message": self._last_message, "item": item, "queue": list(self._queued_115)}
 
     def api_clear_queue(self) -> Dict[str, Any]:
         self._queued_115 = []
-        self._last_message = "已清空下载任务队列。"
+        self._last_message = "任务队列已清空。"
         self._persist_state()
         return {"success": True, "message": self._last_message, "queue": []}
-
-    def stop_service(self):
-        self._client = None
-        self._cd2_client = None
 
     def _build_client(self) -> PinglianClient:
         if not self._client:
@@ -647,594 +323,27 @@ class Panlink115(_PluginBase):
 
     def _build_cd2_client(self) -> CloudDrive2Client:
         if not self._cd2_client:
-            self._cd2_client = CloudDrive2Client(
-                base_url=self._cd2_url,
-                token=self._cd2_token,
-                timeout=self._timeout,
-                detect_delay=self._cd2_detect_delay,
-            )
+            self._cd2_client = CloudDrive2Client(base_url=self._cd2_url, token=self._cd2_token, web_token=self._cd2_web_token, auth_mode=self._cd2_auth_mode, timeout=self._timeout, detect_delay=self._cd2_detect_delay)
         else:
-            self._cd2_client.update_config(
-                base_url=self._cd2_url,
-                token=self._cd2_token,
-                timeout=self._timeout,
-                detect_delay=self._cd2_detect_delay,
-            )
+            self._cd2_client.update_config(base_url=self._cd2_url, token=self._cd2_token, web_token=self._cd2_web_token, auth_mode=self._cd2_auth_mode, timeout=self._timeout, detect_delay=self._cd2_detect_delay)
         return self._cd2_client
-
-    def _resolve_cd2_target_path(self, category_group: str, category_name: str) -> str:
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-        if not group or not name:
-            raise RuntimeError("缺少 MoviePilot 分类信息，无法计算 CD2 目录")
-
-        mp_target = self._resolve_mp_target_directory(group, name)
-        if mp_target:
-            mp_direct_path = self._resolve_direct_cd2_path(mp_target)
-            if mp_direct_path:
-                return mp_direct_path
-            mp_mapped_path = self._resolve_cd2_path_from_mp_target(mp_target)
-            if mp_mapped_path:
-                return mp_mapped_path
-
-        exact_mapping = self._cd2_category_roots.get(self._category_key(group, name))
-        if exact_mapping:
-            return self._render_mapping_path(exact_mapping, group, name, mode="exact")
-
-        group_mapping = self._cd2_category_roots.get(group)
-        if group_mapping:
-            return self._render_mapping_path(group_mapping, group, name, mode="group")
-
-        wildcard_mapping = self._cd2_category_roots.get("*")
-        if wildcard_mapping:
-            return self._render_mapping_path(wildcard_mapping, group, name, mode="wildcard")
-
-        if self._cd2_default_root:
-            return self._join_cd2_path(self._join_cd2_path(self._cd2_default_root, group), name)
-
-        if mp_target:
-            matched_storage = mp_target.get("library_storage") or "local"
-            matched_path = mp_target.get("target_path") or mp_target.get("library_path") or ""
-            raise RuntimeError(
-                f"已匹配到 MoviePilot 目录“{matched_storage}:{matched_path}”，但未找到对应的 CD2 目录。"
-                f"请优先配置“CD2 MP目录映射”，或改用“CD2 分类目录映射/默认根目录”回退。"
-            )
-
-        raise RuntimeError(
-            f"未找到分类“{group} / {name}”对应的 CD2 目录，请配置“CD2 分类目录映射”或填写“CD2 默认根目录”。"
-        )
-
-    def _render_mapping_path(self, mapping_value: str, group: str, name: str, mode: str) -> str:
-        template = self._normalize_path(mapping_value)
-        if not template:
-            raise RuntimeError("CD2 分类目录映射中存在空路径，请检查插件配置。")
-
-        if "{group}" in template or "{name}" in template:
-            rendered = template.replace("{group}", group).replace("{name}", name)
-            return self._normalize_path(rendered)
-
-        if mode == "exact":
-            return template
-        if mode == "group":
-            return self._join_cd2_path(template, name)
-        return self._join_cd2_path(self._join_cd2_path(template, group), name)
-
-    def _merge_legacy_category_roots(self, config: Dict[str, Any]) -> None:
-        legacy_pairs = {
-            "电影": self._normalize_path(config.get("cd2_movie_root")),
-            "电视剧": self._normalize_path(config.get("cd2_tv_root")),
-        }
-        for key, value in legacy_pairs.items():
-            if value and key not in self._cd2_category_roots:
-                self._cd2_category_roots[key] = value
-
-    def _resolve_mp_target_directory(self, category_group: str, category_name: str) -> Optional[Dict[str, Any]]:
-        try:
-            from app.helper.directory import DirectoryHelper
-        except Exception as err:
-            logger.warning("Panlink115 failed to import DirectoryHelper, fallback to plugin mappings only: %s", err)
-            return None
-
-        candidates: List[Tuple[int, int, Dict[str, Any]]] = []
-        for directory in sorted(DirectoryHelper().get_dirs(), key=lambda item: item.priority or 0):
-            library_path = self._normalize_fs_path(getattr(directory, "library_path", None))
-            if not library_path:
-                continue
-
-            score = self._score_mp_directory(directory, category_group, category_name)
-            if score <= 0:
-                continue
-
-            candidates.append(
-                (
-                    score,
-                    int(getattr(directory, "priority", 0) or 0),
-                    {
-                        "name": str(getattr(directory, "name", "") or "").strip(),
-                        "library_storage": str(getattr(directory, "library_storage", "") or "local").strip() or "local",
-                        "library_path": library_path,
-                        "target_path": self._build_mp_library_target_path(directory, category_group, category_name),
-                        "media_type": str(getattr(directory, "media_type", "") or "").strip(),
-                        "media_category": str(getattr(directory, "media_category", "") or "").strip(),
-                    },
-                )
-            )
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda item: (-item[0], item[1]))
-        return candidates[0][2]
-
-    def _score_mp_directory(self, directory: Any, category_group: str, category_name: str) -> int:
-        media_type = str(getattr(directory, "media_type", "") or "").strip()
-        media_category = str(getattr(directory, "media_category", "") or "").strip()
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-
-        if media_type and media_type != group:
-            return 0
-        if media_category and media_category != name:
-            return 0
-        if media_type == group and media_category == name:
-            return 400
-        if media_type == group and not media_category:
-            return 300
-        if not media_type and media_category == name:
-            return 200
-        if not media_type and not media_category:
-            return 100
-        return 0
-
-    def _build_mp_library_target_path(self, directory: Any, category_group: str, category_name: str) -> str:
-        library_dir = self._normalize_fs_path(getattr(directory, "library_path", None))
-        if not library_dir:
-            return ""
-
-        media_type = str(getattr(directory, "media_type", "") or "").strip()
-        media_category = str(getattr(directory, "media_category", "") or "").strip()
-
-        if bool(getattr(directory, "library_type_folder", False)):
-            library_dir = self._join_fs_path(library_dir, media_type or category_group)
-        if bool(getattr(directory, "library_category_folder", False)):
-            library_dir = self._join_fs_path(library_dir, media_category or category_name)
-        return library_dir
-
-    def _resolve_cd2_path_from_mp_target(self, mp_target: Dict[str, Any]) -> str:
-        target_path = self._normalize_fs_path(mp_target.get("target_path"))
-        library_storage = str(mp_target.get("library_storage") or "local").strip() or "local"
-        best_match: Optional[Tuple[int, int, str, str]] = None
-
-        for raw_key, cd2_root in self._cd2_directory_roots.items():
-            mapping_storage, mapping_path = self._split_storage_path(raw_key)
-            if not mapping_path:
-                continue
-            if mapping_storage and mapping_storage != library_storage:
-                continue
-
-            relative_path = self._relative_fs_path(target_path, mapping_path)
-            if relative_path is None:
-                continue
-
-            score = len(mapping_path)
-            storage_score = 1 if mapping_storage else 0
-            if not best_match or (score, storage_score) > (best_match[0], best_match[1]):
-                best_match = (score, storage_score, cd2_root, relative_path)
-
-        if not best_match:
-            return ""
-
-        _, _, cd2_root, relative_path = best_match
-        if not relative_path:
-            return self._normalize_path(cd2_root)
-        return self._join_cd2_path(cd2_root, relative_path)
-
-    def _resolve_direct_cd2_path(self, mp_target: Dict[str, Any]) -> str:
-        target_path = self._normalize_fs_path(mp_target.get("target_path"))
-        library_storage = str(mp_target.get("library_storage") or "").strip()
-        if not target_path.startswith("/"):
-            return ""
-
-        storage_name = library_storage.lower()
-        if "clouddrive" in storage_name or "cd2" in storage_name:
-            return self._normalize_path(target_path)
-
-        if target_path.startswith("/115open/"):
-            return self._normalize_path(target_path)
-        return ""
-
-    def _restore_state(self) -> None:
-        self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
-        self._last_message = str(_PLUGIN_STATE.get("last_message") or "尚未开始搜索。")
-        self._last_keyword = str(_PLUGIN_STATE.get("last_keyword") or "")
-        self._search_results = list(_PLUGIN_STATE.get("search_results") or [])
-        selected = _PLUGIN_STATE.get("selected_media") or {}
-        self._selected_media = dict(selected) if isinstance(selected, dict) else None
-        self._link_groups = dict(_PLUGIN_STATE.get("link_groups") or {})
-
-    def _persist_state(self) -> None:
-        _PLUGIN_STATE["queued_115"] = list(self._queued_115)
-        _PLUGIN_STATE["last_message"] = self._last_message
-        _PLUGIN_STATE["last_keyword"] = self._last_keyword
-        _PLUGIN_STATE["search_results"] = list(self._search_results)
-        _PLUGIN_STATE["selected_media"] = dict(self._selected_media or {})
-        _PLUGIN_STATE["link_groups"] = dict(self._link_groups)
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "path": "/state",
-                "endpoint": self.api_state,
-                "methods": ["GET"],
-                "summary": "读取插件状态",
-                "auth": "bear",
-            },
-            {
-                "path": "/search",
-                "endpoint": self.api_search,
-                "methods": ["GET"],
-                "summary": "盘链搜索",
-                "auth": "bear",
-            },
-            {
-                "path": "/load_links",
-                "endpoint": self.api_load_links,
-                "methods": ["GET"],
-                "summary": "加载详情与链接",
-                "auth": "bear",
-            },
-            {
-                "path": "/queue_115",
-                "endpoint": self.api_queue_115,
-                "methods": ["GET"],
-                "summary": "提交到 115 / CD2",
-                "auth": "bear",
-            },
-            {
-                "path": "/diagnose_cd2",
-                "endpoint": self.api_diagnose_cd2,
-                "methods": ["GET"],
-                "summary": "诊断 CD2 认证与目录连通性",
-                "auth": "bear",
-            },
-            {
-                "path": "/clear_queue",
-                "endpoint": self.api_clear_queue,
-                "methods": ["GET"],
-                "summary": "清空任务队列",
-                "auth": "bear",
-            },
-        ]
-
-    def api_state(self) -> Dict[str, Any]:
-        auth_info = self._get_cd2_auth_info()
-        return {
-            "success": True,
-            "message": self._last_message,
-            "queue": list(self._queued_115),
-            "enabled": self._enabled,
-            "only_show_115": self._only_show_115,
-            "max_results": self._max_results,
-            "cd2_configured": bool(auth_info.get("configured")),
-            "cd2_auth_mode": auth_info.get("mode"),
-            "cd2_auth_label": auth_info.get("label"),
-            "cd2_has_api_token": bool(auth_info.get("has_api_token")),
-            "cd2_has_web_token": bool(auth_info.get("has_web_token")),
-            "workflow_mode": self._get_workflow_mode(),
-            "workflow_label": self._get_workflow_label(),
-            "cd2_pending_root": self._cd2_pending_root,
-            "cd2_pending_root_configured": bool(self._cd2_pending_root),
-            "keyword": self._last_keyword,
-            "results": list(self._search_results),
-            "selected_media": dict(self._selected_media or {}),
-            "link_groups": dict(self._link_groups),
-            "diagnosis": dict(self._last_diagnosis or {}),
-        }
-
-    def api_diagnose_cd2(self, category_group: str = "", category_name: str = "") -> Dict[str, Any]:
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-        if not group or not name:
-            self._last_message = "请先选择 MoviePilot 分类，再执行 CD2 诊断。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "diagnosis": {}}
-
-        try:
-            organize_path = self._resolve_cd2_target_path(group, name)
-            target_path = self._resolve_cd2_submit_path(group, name)
-            diagnosis = self._build_cd2_client().diagnose_target(
-                target_path=target_path,
-                has_alternate_auth=self._has_alternate_cd2_auth(),
-            )
-            diagnosis["category_group"] = group
-            diagnosis["category_name"] = name
-            diagnosis["workflow_mode"] = self._get_workflow_mode()
-            diagnosis["workflow_label"] = self._get_workflow_label()
-            diagnosis["submit_path"] = target_path
-            diagnosis["organize_path"] = organize_path
-            self._last_diagnosis = diagnosis
-            self._last_message = str(diagnosis.get("message") or "CD2 诊断完成。")
-            self._persist_state()
-            logger.info("Panlink115 CD2 diagnose requested: %s / %s -> %s", group, name, target_path)
-            return {
-                "success": diagnosis.get("status") != "error",
-                "message": self._last_message,
-                "diagnosis": diagnosis,
-            }
-        except Exception as err:
-            logger.error("Panlink115 CD2 diagnose failed: %s", err)
-            self._last_diagnosis = {
-                "status": "error",
-                "auth_mode": self._cd2_auth_mode,
-                "auth_label": self._get_cd2_auth_info().get("label"),
-                "category_group": group,
-                "category_name": name,
-                "message": str(err),
-            }
-            self._last_message = f"CD2 诊断失败：{err}"
-            self._persist_state()
-            return {
-                "success": False,
-                "message": self._last_message,
-                "diagnosis": dict(self._last_diagnosis),
-            }
-
-    def api_queue_115(
-        self,
-        title: str = "",
-        url: str = "",
-        password: str = "",
-        source: str = "",
-        vod_id: str = "",
-        vod_name: str = "",
-        type_name: str = "",
-        category_group: str = "",
-        category_name: str = "",
-    ) -> Dict[str, Any]:
-        title = (title or "").strip() or "未命名资源"
-        vod_name = (vod_name or "").strip() or title
-        raw_url = (url or "").strip()
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-        if not raw_url:
-            self._last_message = "缺少 115 链接，无法加入下载任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-        if not group or not name:
-            self._last_message = "请先选择当前 MoviePilot 已配置的分类后再创建下载任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
-        try:
-            share_url = CloudDrive2Client.append_share_password(raw_url, password)
-            target_path = self._resolve_cd2_target_path(group, name)
-            client = self._build_cd2_client()
-            logger.info(
-                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s target=%s",
-                self._cd2_auth_mode,
-                client.get_auth_label(),
-                target_path,
-            )
-            result = client.add_offline_file(url=share_url, target_path=target_path)
-        except Exception as err:
-            logger.error("Panlink115 submit to CD2 failed: %s", err)
-            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
-        item = {
-            "title": title,
-            "vod_id": str(vod_id or "").strip(),
-            "vod_name": vod_name,
-            "type_name": (type_name or "").strip(),
-            "url": share_url,
-            "password": (password or "").strip(),
-            "source": (source or "").strip(),
-            "category_group": group,
-            "category_name": name,
-            "target_path": result.get("target_path") or target_path,
-            "created_name": result.get("created_name") or "",
-            "created_path": result.get("created_path") or "",
-            "already_exists": bool(result.get("already_exists")),
-            "auth_label": client.get_auth_label(),
-            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "已提交到 115",
-        }
-        if item["created_path"]:
-            item["status"] = "已提交到 115，并检测到新目录"
-
-        if not any(
-            existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
-            for existing in self._queued_115
-        ):
-            self._queued_115.insert(0, item)
-
-        if item["created_path"]:
-            self._last_message = (
-                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录"
-                f"{item['created_name'] or item['created_path']}。"
-            )
-        else:
-            self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
-        self._persist_state()
-        logger.info("Panlink115 submitted 115 task via CD2: %s -> %s", vod_name, item["target_path"])
-        return {
-            "success": True,
-            "message": self._last_message,
-            "item": item,
-            "queue": list(self._queued_115),
-        }
-
-    def _build_cd2_client(self) -> CloudDrive2Client:
-        if not self._cd2_client:
-            self._cd2_client = CloudDrive2Client(
-                base_url=self._cd2_url,
-                token=self._cd2_token,
-                web_token=self._cd2_web_token,
-                auth_mode=self._cd2_auth_mode,
-                timeout=self._timeout,
-                detect_delay=self._cd2_detect_delay,
-            )
-        else:
-            self._cd2_client.update_config(
-                base_url=self._cd2_url,
-                token=self._cd2_token,
-                web_token=self._cd2_web_token,
-                auth_mode=self._cd2_auth_mode,
-                timeout=self._timeout,
-                detect_delay=self._cd2_detect_delay,
-            )
-        return self._cd2_client
-
-    def _restore_state(self) -> None:
-        self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
-        self._last_message = str(_PLUGIN_STATE.get("last_message") or "尚未开始搜索。")
-        self._last_keyword = str(_PLUGIN_STATE.get("last_keyword") or "")
-        self._search_results = list(_PLUGIN_STATE.get("search_results") or [])
-        selected = _PLUGIN_STATE.get("selected_media") or {}
-        self._selected_media = dict(selected) if isinstance(selected, dict) else None
-        self._link_groups = dict(_PLUGIN_STATE.get("link_groups") or {})
-        self._last_diagnosis = dict(_PLUGIN_STATE.get("diagnosis") or {})
-
-    def _persist_state(self) -> None:
-        _PLUGIN_STATE["queued_115"] = list(self._queued_115)
-        _PLUGIN_STATE["last_message"] = self._last_message
-        _PLUGIN_STATE["last_keyword"] = self._last_keyword
-        _PLUGIN_STATE["search_results"] = list(self._search_results)
-        _PLUGIN_STATE["selected_media"] = dict(self._selected_media or {})
-        _PLUGIN_STATE["link_groups"] = dict(self._link_groups)
-        _PLUGIN_STATE["diagnosis"] = dict(self._last_diagnosis or {})
 
     def _get_cd2_auth_info(self) -> Dict[str, Any]:
         return self._build_cd2_client().describe_auth()
 
     def _has_alternate_cd2_auth(self) -> bool:
-        if self._cd2_auth_mode == "web_token":
-            return bool(self._cd2_token)
-        return bool(self._cd2_web_token)
+        return bool(self._cd2_token) if self._cd2_auth_mode == "web_token" else bool(self._cd2_web_token)
 
     def _append_cd2_auth_hint(self, message: str) -> str:
         text = str(message or "").strip()
         lowered = text.lower()
-        if (
-            self._cd2_auth_mode == "api_token"
-            and self._cd2_web_token
-            and ("离线下载" in text or "add offline" in lowered or "permission required" in lowered)
-        ):
-            return f"{text} 当前已配置网页登录 Token，可将 CD2 鉴权模式切换为“网页登录 Token”后重试。"
+        if self._cd2_auth_mode == "api_token" and self._cd2_web_token and ("permission" in lowered or "shared" in lowered or "离线" in text):
+            return f"{text} 当前已配置网页登录 Token，可切换认证模式后重试。"
         return text
-
-    def api_queue_115(
-        self,
-        title: str = "",
-        url: str = "",
-        password: str = "",
-        source: str = "",
-        vod_id: str = "",
-        vod_name: str = "",
-        type_name: str = "",
-        category_group: str = "",
-        category_name: str = "",
-    ) -> Dict[str, Any]:
-        title = (title or "").strip() or "未命名资源"
-        vod_name = (vod_name or "").strip() or title
-        raw_url = (url or "").strip()
-        group = (category_group or "").strip()
-        name = (category_name or "").strip()
-        if not raw_url:
-            self._last_message = "缺少 115 链接，无法加入下载任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-        if not group or not name:
-            self._last_message = "请先选择当前 MoviePilot 已配置的分类后再创建下载任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
-        try:
-            share_url = CloudDrive2Client.append_share_password(raw_url, password)
-            target_path = self._resolve_cd2_target_path(group, name)
-            client = self._build_cd2_client()
-            logger.info(
-                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s target=%s",
-                self._cd2_auth_mode,
-                client.get_auth_label(),
-                target_path,
-            )
-            result = client.add_offline_file(url=share_url, target_path=target_path)
-        except Exception as err:
-            logger.error(
-                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
-                self._cd2_auth_mode,
-                bool(self._cd2_token),
-                bool(self._cd2_web_token),
-                err,
-            )
-            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
-
-        already_exists = bool(result.get("already_exists"))
-        item = {
-            "title": title,
-            "vod_id": str(vod_id or "").strip(),
-            "vod_name": vod_name,
-            "type_name": (type_name or "").strip(),
-            "url": share_url,
-            "password": (password or "").strip(),
-            "source": (source or "").strip(),
-            "category_group": group,
-            "category_name": name,
-            "target_path": result.get("target_path") or target_path,
-            "created_name": result.get("created_name") or "",
-            "created_path": result.get("created_path") or "",
-            "already_exists": already_exists,
-            "auth_label": client.get_auth_label(),
-            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "已提交到 115",
-        }
-        if already_exists:
-            item["status"] = "115 离线任务已存在"
-        elif item["created_path"]:
-            item["status"] = "已提交到 115，并检测到新目录"
-
-        if not any(
-            existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
-            for existing in self._queued_115
-        ):
-            self._queued_115.insert(0, item)
-
-        if already_exists:
-            self._last_message = (
-                f"115 离线任务已存在：{vod_name} -> {item['target_path']}。"
-                "这表示 115 后端已记住这条链接，但不代表当前目录已经出现可用文件。"
-            )
-        elif item["created_path"]:
-            self._last_message = (
-                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
-                f"{item['created_name'] or item['created_path']}。"
-            )
-        else:
-            self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
-        self._persist_state()
-        logger.info(
-            "Panlink115 submitted 115 task via CD2: %s -> %s (already_exists=%s)",
-            vod_name,
-            item["target_path"],
-            already_exists,
-        )
-        return {
-            "success": True,
-            "message": self._last_message,
-            "item": item,
-            "queue": list(self._queued_115),
-        }
 
     def _restore_state(self) -> None:
         persisted_queue = self._load_persisted_queue()
-        if persisted_queue is None:
-            self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
-        else:
-            self._queued_115 = persisted_queue
+        self._queued_115 = persisted_queue if persisted_queue is not None else list(_PLUGIN_STATE.get("queued_115") or [])
         self._last_message = str(_PLUGIN_STATE.get("last_message") or "尚未开始搜索。")
         self._last_keyword = str(_PLUGIN_STATE.get("last_keyword") or "")
         self._search_results = list(_PLUGIN_STATE.get("search_results") or [])
@@ -1253,17 +362,6 @@ class Panlink115(_PluginBase):
         _PLUGIN_STATE["diagnosis"] = dict(self._last_diagnosis or {})
         self._persist_task_queue()
 
-    def _get_workflow_mode(self) -> str:
-        return "staging" if self._cd2_pending_root else "direct"
-
-    def _get_workflow_label(self) -> str:
-        return "待整理入库" if self._cd2_pending_root else "分类直投"
-
-    def _resolve_cd2_submit_path(self, category_group: str, category_name: str) -> str:
-        if self._cd2_pending_root:
-            return self._cd2_pending_root
-        return self._resolve_cd2_target_path(category_group, category_name)
-
     def _persist_task_queue(self) -> None:
         try:
             self.save_data(_TASK_QUEUE_DATA_KEY, list(self._queued_115))
@@ -1276,158 +374,204 @@ class Panlink115(_PluginBase):
         except Exception as err:
             logger.warning("Panlink115 load task queue failed: %s", err)
             return None
-
         if data is None:
             return None
         if not isinstance(data, list):
             return []
         return [dict(item) for item in data if isinstance(item, dict)]
 
-    def api_queue_115(
-        self,
-        title: str = "",
-        url: str = "",
-        password: str = "",
-        source: str = "",
-        vod_id: str = "",
-        vod_name: str = "",
-        type_name: str = "",
-        category_group: str = "",
-        category_name: str = "",
-    ) -> Dict[str, Any]:
-        title = (title or "").strip() or "未命名资源"
-        vod_name = (vod_name or "").strip() or title
-        raw_url = (url or "").strip()
+    def _get_workflow_mode(self) -> str:
+        return "staging" if self._cd2_pending_root else "direct"
+
+    def _get_workflow_label(self) -> str:
+        return "待整理入库" if self._cd2_pending_root else "分类直投"
+
+    def _resolve_cd2_submit_path(self, category_group: str, category_name: str) -> str:
+        return self._cd2_pending_root or self._resolve_cd2_target_path(category_group, category_name)
+
+    def _resolve_cd2_target_path(self, category_group: str, category_name: str) -> str:
         group = (category_group or "").strip()
         name = (category_name or "").strip()
-        workflow_mode = self._get_workflow_mode()
-        if not raw_url:
-            self._last_message = "缺少 115 链接，无法创建任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
         if not group or not name:
-            self._last_message = "请先选择当前 MoviePilot 已配置的入库分类后再创建任务。"
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+            raise RuntimeError("缺少 MoviePilot 分类信息")
+        mp_target = self._resolve_mp_target_directory(group, name)
+        if mp_target:
+            direct = self._resolve_direct_cd2_path(mp_target)
+            if direct:
+                return direct
+            mapped = self._resolve_cd2_path_from_mp_target(mp_target)
+            if mapped:
+                return mapped
+        if self._category_key(group, name) in self._cd2_category_roots:
+            return self._render_mapping_path(self._cd2_category_roots[self._category_key(group, name)], group, name, "exact")
+        if group in self._cd2_category_roots:
+            return self._render_mapping_path(self._cd2_category_roots[group], group, name, "group")
+        if "*" in self._cd2_category_roots:
+            return self._render_mapping_path(self._cd2_category_roots["*"], group, name, "wildcard")
+        if self._cd2_default_root:
+            return self._join_cd2_path(self._join_cd2_path(self._cd2_default_root, group), name)
+        if mp_target:
+            matched_storage = mp_target.get("library_storage") or "local"
+            matched_path = mp_target.get("target_path") or mp_target.get("library_path") or ""
+            raise RuntimeError(f"已匹配到 MoviePilot 目录“{matched_storage}:{matched_path}”，但未找到对应的 CD2 目录。请优先配置“CD2 MP目录映射”，或改用“CD2 分类目录映射 / 默认根目录”回退。")
+        raise RuntimeError(f"未找到分类“{group} / {name}”对应的 CD2 目录")
 
+    def _render_mapping_path(self, mapping_value: str, group: str, name: str, mode: str) -> str:
+        template = self._normalize_path(mapping_value)
+        if not template:
+            raise RuntimeError("CD2 分类目录映射中存在空路径")
+        if "{group}" in template or "{name}" in template:
+            return self._normalize_path(template.replace("{group}", group).replace("{name}", name))
+        if mode == "exact":
+            return template
+        if mode == "group":
+            return self._join_cd2_path(template, name)
+        return self._join_cd2_path(self._join_cd2_path(template, group), name)
+
+    def _merge_legacy_category_roots(self, config: Dict[str, Any]) -> None:
+        for key, value in {"电影": self._normalize_path(config.get("cd2_movie_root")), "剧集": self._normalize_path(config.get("cd2_tv_root"))}.items():
+            if value and key not in self._cd2_category_roots:
+                self._cd2_category_roots[key] = value
+
+    def _resolve_mp_target_directory(self, category_group: str, category_name: str) -> Optional[Dict[str, Any]]:
         try:
-            share_url = CloudDrive2Client.append_share_password(raw_url, password)
-            organize_path = self._resolve_cd2_target_path(group, name)
-            submit_path = self._resolve_cd2_submit_path(group, name)
-            client = self._build_cd2_client()
-            logger.info(
-                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s submit=%s organize=%s workflow=%s",
-                self._cd2_auth_mode,
-                client.get_auth_label(),
-                submit_path,
-                organize_path,
-                workflow_mode,
-            )
-            result = client.add_offline_file(url=share_url, target_path=submit_path)
+            from app.helper.directory import DirectoryHelper
         except Exception as err:
-            logger.error(
-                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
-                self._cd2_auth_mode,
-                bool(self._cd2_token),
-                bool(self._cd2_web_token),
-                err,
-            )
-            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
-            self._persist_state()
-            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+            logger.warning("Panlink115 failed to import DirectoryHelper: %s", err)
+            return None
+        candidates: List[Tuple[int, int, Dict[str, Any]]] = []
+        for directory in sorted(DirectoryHelper().get_dirs(), key=lambda item: getattr(item, "priority", 0) or 0):
+            library_path = self._normalize_fs_path(getattr(directory, "library_path", None))
+            if not library_path:
+                continue
+            score = self._score_mp_directory(directory, category_group, category_name)
+            if score <= 0:
+                continue
+            candidates.append((score, int(getattr(directory, "priority", 0) or 0), {
+                "name": str(getattr(directory, "name", "") or "").strip(),
+                "library_storage": str(getattr(directory, "library_storage", "") or "local").strip() or "local",
+                "library_path": library_path,
+                "target_path": self._build_mp_library_target_path(directory, category_group, category_name),
+                "media_type": str(getattr(directory, "media_type", "") or "").strip(),
+                "media_category": str(getattr(directory, "media_category", "") or "").strip(),
+            }))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return candidates[0][2]
 
-        already_exists = bool(result.get("already_exists"))
-        item = {
-            "title": title,
-            "vod_id": str(vod_id or "").strip(),
-            "vod_name": vod_name,
-            "type_name": (type_name or "").strip(),
-            "url": share_url,
-            "password": (password or "").strip(),
-            "source": (source or "").strip(),
-            "category_group": group,
-            "category_name": name,
-            "target_path": result.get("target_path") or submit_path,
-            "submit_path": result.get("target_path") or submit_path,
-            "organize_path": organize_path,
-            "workflow_mode": workflow_mode,
-            "workflow_label": self._get_workflow_label(),
-            "created_name": result.get("created_name") or "",
-            "created_path": result.get("created_path") or "",
-            "already_exists": already_exists,
-            "auth_label": client.get_auth_label(),
-            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "organize_status": "等待资源落地后整理入库" if workflow_mode == "staging" else "当前仍为分类直投，尚未接入整理链",
-            "status": "已提交到 115",
-        }
-        if already_exists:
-            item["status"] = "115 待整理任务已存在" if workflow_mode == "staging" else "115 离线任务已存在"
-        elif item["created_path"]:
-            item["status"] = "已提交到 115 待整理，并检测到新目录" if workflow_mode == "staging" else "已提交到 115，并检测到新目录"
-        elif workflow_mode == "staging":
-            item["status"] = "已提交到 115 待整理"
+    def _score_mp_directory(self, directory: Any, category_group: str, category_name: str) -> int:
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        media_type = str(getattr(directory, "media_type", "") or "").strip()
+        media_category = str(getattr(directory, "media_category", "") or "").strip()
+        directory_name = str(getattr(directory, "name", "") or "").strip()
+        score = 0
+        if media_type == group:
+            score += 40
+        elif not media_type:
+            score += 5
+        if media_category == name:
+            score += 60
+        elif media_category == group:
+            score += 20
+        elif not media_category and media_type == group:
+            score += 10
+        if directory_name == name:
+            score += 20
+        return score
 
-        if not any(
-            existing.get("url") == item["url"]
-            and existing.get("target_path") == item["target_path"]
-            and existing.get("category_group") == item["category_group"]
-            and existing.get("category_name") == item["category_name"]
-            for existing in self._queued_115
-        ):
-            self._queued_115.insert(0, item)
+    def _build_mp_library_target_path(self, directory: Any, category_group: str, category_name: str) -> str:
+        library_path = self._normalize_fs_path(getattr(directory, "library_path", None))
+        if not library_path:
+            return ""
+        media_type = str(getattr(directory, "media_type", "") or "").strip()
+        media_category = str(getattr(directory, "media_category", "") or "").strip()
+        if media_category == category_name:
+            return library_path
+        if media_type == category_group:
+            return self._join_fs_path(library_path, category_name)
+        return library_path
 
-        if already_exists:
-            if workflow_mode == "staging":
-                self._last_message = (
-                    f"115 待整理任务已存在：{vod_name} -> {item['target_path']}。"
-                    f" 后续入库分类仍按 {group} / {name} 处理，但这不代表待整理目录已经出现可用文件。"
-                )
-            else:
-                self._last_message = (
-                    f"115 离线任务已存在：{vod_name} -> {item['target_path']}。"
-                    " 这表示 115 后端已经记住这条链接，但不代表当前目录已经出现可用文件。"
-                )
-        elif item["created_path"]:
-            if workflow_mode == "staging":
-                self._last_message = (
-                    f"已提交到 115 待整理：{vod_name} -> {item['target_path']}，检测到新目录 "
-                    f"{item['created_name'] or item['created_path']}。后续目标分类：{group} / {name}。"
-                )
-            else:
-                self._last_message = (
-                    f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
-                    f"{item['created_name'] or item['created_path']}。"
-                )
-        else:
-            if workflow_mode == "staging":
-                self._last_message = (
-                    f"已提交到 115 待整理：{vod_name} -> {item['target_path']}。"
-                    f" 后续将按 {group} / {name} 整理入库。"
-                )
-            else:
-                self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
+    def _resolve_direct_cd2_path(self, mp_target: Dict[str, Any]) -> str:
+        target_path = self._normalize_fs_path(mp_target.get("target_path") or mp_target.get("library_path"))
+        library_storage = str(mp_target.get("library_storage") or "").strip()
+        if not target_path:
+            return ""
+        if target_path.startswith("/115open"):
+            return self._normalize_path(target_path)
+        if "CloudDrive" in library_storage and target_path.startswith("/"):
+            return self._normalize_path(target_path)
+        return ""
 
-        self._persist_state()
-        logger.info(
-            "Panlink115 submitted 115 task via CD2: %s -> %s (workflow=%s already_exists=%s)",
-            vod_name,
-            item["target_path"],
-            workflow_mode,
-            already_exists,
-        )
-        return {
-            "success": True,
-            "message": self._last_message,
-            "item": item,
-            "queue": list(self._queued_115),
-        }
+    def _resolve_cd2_path_from_mp_target(self, mp_target: Dict[str, Any]) -> str:
+        if not self._cd2_directory_roots:
+            return ""
+        target_storage = str(mp_target.get("library_storage") or "").strip()
+        target_path = self._normalize_fs_path(mp_target.get("target_path") or mp_target.get("library_path"))
+        library_path = self._normalize_fs_path(mp_target.get("library_path"))
+        for raw_source, dest_root in self._cd2_directory_roots.items():
+            source_storage, source_path = self._split_storage_path(raw_source)
+            dest_path = self._normalize_path(dest_root)
+            if not source_path or not dest_path:
+                continue
+            if source_storage and source_storage != target_storage:
+                continue
+            relative = self._relative_fs_path(target_path, source_path)
+            if relative is None:
+                relative = self._relative_fs_path(library_path, source_path)
+            if relative is None:
+                continue
+            return self._join_cd2_path(dest_path, relative)
+        return ""
+
+    @staticmethod
+    def _parse_category_roots(value: Any) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = None
+            for separator in ("=", ":", "："):
+                if separator in line:
+                    parts = line.split(separator, 1)
+                    break
+            if not parts:
+                continue
+            key = str(parts[0] or "").strip()
+            root = Panlink115._normalize_path(parts[1])
+            if key and root:
+                mapping[key] = root
+        return mapping
+
+    @staticmethod
+    def _parse_directory_roots(value: Any) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = None
+            for separator in ("=", "："):
+                if separator in line:
+                    parts = line.split(separator, 1)
+                    break
+            if not parts:
+                continue
+            key = str(parts[0] or "").strip()
+            root = Panlink115._normalize_path(parts[1])
+            if key and root:
+                mapping[key] = root
+        return mapping
+
+    @staticmethod
+    def _category_key(group: str, name: str) -> str:
+        return f"{str(group or '').strip()}/{str(name or '').strip()}"
 
     @staticmethod
     def _normalize_cd2_auth_mode(value: Any) -> str:
-        mode = str(value or "").strip().lower()
-        if mode == "web_token":
-            return "web_token"
-        return "api_token"
+        return "web_token" if str(value or "").strip().lower() == "web_token" else "api_token"
 
     @staticmethod
     def _to_int(value: Any, default: int, minimum: int) -> int:
@@ -1444,56 +588,6 @@ class Panlink115(_PluginBase):
         except (TypeError, ValueError):
             parsed = default
         return max(parsed, minimum)
-
-    @classmethod
-    def _parse_category_roots(cls, value: Any) -> Dict[str, str]:
-        mapping: Dict[str, str] = {}
-        for raw_line in str(value or "").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            parts = None
-            for separator in ("=", ":", "："):
-                if separator in line:
-                    parts = line.split(separator, 1)
-                    break
-
-            if not parts:
-                continue
-
-            key = str(parts[0] or "").strip()
-            root = cls._normalize_path(parts[1])
-            if key and root:
-                mapping[key] = root
-        return mapping
-
-    @classmethod
-    def _parse_directory_roots(cls, value: Any) -> Dict[str, str]:
-        mapping: Dict[str, str] = {}
-        for raw_line in str(value or "").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            parts = None
-            for separator in ("=", "＝"):
-                if separator in line:
-                    parts = line.split(separator, 1)
-                    break
-
-            if not parts:
-                continue
-
-            key = str(parts[0] or "").strip()
-            root = cls._normalize_path(parts[1])
-            if key and root:
-                mapping[key] = root
-        return mapping
-
-    @staticmethod
-    def _category_key(group: str, name: str) -> str:
-        return f"{str(group or '').strip()}/{str(name or '').strip()}"
 
     @staticmethod
     def _normalize_path(value: Any) -> str:
@@ -1550,16 +644,13 @@ class Panlink115(_PluginBase):
         root_norm = cls._normalize_fs_path(root_path)
         if not full_norm or not root_norm:
             return None
-
         full_cmp = full_norm.lower()
         root_cmp = root_norm.lower()
         if full_cmp == root_cmp:
             return ""
-
         prefix = f"{root_cmp}/" if root_norm != "/" else "/"
         if not full_cmp.startswith(prefix):
             return None
-
         if root_norm == "/":
             return full_norm[1:]
-        return full_norm[len(root_norm) + 1:]
+        return full_norm[len(root_norm) + 1 :]

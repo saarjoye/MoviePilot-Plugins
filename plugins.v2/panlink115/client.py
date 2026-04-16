@@ -4,7 +4,7 @@ import html
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -57,12 +57,11 @@ class PinglianClient:
         if not payload.get("success"):
             raise RuntimeError(payload.get("message") or "盘链搜索失败")
 
-        results = []
+        results: List[Dict[str, Any]] = []
         for item in payload.get("results") or []:
             normalized = self._normalize_search_item(item)
             if normalized:
                 results.append(normalized)
-
         return results[: max(limit, 1)]
 
     def get_video_detail(
@@ -80,20 +79,23 @@ class PinglianClient:
         detail = dict(fallback or {})
         detail["vod_id"] = vod_id
         detail["detail_url"] = f"{self.DETAIL_PAGE}?id={vod_id}"
-        detail["vod_name"] = self._extract_first(
-            page_html,
-            r'<h1 class="premium-title">(.*?)</h1>',
-        ) or str(detail.get("vod_name") or "").strip()
+        detail["vod_name"] = self._extract_first(page_html, r'<h1 class="premium-title">(.*?)</h1>') or str(
+            detail.get("vod_name") or ""
+        ).strip()
         detail["vod_pic"] = self._extract_image(page_html) or str(detail.get("vod_pic") or "").strip()
         detail["type_name"] = self._extract_tag_text(page_html, "type") or str(detail.get("type_name") or "").strip()
         detail["vod_year"] = self._extract_tag_text(page_html, "year") or str(detail.get("vod_year") or "").strip()
         detail["vod_area"] = self._extract_tag_text(page_html, "area") or str(detail.get("vod_area") or "").strip()
-        detail["vod_remarks"] = self._extract_tag_text(page_html, "quality") or str(detail.get("vod_remarks") or "").strip()
-        detail["vod_alias"] = self._extract_meta_value(page_html, "别名")
-        detail["vod_director"] = self._extract_meta_value(page_html, "导演")
-        detail["vod_actor"] = self._extract_meta_value(page_html, "主演")
-        detail["vod_lang"] = self._extract_meta_value(page_html, "语言") or str(detail.get("vod_lang") or "").strip()
-        detail["vod_update_time"] = self._extract_meta_value(page_html, "更新时间")
+        detail["vod_remarks"] = self._extract_tag_text(page_html, "quality") or str(
+            detail.get("vod_remarks") or ""
+        ).strip()
+        detail["vod_alias"] = self._extract_meta_value(page_html, "\u522b\u540d")
+        detail["vod_director"] = self._extract_meta_value(page_html, "\u5bfc\u6f14")
+        detail["vod_actor"] = self._extract_meta_value(page_html, "\u4e3b\u6f14")
+        detail["vod_lang"] = self._extract_meta_value(page_html, "\u8bed\u8a00") or str(
+            detail.get("vod_lang") or ""
+        ).strip()
+        detail["vod_update_time"] = self._extract_meta_value(page_html, "\u66f4\u65b0\u65f6\u95f4")
         detail["vod_content"] = self._extract_plot(page_html)
         return detail
 
@@ -130,7 +132,7 @@ class PinglianClient:
         if self._logged_in:
             return
         if not self.username or not self.password:
-            raise RuntimeError("请先在插件配置中填写盘链账号和密码。")
+            raise RuntimeError("请先在插件配置中填写盘链账号和密码")
 
         payload = self._post_json(
             self.LOGIN_API,
@@ -151,12 +153,7 @@ class PinglianClient:
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        response = self._session.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=self.timeout,
-        )
+        response = self._session.get(url, params=params, headers=headers, timeout=self.timeout)
         response.raise_for_status()
         return self._decode_json(response)
 
@@ -166,12 +163,7 @@ class PinglianClient:
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> str:
-        response = self._session.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=self.timeout,
-        )
+        response = self._session.get(url, params=params, headers=headers, timeout=self.timeout)
         response.raise_for_status()
         return response.text
 
@@ -181,12 +173,7 @@ class PinglianClient:
         data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        response = self._session.post(
-            url,
-            data=data,
-            headers=headers,
-            timeout=self.timeout,
-        )
+        response = self._session.post(url, data=data, headers=headers, timeout=self.timeout)
         response.raise_for_status()
         return self._decode_json(response)
 
@@ -195,10 +182,10 @@ class PinglianClient:
         try:
             payload = response.json()
         except ValueError as err:
-            raise RuntimeError("盘链返回的不是合法 JSON。") from err
+            raise RuntimeError("盘链返回的不是合法 JSON") from err
 
         if not isinstance(payload, dict):
-            raise RuntimeError("盘链接口返回结构异常。")
+            raise RuntimeError("盘链接口返回结构异常")
         return payload
 
     def _normalize_search_item(self, item: Any) -> Optional[Dict[str, Any]]:
@@ -236,7 +223,7 @@ class PinglianClient:
             if not isinstance(entries, list):
                 continue
 
-            normalized_entries = []
+            normalized_entries: List[Dict[str, Any]] = []
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
@@ -268,19 +255,13 @@ class PinglianClient:
         return dict(sorted_items)
 
     def _extract_image(self, page_html: str) -> str:
-        image = self._extract_first(
-            page_html,
-            r'<div class="detail-poster premium-poster">\s*<img src="([^"]+)"',
-        )
+        image = self._extract_first(page_html, r'<div class="detail-poster premium-poster">\s*<img src="([^"]+)"')
         if not image:
             return ""
         return urljoin(self.BASE_URL, image)
 
     def _extract_tag_text(self, page_html: str, tag_name: str) -> str:
-        return self._extract_first(
-            page_html,
-            rf'<span class="p-tag {re.escape(tag_name)}">(.*?)</span>',
-        )
+        return self._extract_first(page_html, rf'<span class="p-tag {re.escape(tag_name)}">(.*?)</span>')
 
     def _extract_meta_value(self, page_html: str, label: str) -> str:
         return self._extract_first(
@@ -289,11 +270,7 @@ class PinglianClient:
         )
 
     def _extract_plot(self, page_html: str) -> str:
-        return self._extract_first(
-            page_html,
-            r'<div class="premium-plot">.*?<p>(.*?)</p>',
-            flags=re.S,
-        )
+        return self._extract_first(page_html, r'<div class="premium-plot">.*?<p>(.*?)</p>', flags=re.S)
 
     def _extract_first(self, text: str, pattern: str, flags: int = 0) -> str:
         matched = re.search(pattern, text, flags)
@@ -365,9 +342,7 @@ class CloudDrive2Client:
         }
 
     def get_auth_label(self) -> str:
-        if self.auth_mode == "web_token":
-            return "网页登录 Token"
-        return "API Token"
+        return "网页登录 Token" if self.auth_mode == "web_token" else "API Token"
 
     def diagnose_target(self, target_path: str, has_alternate_auth: bool = False) -> Dict[str, Any]:
         target = self.normalize_path(target_path)
@@ -400,19 +375,16 @@ class CloudDrive2Client:
         if self.auth_mode == "web_token":
             result["status"] = "success"
             result["offline_capability"] = "ready_to_try"
-            result["message"] = (
-                "当前使用 CD2 网页登录 Token，目标目录可读取，可以继续尝试提交离线任务；"
-                "最终是否成功仍以 CD2/115 的实际返回为准。"
-            )
+            result["message"] = "当前使用 CD2 网页登录 Token，目标目录可读取，可以继续尝试提交。"
             return result
 
         result["offline_capability"] = "likely_blocked"
         result["message"] = (
-            "当前使用 CD2 API Token，目标目录可读取，但目录读写能力不等于具备离线下载权限。"
-            "如果后续提交仍返回离线权限不足，请切换到“网页登录 Token”模式。"
+            "当前使用 CD2 API Token，目录可读取不代表具备分享转存或离线下载权限。"
+            " 如果后续提交失败，请切换到网页登录 Token。"
         )
         if has_alternate_auth:
-            result["message"] += " 你当前已填写网页登录 Token，切换认证模式后可直接重试。"
+            result["message"] += " 已检测到另一套认证信息，可直接切换后重试。"
         return result
 
     def add_offline_file(self, url: str, target_path: str) -> Dict[str, Any]:
@@ -423,11 +395,7 @@ class CloudDrive2Client:
         if not target:
             raise RuntimeError("缺少 CD2 目标目录")
 
-        before_paths: Dict[str, Dict[str, str]] = {}
-        try:
-            before_paths = {item.get("full_path"): item for item in self.list_subfiles(target)}
-        except Exception:
-            before_paths = {}
+        before_paths = self._snapshot_directory(target)
         payload = self._wrap_request(
             [
                 self._encode_string_field(1, link),
@@ -446,28 +414,52 @@ class CloudDrive2Client:
                 }
             raise
 
-        created_item: Dict[str, str] = {}
-        for _ in range(4):
-            time.sleep(self.detect_delay)
-            try:
-                after_items = self.list_subfiles(target)
-            except Exception:
-                break
-            new_items = [
-                item
-                for item in after_items
-                if item.get("full_path") and item.get("full_path") not in before_paths
-            ]
-            if new_items:
-                created_item = new_items[0]
-                break
-
+        created_item = self._detect_created_item(target, before_paths)
         return {
             "target_path": target,
             "created_name": str(created_item.get("name") or "").strip(),
             "created_path": str(created_item.get("full_path") or "").strip(),
             "already_exists": False,
         }
+
+    def add_shared_link(self, url: str, target_path: str, password: str = "") -> Dict[str, Any]:
+        link = (url or "").strip()
+        target = self.normalize_path(target_path)
+        secret = (password or "").strip()
+        if not link:
+            raise RuntimeError("缺少 AddSharedLink 需要的分享链接")
+        if not target:
+            raise RuntimeError("缺少 AddSharedLink 目标目录")
+
+        before_paths = self._snapshot_directory(target)
+        attempts = self._build_shared_link_attempts(link=link, target_path=target, password=secret)
+        last_error: Optional[Exception] = None
+
+        for index, attempt in enumerate(attempts):
+            try:
+                self._post_grpc("AddSharedLink", self._wrap_request(attempt))
+                created_item = self._detect_created_item(target, before_paths)
+                return {
+                    "target_path": target,
+                    "created_name": str(created_item.get("name") or "").strip(),
+                    "created_path": str(created_item.get("full_path") or "").strip(),
+                    "already_exists": False,
+                }
+            except Exception as err:
+                last_error = err
+                if self._is_duplicate_shared_link_error(err):
+                    return {
+                        "target_path": target,
+                        "created_name": "",
+                        "created_path": "",
+                        "already_exists": True,
+                    }
+                if index >= len(attempts) - 1 or not self._should_retry_shared_link(err):
+                    raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("CD2 AddSharedLink 调用失败")
 
     def list_subfiles(self, path: str) -> List[Dict[str, str]]:
         target = self.normalize_path(path)
@@ -483,40 +475,47 @@ class CloudDrive2Client:
                     items.append(item)
         return items
 
-    def _post_grpc(self, method: str, body: bytes) -> bytes:
-        if not self.base_url:
-            raise RuntimeError("请先在插件配置中填写 CD2 地址")
-        if not self.token:
-            raise RuntimeError("请先在插件配置中填写 CD2 API Token")
+    def _build_shared_link_attempts(self, link: str, target_path: str, password: str) -> List[List[bytes]]:
+        attempts: List[List[bytes]] = [
+            [
+                self._encode_string_field(1, link),
+                self._encode_string_field(2, target_path),
+            ]
+        ]
+        if password:
+            attempts[0].append(self._encode_string_field(3, password))
+            attempts.append(
+                [
+                    self._encode_string_field(1, link),
+                    self._encode_string_field(2, password),
+                    self._encode_string_field(3, target_path),
+                ]
+            )
+        return attempts
 
-        response = self._session.post(
-            f"{self.base_url}/clouddrive.CloudDriveFileSrv/{method}",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "accept": "application/grpc-web+proto",
-                "content-type": "application/grpc-web+proto",
-                "x-grpc-web": "1",
-            },
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
+    def _snapshot_directory(self, target_path: str) -> Dict[str, Dict[str, str]]:
+        try:
+            return {item.get("full_path"): item for item in self.list_subfiles(target_path)}
+        except Exception:
+            return {}
 
-        grpc_status = str(response.headers.get("Grpc-Status") or "").strip()
-        grpc_message = unquote(str(response.headers.get("Grpc-Message") or "").strip())
-        if grpc_status and grpc_status != "0":
-            raise RuntimeError(self._humanize_grpc_message(grpc_message) or f"CD2 调用失败（grpc-status={grpc_status}）")
-        return bytes(response.content or b"")
-
-    @staticmethod
-    def _humanize_grpc_message(message: str) -> str:
-        text = str(message or "").strip()
-        lowered = text.lower()
-        if not text:
-            return ""
-        if "add offline download permission required" in lowered:
-            return "CD2 当前挂载的 115 账号没有“离线下载/添加离线任务”权限，插件已成功提交到 CD2 接口，但被 CD2/115 侧拒绝。请先在 CD2 或 115 中确认该账号具备离线下载能力。"
-        return text
+    def _detect_created_item(self, target_path: str, before_paths: Dict[str, Dict[str, str]]) -> Dict[str, str]:
+        created_item: Dict[str, str] = {}
+        for _ in range(4):
+            time.sleep(self.detect_delay)
+            try:
+                after_items = self.list_subfiles(target_path)
+            except Exception:
+                break
+            new_items = [
+                item
+                for item in after_items
+                if item.get("full_path") and item.get("full_path") not in before_paths
+            ]
+            if new_items:
+                created_item = new_items[0]
+                break
+        return created_item
 
     def _post_grpc(self, method: str, body: bytes) -> bytes:
         if not self.base_url:
@@ -540,7 +539,7 @@ class CloudDrive2Client:
         grpc_status = str(response.headers.get("Grpc-Status") or "").strip()
         grpc_message = unquote(str(response.headers.get("Grpc-Message") or "").strip())
         if grpc_status and grpc_status != "0":
-            raise RuntimeError(self._humanize_grpc_message(grpc_message) or f"CD2 调用失败（grpc-status={grpc_status}）")
+            raise RuntimeError(self._humanize_grpc_message(grpc_message) or f"CD2 gRPC call failed (grpc-status={grpc_status})")
         return bytes(response.content or b"")
 
     @staticmethod
@@ -550,34 +549,54 @@ class CloudDrive2Client:
         if not text:
             return ""
         if "add offline download permission required" in lowered:
-            return (
-                "CD2 当前挂载的 115 账号没有“离线下载 / 添加离线任务”权限，"
-                "插件请求已经到达 CD2 接口，但被 CD2/115 侧拒绝。"
-            )
+            return "CD2 当前挂载的 115 账号没有离线下载权限。"
+        if "password is required" in lowered:
+            return "115 分享链接需要提取码。"
+        if "incorrect password" in lowered:
+            return "115 分享链接提取码错误。"
+        if "shared" in lowered and "permission" in lowered:
+            return "CD2 当前挂载的 115 账号没有 AddSharedLink 权限。"
         return text
 
     def _missing_token_message(self) -> str:
         if self.auth_mode == "web_token":
-            return "请先在插件配置中填写 CD2 网页登录 Token（浏览器 localStorage.token）"
-        return "请先在插件配置中填写 CD2 API Token"
+            return "请先填写 CD2 网页登录 Token（浏览器 localStorage.token）"
+        return "请先填写 CD2 API Token"
 
     @staticmethod
     def _is_duplicate_offline_error(error: Exception) -> bool:
         text = str(error or "").strip().lower()
         if not text:
             return False
-        return (
-            "code: 10008" in text
-            or "任务已存在" in text
-            or "重复的链接地址" in text
+        return "code: 10008" in text or "task already exists" in text or "duplicate link" in text
+
+    @staticmethod
+    def _is_duplicate_shared_link_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        return "shared link already exists" in text or "already exists" in text or "code: 10008" in text
+
+    @staticmethod
+    def _should_retry_shared_link(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "password is required",
+                "incorrect password",
+                "path not found",
+                "not found",
+                "invalid input",
+                "bad request",
+            )
         )
 
     @staticmethod
     def _normalize_auth_mode(mode: str) -> str:
-        value = str(mode or "").strip().lower()
-        if value == "web_token":
-            return "web_token"
-        return "api_token"
+        return "web_token" if str(mode or "").strip().lower() == "web_token" else "api_token"
 
     @staticmethod
     def _wrap_request(parts: Iterable[bytes]) -> bytes:
@@ -586,8 +605,7 @@ class CloudDrive2Client:
 
     @staticmethod
     def _encode_string_field(field_number: int, value: str) -> bytes:
-        text = (value or "").strip()
-        encoded = text.encode("utf-8")
+        encoded = str(value or "").strip().encode("utf-8")
         return CloudDrive2Client._encode_tag(field_number, 2) + CloudDrive2Client._encode_varint(len(encoded)) + encoded
 
     @staticmethod
@@ -619,7 +637,6 @@ class CloudDrive2Client:
             cursor += 5
             frame = data[cursor : cursor + frame_len]
             cursor += frame_len
-            # grpc-web trailers use 0x80; only message frames matter here.
             if flag == 0x80:
                 break
             yield frame
@@ -652,7 +669,7 @@ class CloudDrive2Client:
                 cursor += 8
                 yield field_number, wire_type, value
                 continue
-            raise RuntimeError(f"CD2 protobuf 解析失败，暂不支持 wire_type={wire_type}")
+            raise RuntimeError(f"Unsupported protobuf wire_type={wire_type}")
 
     @staticmethod
     def _read_varint(payload: bytes, cursor: int) -> Tuple[int, int]:
@@ -665,7 +682,7 @@ class CloudDrive2Client:
             if not current & 0x80:
                 return result, cursor
             shift += 7
-        raise RuntimeError("CD2 protobuf 数据不完整，无法继续解析")
+        raise RuntimeError("Incomplete protobuf payload")
 
     @staticmethod
     def _parse_subfile(payload: bytes) -> Optional[Dict[str, str]]:
@@ -680,10 +697,7 @@ class CloudDrive2Client:
                 full_path = value.decode("utf-8", errors="ignore").strip()
         if not name and not full_path:
             return None
-        return {
-            "name": name,
-            "full_path": full_path,
-        }
+        return {"name": name, "full_path": full_path}
 
     @staticmethod
     def normalize_path(path: str) -> str:
@@ -692,8 +706,7 @@ class CloudDrive2Client:
             return ""
         parts = [segment for segment in text.split("/") if segment]
         parts = CloudDrive2Client._collapse_repeated_prefix(parts)
-        normalized = "/" + "/".join(parts)
-        return normalized or "/"
+        return "/" + "/".join(parts)
 
     @staticmethod
     def _collapse_repeated_prefix(parts: List[str]) -> List[str]:
@@ -702,8 +715,8 @@ class CloudDrive2Client:
             collapsed = False
             max_prefix = len(items) // 2
             for prefix_len in range(max_prefix, 0, -1):
-                if items[:prefix_len] == items[prefix_len:prefix_len * 2]:
-                    items = items[:prefix_len] + items[prefix_len * 2:]
+                if items[:prefix_len] == items[prefix_len : prefix_len * 2]:
+                    items = items[:prefix_len] + items[prefix_len * 2 :]
                     collapsed = True
                     break
             if not collapsed:
@@ -713,6 +726,34 @@ class CloudDrive2Client:
     @staticmethod
     def _normalize_base_url(url: str) -> str:
         return str(url or "").strip().rstrip("/")
+
+    @staticmethod
+    def normalize_share_link(url: str, password: str = "") -> Tuple[str, str]:
+        link = (url or "").strip()
+        secret = (password or "").strip()
+        if not link:
+            return "", secret
+
+        parts = urlsplit(link)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+        filtered_items = []
+        for key, value in query_items:
+            if key == "password":
+                if not secret and value:
+                    secret = value.strip()
+                continue
+            filtered_items.append((key, value))
+
+        normalized_url = urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(filtered_items, doseq=True),
+                parts.fragment,
+            )
+        )
+        return normalized_url or link, secret
 
     @staticmethod
     def append_share_password(url: str, password: str) -> str:
