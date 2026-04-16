@@ -27,7 +27,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持提交到 CD2 / 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.15"
+    plugin_version = "0.4.16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -110,6 +110,10 @@ class Panlink115(_PluginBase):
 
     def get_service(self) -> List[Dict[str, Any]]:
         return []
+
+    def get_page(self) -> Optional[List[dict]]:
+        # Vue render mode uses the remote frontend bundle; no Vuetify page schema is needed.
+        return None
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return (
@@ -415,6 +419,10 @@ class Panlink115(_PluginBase):
                 "cd2_detect_delay": 1.2,
             },
         )
+
+    def stop_service(self):
+        # This plugin has no background scheduler/service to stop.
+        pass
 
     def api_state(self) -> Dict[str, Any]:
         auth_info = self._get_cd2_auth_info()
