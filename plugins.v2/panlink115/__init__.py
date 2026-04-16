@@ -25,7 +25,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.9"
+    plugin_version = "0.4.10"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -76,7 +76,12 @@ class Panlink115(_PluginBase):
         self._restore_state()
         self._client = self._build_client()
         self._cd2_client = self._build_cd2_client()
-        logger.info("Panlink115 plugin initialized")
+        logger.info(
+            "Panlink115 plugin initialized: auth_mode=%s has_api_token=%s has_web_token=%s",
+            self._cd2_auth_mode,
+            bool(self._cd2_token),
+            bool(self._cd2_web_token),
+        )
 
     def get_state(self) -> bool:
         return self._enabled
@@ -233,6 +238,45 @@ class Panlink115(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "cd2_auth_mode",
+                                            "label": "CD2 鉴权模式",
+                                            "items": [
+                                                {"title": "API Token", "value": "api_token"},
+                                                {"title": "网页登录 Token", "value": "web_token"},
+                                            ],
+                                            "itemTitle": "title",
+                                            "itemValue": "value",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "cd2_web_token",
+                                            "label": "CD2 网页登录 Token",
+                                            "type": "password",
+                                            "placeholder": "填写浏览器 localStorage.token",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -365,7 +409,9 @@ class Panlink115(_PluginBase):
             "max_results": 10,
             "only_show_115": True,
             "cd2_url": "",
+            "cd2_auth_mode": "api_token",
             "cd2_token": "",
+            "cd2_web_token": "",
             "cd2_default_root": "",
             "cd2_directory_roots": "",
             "cd2_category_roots": "",
@@ -498,7 +544,13 @@ class Panlink115(_PluginBase):
             target_path = self._resolve_cd2_target_path(category_group, category_name)
             result = self._build_cd2_client().add_offline_file(url=share_url, target_path=target_path)
         except Exception as err:
-            logger.error("Panlink115 submit to CD2 failed: %s", err)
+            logger.error(
+                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
+                self._cd2_auth_mode,
+                bool(self._cd2_token),
+                bool(self._cd2_web_token),
+                err,
+            )
             self._last_message = f"提交到 115 失败：{err}"
             self._persist_state()
             return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
@@ -916,6 +968,12 @@ class Panlink115(_PluginBase):
             share_url = CloudDrive2Client.append_share_password(raw_url, password)
             target_path = self._resolve_cd2_target_path(group, name)
             client = self._build_cd2_client()
+            logger.info(
+                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s target=%s",
+                self._cd2_auth_mode,
+                client.get_auth_label(),
+                target_path,
+            )
             result = client.add_offline_file(url=share_url, target_path=target_path)
         except Exception as err:
             logger.error("Panlink115 submit to CD2 failed: %s", err)
