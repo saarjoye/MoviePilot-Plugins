@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, nextTick, onMounted, ref } from "vue";
 
 const emit = defineEmits(["action", "switch", "close"]);
@@ -16,14 +16,21 @@ const searching = ref(false);
 const loadingVodId = ref("");
 const queueLoading = ref(false);
 const categoryLoading = ref(false);
+const diagnosisLoading = ref(false);
 const searchResults = ref([]);
 const selectedMedia = ref(null);
 const linkGroups = ref({});
 const queueItems = ref([]);
+const diagnosis = ref(null);
 const pluginState = ref({
   enabled: false,
   only_show_115: true,
-  max_results: 10
+  max_results: 10,
+  cd2_configured: false,
+  cd2_auth_mode: "api_token",
+  cd2_auth_label: "API Token",
+  cd2_has_api_token: false,
+  cd2_has_web_token: false
 });
 const groupDialog = ref(false);
 const downloadDialog = ref(false);
@@ -37,6 +44,12 @@ const latestQueueKey = ref("");
 
 const resultCountText = computed(() => `共 ${searchResults.value.length} 条候选结果`);
 const queueCountText = computed(() => `任务队列 ${queueItems.value.length} 条`);
+const authSummaryText = computed(() => {
+  if (!pluginState.value.cd2_configured) {
+    return "CD2 未配置";
+  }
+  return `CD2 ${pluginState.value.cd2_auth_label || "未识别"} 模式`;
+});
 const groupCards = computed(() =>
   Object.entries(linkGroups.value || {}).map(([name, entries]) => ({
     name,
@@ -44,9 +57,21 @@ const groupCards = computed(() =>
     count: Array.isArray(entries) ? entries.length : 0
   }))
 );
-const selectedCategoryLabel = computed(() => {
-  const matched = categoryOptions.value.find((item) => item.key === selectedCategoryKey.value);
-  return matched ? matched.label : "";
+const selectedCategory = computed(() =>
+  categoryOptions.value.find((item) => item.key === selectedCategoryKey.value) || null
+);
+const selectedCategoryLabel = computed(() => selectedCategory.value?.label || "");
+const diagnosisAlertType = computed(() => {
+  if (diagnosis.value?.status === "success") {
+    return "success";
+  }
+  if (diagnosis.value?.status === "warning") {
+    return "warning";
+  }
+  if (diagnosis.value?.status === "error") {
+    return "error";
+  }
+  return "info";
 });
 
 function normalizePayload(response) {
@@ -91,12 +116,6 @@ function mediaMeta(item) {
     { label: "语言", value: item.vod_lang },
     { label: "更新时间", value: item.vod_update_time }
   ].filter((entry) => safeText(entry.value));
-}
-
-function openGroupDialog(name) {
-  activeGroupName.value = name;
-  activeEntries.value = Array.isArray(linkGroups.value?.[name]) ? linkGroups.value[name] : [];
-  groupDialog.value = true;
 }
 
 function entrySubtitle(entry) {
@@ -201,10 +220,16 @@ async function fetchState() {
       : null;
     linkGroups.value = payload?.link_groups || {};
     queueItems.value = payload?.queue || [];
+    diagnosis.value = payload?.diagnosis && Object.keys(payload.diagnosis).length ? payload.diagnosis : null;
     pluginState.value = {
       enabled: Boolean(payload?.enabled),
       only_show_115: Boolean(payload?.only_show_115),
-      max_results: Number(payload?.max_results || 10)
+      max_results: Number(payload?.max_results || 10),
+      cd2_configured: Boolean(payload?.cd2_configured),
+      cd2_auth_mode: payload?.cd2_auth_mode || "api_token",
+      cd2_auth_label: payload?.cd2_auth_label || "API Token",
+      cd2_has_api_token: Boolean(payload?.cd2_has_api_token),
+      cd2_has_web_token: Boolean(payload?.cd2_has_web_token)
     };
   } catch (error) {
     statusMessage.value = error?.message || "读取插件状态失败。";
@@ -251,6 +276,7 @@ async function loadLinks(item) {
 
   selectedMedia.value = { ...item };
   loadingVodId.value = item.vod_id;
+  linkGroups.value = {};
   statusMessage.value = `正在加载《${item.vod_name}》的盘链资源…`;
   try {
     const payload = normalizePayload(
@@ -273,6 +299,12 @@ async function loadLinks(item) {
   }
 }
 
+function openGroupDialog(name) {
+  activeGroupName.value = name;
+  activeEntries.value = Array.isArray(linkGroups.value?.[name]) ? linkGroups.value[name] : [];
+  groupDialog.value = true;
+}
+
 async function openDownloadDialog(entry) {
   selectedEntry.value = entry;
   await fetchCategories();
@@ -280,14 +312,34 @@ async function openDownloadDialog(entry) {
   downloadDialog.value = true;
 }
 
-async function queue115() {
-  if (!selectedEntry.value?.url || !selectedCategoryKey.value || queueLoading.value) {
+async function diagnoseCd2() {
+  if (!selectedCategory.value || diagnosisLoading.value) {
+    statusMessage.value = "请先选择 MoviePilot 分类，再执行 CD2 诊断。";
     return;
   }
 
-  const selectedCategory = categoryOptions.value.find((item) => item.key === selectedCategoryKey.value);
-  if (!selectedCategory) {
-    statusMessage.value = "请先选择 MoviePilot 分类。";
+  diagnosisLoading.value = true;
+  try {
+    const payload = normalizePayload(
+      await props.api.get("plugin/Panlink115/diagnose_cd2", {
+        params: {
+          category_group: selectedCategory.value.group,
+          category_name: selectedCategory.value.name
+        }
+      })
+    );
+    diagnosis.value = payload?.diagnosis || null;
+    statusMessage.value = payload?.message || "CD2 诊断完成。";
+    emit("action");
+  } catch (error) {
+    statusMessage.value = error?.message || "CD2 诊断失败。";
+  } finally {
+    diagnosisLoading.value = false;
+  }
+}
+
+async function queue115() {
+  if (!selectedEntry.value?.url || !selectedCategory.value || queueLoading.value) {
     return;
   }
 
@@ -303,8 +355,8 @@ async function queue115() {
           vod_id: selectedMedia.value?.vod_id,
           vod_name: selectedMedia.value?.vod_name,
           type_name: selectedMedia.value?.type_name,
-          category_group: selectedCategory.group,
-          category_name: selectedCategory.name
+          category_group: selectedCategory.value.group,
+          category_name: selectedCategory.value.name
         }
       })
     );
@@ -355,7 +407,9 @@ onMounted(async () => {
           <div>
             <div class="hero-kicker">PANLIAN x MOVIEPILOT</div>
             <h1 class="hero-title">盘链搜索与 115 提交</h1>
-            <p class="hero-text">搜索盘链资源，查看 115 链接，并优先按 MoviePilot 的“存储 & 目录”映射结果提交到 CD2。</p>
+            <p class="hero-text">
+              搜索盘链资源，查看 115 链接，并按 MoviePilot 的目录体系解析目标路径后提交到 CD2。
+            </p>
           </div>
           <div class="hero-chips">
             <VChip :color="pluginState.enabled ? 'success' : 'warning'" size="small" variant="flat">
@@ -363,6 +417,9 @@ onMounted(async () => {
             </VChip>
             <VChip size="small" variant="outlined">
               {{ pluginState.only_show_115 ? "当前仅显示 115" : "当前显示全部网盘" }}
+            </VChip>
+            <VChip :color="pluginState.cd2_configured ? 'primary' : 'warning'" size="small" variant="outlined">
+              {{ authSummaryText }}
             </VChip>
             <VChip size="small" variant="outlined">
               最大 {{ pluginState.max_results }} 条结果
@@ -496,13 +553,41 @@ onMounted(async () => {
           </VCardText>
         </VCard>
 
+        <VCard class="diagnosis-panel" rounded="xl">
+          <VCardTitle class="panel-title">
+            <span>CD2 诊断</span>
+            <span class="panel-subtitle">{{ pluginState.cd2_auth_label || "未配置" }}</span>
+          </VCardTitle>
+          <VCardText>
+            <VAlert v-if="diagnosis" :type="diagnosisAlertType" variant="tonal">
+              {{ diagnosis.message }}
+            </VAlert>
+            <VAlert v-else type="info" variant="tonal">
+              还没有诊断记录。打开 115 资源弹层，选择 MoviePilot 分类后点击“诊断当前目录”即可检查当前认证模式和目标路径。
+            </VAlert>
+
+            <div v-if="diagnosis" class="diagnosis-meta">
+              <div class="queue-path">认证模式：{{ diagnosis.auth_label || "未知" }}</div>
+              <div v-if="diagnosis.category_group && diagnosis.category_name" class="queue-path">
+                分类：{{ diagnosis.category_group }} / {{ diagnosis.category_name }}
+              </div>
+              <div v-if="diagnosis.target_path" class="queue-path">目标目录：{{ diagnosis.target_path }}</div>
+              <div v-if="typeof diagnosis.directory_entries === 'number'" class="queue-path">
+                目录可见条目：{{ diagnosis.directory_entries }}
+              </div>
+            </div>
+          </VCardText>
+        </VCard>
+
         <VCard ref="queueSectionRef" class="queue-panel" rounded="xl">
           <VCardTitle class="panel-title">
             <span>下载任务</span>
             <VBtn color="warning" variant="text" :disabled="!queueItems.length" :loading="queueLoading" @click="clearQueue">清空队列</VBtn>
           </VCardTitle>
           <VCardText v-if="queueItems.length" class="queue-list">
-            <VAlert type="success" variant="tonal">当前“下载”会真实调用 CD2，并优先按 MoviePilot 的目录映射把盘链 115 链接提交到目标目录中。</VAlert>
+            <VAlert type="success" variant="tonal">
+              当前“下载”会真实调用 CD2，并按你选中的 MoviePilot 分类解析目标目录。若 API Token 模式报权限不足，请切换到网页登录 Token 模式。
+            </VAlert>
             <article
               v-for="item in queueItems"
               :key="`${item.url}-${item.category_name}`"
@@ -511,6 +596,7 @@ onMounted(async () => {
             >
               <div class="queue-name">{{ item.vod_name || item.title }}</div>
               <div class="queue-path">分类：{{ queueSubtitle(item) }}</div>
+              <div v-if="item.auth_label" class="queue-path">提交认证：{{ item.auth_label }}</div>
               <div v-if="item.target_path" class="queue-path">CD2 目录：{{ item.target_path }}</div>
               <div v-if="item.created_path" class="queue-path">检测到新目录：{{ item.created_path }}</div>
               <div class="queue-meta">
@@ -553,12 +639,19 @@ onMounted(async () => {
       </VCard>
     </VDialog>
 
-    <VDialog v-model="downloadDialog" max-width="720">
+    <VDialog v-model="downloadDialog" max-width="760">
       <VCard rounded="xl">
         <VCardTitle>创建 115 下载任务</VCardTitle>
         <VCardText class="dialog-list">
           <VAlert type="info" variant="tonal">
-            分类直接读取 MoviePilot 当前配置；提交时会先匹配 MoviePilot 的“存储 & 目录”，再按“CD2 MP目录映射”换算目标路径，最后才回退到分类映射和默认根目录。
+            当前会先匹配 MoviePilot 目录，再换算为 CD2 目标路径。建议先点一次“诊断当前目录”，确认当前认证模式是否适合做离线提交。
+          </VAlert>
+
+          <VAlert :type="pluginState.cd2_auth_mode === 'web_token' ? 'success' : 'warning'" variant="outlined">
+            当前提交认证：{{ pluginState.cd2_auth_label || "未配置" }}
+            <span v-if="pluginState.cd2_auth_mode === 'api_token'">
+              。若你已经在配置页填写了网页登录 Token，遇到离线权限不足时请切换到网页登录 Token 模式。
+            </span>
           </VAlert>
 
           <div class="download-summary">
@@ -586,6 +679,14 @@ onMounted(async () => {
           <div v-if="selectedCategoryLabel" class="selection-preview">
             当前任务将写入：{{ selectedCategoryLabel }}
           </div>
+
+          <div class="dialog-actions">
+            <VBtn variant="outlined" :loading="diagnosisLoading" @click="diagnoseCd2">诊断当前目录</VBtn>
+          </div>
+
+          <VAlert v-if="diagnosis" :type="diagnosisAlertType" variant="tonal">
+            {{ diagnosis.message }}
+          </VAlert>
         </VCardText>
         <VCardActions class="px-6 pb-5">
           <VSpacer />
@@ -619,6 +720,7 @@ onMounted(async () => {
 .result-panel,
 .detail-panel,
 .resource-panel,
+.diagnosis-panel,
 .queue-panel {
   background: var(--panlink-card);
   border: 1px solid var(--panlink-border);
@@ -886,6 +988,13 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.diagnosis-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
 }
 
 @media (max-width: 960px) {

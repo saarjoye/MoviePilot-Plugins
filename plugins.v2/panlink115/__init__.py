@@ -16,6 +16,7 @@ _PLUGIN_STATE: Dict[str, Any] = {
     "search_results": [],
     "selected_media": None,
     "link_groups": {},
+    "diagnosis": {},
 }
 
 
@@ -24,7 +25,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.7"
+    plugin_version = "0.4.9"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -38,7 +39,9 @@ class Panlink115(_PluginBase):
     _max_results: int = 10
     _only_show_115: bool = True
     _cd2_url: str = ""
+    _cd2_auth_mode: str = "api_token"
     _cd2_token: str = ""
+    _cd2_web_token: str = ""
     _cd2_default_root: str = ""
     _cd2_directory_roots: Dict[str, str] = {}
     _cd2_category_roots: Dict[str, str] = {}
@@ -51,6 +54,7 @@ class Panlink115(_PluginBase):
     _search_results: List[Dict[str, Any]] = []
     _selected_media: Optional[Dict[str, Any]] = None
     _link_groups: Dict[str, List[Dict[str, Any]]] = {}
+    _last_diagnosis: Dict[str, Any] = {}
 
     def init_plugin(self, config: dict = None):
         config = config or {}
@@ -61,7 +65,9 @@ class Panlink115(_PluginBase):
         self._max_results = self._to_int(config.get("max_results"), default=10, minimum=1)
         self._only_show_115 = bool(config.get("only_show_115", True))
         self._cd2_url = str(config.get("cd2_url") or "").strip()
+        self._cd2_auth_mode = self._normalize_cd2_auth_mode(config.get("cd2_auth_mode"))
         self._cd2_token = str(config.get("cd2_token") or "").strip()
+        self._cd2_web_token = str(config.get("cd2_web_token") or "").strip()
         self._cd2_default_root = self._normalize_path(config.get("cd2_default_root"))
         self._cd2_directory_roots = self._parse_directory_roots(config.get("cd2_directory_roots"))
         self._cd2_category_roots = self._parse_category_roots(config.get("cd2_category_roots"))
@@ -769,6 +775,261 @@ class Panlink115(_PluginBase):
         _PLUGIN_STATE["search_results"] = list(self._search_results)
         _PLUGIN_STATE["selected_media"] = dict(self._selected_media or {})
         _PLUGIN_STATE["link_groups"] = dict(self._link_groups)
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "path": "/state",
+                "endpoint": self.api_state,
+                "methods": ["GET"],
+                "summary": "读取插件状态",
+                "auth": "bear",
+            },
+            {
+                "path": "/search",
+                "endpoint": self.api_search,
+                "methods": ["GET"],
+                "summary": "盘链搜索",
+                "auth": "bear",
+            },
+            {
+                "path": "/load_links",
+                "endpoint": self.api_load_links,
+                "methods": ["GET"],
+                "summary": "加载详情与链接",
+                "auth": "bear",
+            },
+            {
+                "path": "/queue_115",
+                "endpoint": self.api_queue_115,
+                "methods": ["GET"],
+                "summary": "提交到 115 / CD2",
+                "auth": "bear",
+            },
+            {
+                "path": "/diagnose_cd2",
+                "endpoint": self.api_diagnose_cd2,
+                "methods": ["GET"],
+                "summary": "诊断 CD2 认证与目录连通性",
+                "auth": "bear",
+            },
+            {
+                "path": "/clear_queue",
+                "endpoint": self.api_clear_queue,
+                "methods": ["GET"],
+                "summary": "清空任务队列",
+                "auth": "bear",
+            },
+        ]
+
+    def api_state(self) -> Dict[str, Any]:
+        auth_info = self._get_cd2_auth_info()
+        return {
+            "success": True,
+            "message": self._last_message,
+            "queue": list(self._queued_115),
+            "enabled": self._enabled,
+            "only_show_115": self._only_show_115,
+            "max_results": self._max_results,
+            "cd2_configured": bool(auth_info.get("configured")),
+            "cd2_auth_mode": auth_info.get("mode"),
+            "cd2_auth_label": auth_info.get("label"),
+            "cd2_has_api_token": bool(auth_info.get("has_api_token")),
+            "cd2_has_web_token": bool(auth_info.get("has_web_token")),
+            "keyword": self._last_keyword,
+            "results": list(self._search_results),
+            "selected_media": dict(self._selected_media or {}),
+            "link_groups": dict(self._link_groups),
+            "diagnosis": dict(self._last_diagnosis or {}),
+        }
+
+    def api_diagnose_cd2(self, category_group: str = "", category_name: str = "") -> Dict[str, Any]:
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        if not group or not name:
+            self._last_message = "请先选择 MoviePilot 分类，再执行 CD2 诊断。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "diagnosis": {}}
+
+        try:
+            target_path = self._resolve_cd2_target_path(group, name)
+            diagnosis = self._build_cd2_client().diagnose_target(
+                target_path=target_path,
+                has_alternate_auth=self._has_alternate_cd2_auth(),
+            )
+            diagnosis["category_group"] = group
+            diagnosis["category_name"] = name
+            self._last_diagnosis = diagnosis
+            self._last_message = str(diagnosis.get("message") or "CD2 诊断完成。")
+            self._persist_state()
+            logger.info("Panlink115 CD2 diagnose requested: %s / %s -> %s", group, name, target_path)
+            return {
+                "success": diagnosis.get("status") != "error",
+                "message": self._last_message,
+                "diagnosis": diagnosis,
+            }
+        except Exception as err:
+            logger.error("Panlink115 CD2 diagnose failed: %s", err)
+            self._last_diagnosis = {
+                "status": "error",
+                "auth_mode": self._cd2_auth_mode,
+                "auth_label": self._get_cd2_auth_info().get("label"),
+                "category_group": group,
+                "category_name": name,
+                "message": str(err),
+            }
+            self._last_message = f"CD2 诊断失败：{err}"
+            self._persist_state()
+            return {
+                "success": False,
+                "message": self._last_message,
+                "diagnosis": dict(self._last_diagnosis),
+            }
+
+    def api_queue_115(
+        self,
+        title: str = "",
+        url: str = "",
+        password: str = "",
+        source: str = "",
+        vod_id: str = "",
+        vod_name: str = "",
+        type_name: str = "",
+        category_group: str = "",
+        category_name: str = "",
+    ) -> Dict[str, Any]:
+        title = (title or "").strip() or "未命名资源"
+        vod_name = (vod_name or "").strip() or title
+        raw_url = (url or "").strip()
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        if not raw_url:
+            self._last_message = "缺少 115 链接，无法加入下载任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+        if not group or not name:
+            self._last_message = "请先选择当前 MoviePilot 已配置的分类后再创建下载任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        try:
+            share_url = CloudDrive2Client.append_share_password(raw_url, password)
+            target_path = self._resolve_cd2_target_path(group, name)
+            client = self._build_cd2_client()
+            result = client.add_offline_file(url=share_url, target_path=target_path)
+        except Exception as err:
+            logger.error("Panlink115 submit to CD2 failed: %s", err)
+            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        item = {
+            "title": title,
+            "vod_id": str(vod_id or "").strip(),
+            "vod_name": vod_name,
+            "type_name": (type_name or "").strip(),
+            "url": share_url,
+            "password": (password or "").strip(),
+            "source": (source or "").strip(),
+            "category_group": group,
+            "category_name": name,
+            "target_path": result.get("target_path") or target_path,
+            "created_name": result.get("created_name") or "",
+            "created_path": result.get("created_path") or "",
+            "auth_label": client.get_auth_label(),
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "已提交到 115",
+        }
+        if item["created_path"]:
+            item["status"] = "已提交到 115，并检测到新目录"
+
+        if not any(
+            existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
+            for existing in self._queued_115
+        ):
+            self._queued_115.insert(0, item)
+
+        if item["created_path"]:
+            self._last_message = (
+                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录"
+                f"{item['created_name'] or item['created_path']}。"
+            )
+        else:
+            self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
+        self._persist_state()
+        logger.info("Panlink115 submitted 115 task via CD2: %s -> %s", vod_name, item["target_path"])
+        return {
+            "success": True,
+            "message": self._last_message,
+            "item": item,
+            "queue": list(self._queued_115),
+        }
+
+    def _build_cd2_client(self) -> CloudDrive2Client:
+        if not self._cd2_client:
+            self._cd2_client = CloudDrive2Client(
+                base_url=self._cd2_url,
+                token=self._cd2_token,
+                web_token=self._cd2_web_token,
+                auth_mode=self._cd2_auth_mode,
+                timeout=self._timeout,
+                detect_delay=self._cd2_detect_delay,
+            )
+        else:
+            self._cd2_client.update_config(
+                base_url=self._cd2_url,
+                token=self._cd2_token,
+                web_token=self._cd2_web_token,
+                auth_mode=self._cd2_auth_mode,
+                timeout=self._timeout,
+                detect_delay=self._cd2_detect_delay,
+            )
+        return self._cd2_client
+
+    def _restore_state(self) -> None:
+        self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
+        self._last_message = str(_PLUGIN_STATE.get("last_message") or "尚未开始搜索。")
+        self._last_keyword = str(_PLUGIN_STATE.get("last_keyword") or "")
+        self._search_results = list(_PLUGIN_STATE.get("search_results") or [])
+        selected = _PLUGIN_STATE.get("selected_media") or {}
+        self._selected_media = dict(selected) if isinstance(selected, dict) else None
+        self._link_groups = dict(_PLUGIN_STATE.get("link_groups") or {})
+        self._last_diagnosis = dict(_PLUGIN_STATE.get("diagnosis") or {})
+
+    def _persist_state(self) -> None:
+        _PLUGIN_STATE["queued_115"] = list(self._queued_115)
+        _PLUGIN_STATE["last_message"] = self._last_message
+        _PLUGIN_STATE["last_keyword"] = self._last_keyword
+        _PLUGIN_STATE["search_results"] = list(self._search_results)
+        _PLUGIN_STATE["selected_media"] = dict(self._selected_media or {})
+        _PLUGIN_STATE["link_groups"] = dict(self._link_groups)
+        _PLUGIN_STATE["diagnosis"] = dict(self._last_diagnosis or {})
+
+    def _get_cd2_auth_info(self) -> Dict[str, Any]:
+        return self._build_cd2_client().describe_auth()
+
+    def _has_alternate_cd2_auth(self) -> bool:
+        if self._cd2_auth_mode == "web_token":
+            return bool(self._cd2_token)
+        return bool(self._cd2_web_token)
+
+    def _append_cd2_auth_hint(self, message: str) -> str:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if (
+            self._cd2_auth_mode == "api_token"
+            and self._cd2_web_token
+            and ("离线下载" in text or "add offline" in lowered or "permission required" in lowered)
+        ):
+            return f"{text} 当前已配置网页登录 Token，可将 CD2 鉴权模式切换为“网页登录 Token”后重试。"
+        return text
+
+    @staticmethod
+    def _normalize_cd2_auth_mode(value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode == "web_token":
+            return "web_token"
+        return "api_token"
 
     @staticmethod
     def _to_int(value: Any, default: int, minimum: int) -> int:

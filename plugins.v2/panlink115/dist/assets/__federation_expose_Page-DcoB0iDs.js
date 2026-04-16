@@ -44,32 +44,56 @@ const _hoisted_31 = ["onClick"];
 const _hoisted_32 = { class: "resource-name" };
 const _hoisted_33 = { class: "resource-count" };
 const _hoisted_34 = { class: "resource-hint" };
-const _hoisted_35 = { class: "queue-name" };
-const _hoisted_36 = { class: "queue-path" };
-const _hoisted_37 = {
+const _hoisted_35 = { class: "panel-subtitle" };
+const _hoisted_36 = {
+  key: 2,
+  class: "diagnosis-meta"
+};
+const _hoisted_37 = { class: "queue-path" };
+const _hoisted_38 = {
   key: 0,
   class: "queue-path"
 };
-const _hoisted_38 = {
+const _hoisted_39 = {
   key: 1,
   class: "queue-path"
 };
-const _hoisted_39 = { class: "queue-meta" };
-const _hoisted_40 = { class: "queue-status" };
-const _hoisted_41 = { class: "queue-url" };
-const _hoisted_42 = { class: "queue-pass" };
-const _hoisted_43 = { class: "dialog-entry-title" };
-const _hoisted_44 = { class: "dialog-entry-subtitle" };
-const _hoisted_45 = { class: "dialog-entry-url" };
-const _hoisted_46 = { class: "dialog-entry-pass" };
-const _hoisted_47 = { class: "dialog-actions" };
-const _hoisted_48 = { class: "download-summary" };
-const _hoisted_49 = { class: "download-row" };
-const _hoisted_50 = { class: "download-row" };
-const _hoisted_51 = {
+const _hoisted_40 = {
+  key: 2,
+  class: "queue-path"
+};
+const _hoisted_41 = { class: "queue-name" };
+const _hoisted_42 = { class: "queue-path" };
+const _hoisted_43 = {
+  key: 0,
+  class: "queue-path"
+};
+const _hoisted_44 = {
+  key: 1,
+  class: "queue-path"
+};
+const _hoisted_45 = {
+  key: 2,
+  class: "queue-path"
+};
+const _hoisted_46 = { class: "queue-meta" };
+const _hoisted_47 = { class: "queue-status" };
+const _hoisted_48 = { class: "queue-url" };
+const _hoisted_49 = { class: "queue-pass" };
+const _hoisted_50 = { class: "dialog-entry-title" };
+const _hoisted_51 = { class: "dialog-entry-subtitle" };
+const _hoisted_52 = { class: "dialog-entry-url" };
+const _hoisted_53 = { class: "dialog-entry-pass" };
+const _hoisted_54 = { class: "dialog-actions" };
+const _hoisted_55 = { key: 0 };
+const _hoisted_56 = { class: "download-summary" };
+const _hoisted_57 = { class: "download-row" };
+const _hoisted_58 = { class: "download-row" };
+const _hoisted_59 = {
   key: 0,
   class: "selection-preview"
 };
+const _hoisted_60 = { class: "dialog-actions" };
 
 const {computed,nextTick,onMounted,ref} = await importShared('vue');
 
@@ -96,14 +120,21 @@ const searching = ref(false);
 const loadingVodId = ref("");
 const queueLoading = ref(false);
 const categoryLoading = ref(false);
+const diagnosisLoading = ref(false);
 const searchResults = ref([]);
 const selectedMedia = ref(null);
 const linkGroups = ref({});
 const queueItems = ref([]);
+const diagnosis = ref(null);
 const pluginState = ref({
   enabled: false,
   only_show_115: true,
-  max_results: 10
+  max_results: 10,
+  cd2_configured: false,
+  cd2_auth_mode: "api_token",
+  cd2_auth_label: "API Token",
+  cd2_has_api_token: false,
+  cd2_has_web_token: false
 });
 const groupDialog = ref(false);
 const downloadDialog = ref(false);
@@ -117,6 +148,12 @@ const latestQueueKey = ref("");
 
 const resultCountText = computed(() => `共 ${searchResults.value.length} 条候选结果`);
 const queueCountText = computed(() => `任务队列 ${queueItems.value.length} 条`);
+const authSummaryText = computed(() => {
+  if (!pluginState.value.cd2_configured) {
+    return "CD2 未配置";
+  }
+  return `CD2 ${pluginState.value.cd2_auth_label || "未识别"} 模式`;
+});
 const groupCards = computed(() =>
   Object.entries(linkGroups.value || {}).map(([name, entries]) => ({
     name,
@@ -124,9 +161,21 @@ const groupCards = computed(() =>
     count: Array.isArray(entries) ? entries.length : 0
   }))
 );
-const selectedCategoryLabel = computed(() => {
-  const matched = categoryOptions.value.find((item) => item.key === selectedCategoryKey.value);
-  return matched ? matched.label : "";
+const selectedCategory = computed(() =>
+  categoryOptions.value.find((item) => item.key === selectedCategoryKey.value) || null
+);
+const selectedCategoryLabel = computed(() => selectedCategory.value?.label || "");
+const diagnosisAlertType = computed(() => {
+  if (diagnosis.value?.status === "success") {
+    return "success";
+  }
+  if (diagnosis.value?.status === "warning") {
+    return "warning";
+  }
+  if (diagnosis.value?.status === "error") {
+    return "error";
+  }
+  return "info";
 });
 
 function normalizePayload(response) {
@@ -171,12 +220,6 @@ function mediaMeta(item) {
     { label: "语言", value: item.vod_lang },
     { label: "更新时间", value: item.vod_update_time }
   ].filter((entry) => safeText(entry.value));
-}
-
-function openGroupDialog(name) {
-  activeGroupName.value = name;
-  activeEntries.value = Array.isArray(linkGroups.value?.[name]) ? linkGroups.value[name] : [];
-  groupDialog.value = true;
 }
 
 function entrySubtitle(entry) {
@@ -281,10 +324,16 @@ async function fetchState() {
       : null;
     linkGroups.value = payload?.link_groups || {};
     queueItems.value = payload?.queue || [];
+    diagnosis.value = payload?.diagnosis && Object.keys(payload.diagnosis).length ? payload.diagnosis : null;
     pluginState.value = {
       enabled: Boolean(payload?.enabled),
       only_show_115: Boolean(payload?.only_show_115),
-      max_results: Number(payload?.max_results || 10)
+      max_results: Number(payload?.max_results || 10),
+      cd2_configured: Boolean(payload?.cd2_configured),
+      cd2_auth_mode: payload?.cd2_auth_mode || "api_token",
+      cd2_auth_label: payload?.cd2_auth_label || "API Token",
+      cd2_has_api_token: Boolean(payload?.cd2_has_api_token),
+      cd2_has_web_token: Boolean(payload?.cd2_has_web_token)
     };
   } catch (error) {
     statusMessage.value = error?.message || "读取插件状态失败。";
@@ -331,6 +380,7 @@ async function loadLinks(item) {
 
   selectedMedia.value = { ...item };
   loadingVodId.value = item.vod_id;
+  linkGroups.value = {};
   statusMessage.value = `正在加载《${item.vod_name}》的盘链资源…`;
   try {
     const payload = normalizePayload(
@@ -353,6 +403,12 @@ async function loadLinks(item) {
   }
 }
 
+function openGroupDialog(name) {
+  activeGroupName.value = name;
+  activeEntries.value = Array.isArray(linkGroups.value?.[name]) ? linkGroups.value[name] : [];
+  groupDialog.value = true;
+}
+
 async function openDownloadDialog(entry) {
   selectedEntry.value = entry;
   await fetchCategories();
@@ -360,14 +416,34 @@ async function openDownloadDialog(entry) {
   downloadDialog.value = true;
 }
 
-async function queue115() {
-  if (!selectedEntry.value?.url || !selectedCategoryKey.value || queueLoading.value) {
+async function diagnoseCd2() {
+  if (!selectedCategory.value || diagnosisLoading.value) {
+    statusMessage.value = "请先选择 MoviePilot 分类，再执行 CD2 诊断。";
     return;
   }
 
-  const selectedCategory = categoryOptions.value.find((item) => item.key === selectedCategoryKey.value);
-  if (!selectedCategory) {
-    statusMessage.value = "请先选择 MoviePilot 分类。";
+  diagnosisLoading.value = true;
+  try {
+    const payload = normalizePayload(
+      await props.api.get("plugin/Panlink115/diagnose_cd2", {
+        params: {
+          category_group: selectedCategory.value.group,
+          category_name: selectedCategory.value.name
+        }
+      })
+    );
+    diagnosis.value = payload?.diagnosis || null;
+    statusMessage.value = payload?.message || "CD2 诊断完成。";
+    emit("action");
+  } catch (error) {
+    statusMessage.value = error?.message || "CD2 诊断失败。";
+  } finally {
+    diagnosisLoading.value = false;
+  }
+}
+
+async function queue115() {
+  if (!selectedEntry.value?.url || !selectedCategory.value || queueLoading.value) {
     return;
   }
 
@@ -383,8 +459,8 @@ async function queue115() {
           vod_id: selectedMedia.value?.vod_id,
           vod_name: selectedMedia.value?.vod_name,
           type_name: selectedMedia.value?.type_name,
-          category_group: selectedCategory.group,
-          category_name: selectedCategory.name
+          category_group: selectedCategory.value.group,
+          category_name: selectedCategory.value.name
         }
       })
     );
@@ -452,7 +528,7 @@ return (_ctx, _cache) => {
               _cache[7] || (_cache[7] = _createElementVNode("div", null, [
                 _createElementVNode("div", { class: "hero-kicker" }, "PANLIAN x MOVIEPILOT"),
                 _createElementVNode("h1", { class: "hero-title" }, "盘链搜索与 115 提交"),
-                _createElementVNode("p", { class: "hero-text" }, "搜索盘链资源，查看 115 链接，并优先按 MoviePilot 的“存储 & 目录”映射结果提交到 CD2。")
+                _createElementVNode("p", { class: "hero-text" }, " 搜索盘链资源，查看 115 链接，并按 MoviePilot 的目录体系解析目标路径后提交到 CD2。 ")
               ], -1)),
               _createElementVNode("div", _hoisted_3, [
                 _createVNode(_component_VChip, {
@@ -474,6 +550,16 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
+                _createVNode(_component_VChip, {
+                  color: pluginState.value.cd2_configured ? 'primary' : 'warning',
+                  size: "small",
+                  variant: "outlined"
+                }, {
+                  default: _withCtx(() => [
+                    _createTextVNode(_toDisplayString(authSummaryText.value), 1)
+                  ]),
+                  _: 1
+                }, 8, ["color"]),
                 _createVNode(_component_VChip, {
                   size: "small",
                   variant: "outlined"
@@ -755,6 +841,61 @@ return (_ctx, _cache) => {
           _: 1
         }),
         _createVNode(_component_VCard, {
+          class: "diagnosis-panel",
+          rounded: "xl"
+        }, {
+          default: _withCtx(() => [
+            _createVNode(_component_VCardTitle, { class: "panel-title" }, {
+              default: _withCtx(() => [
+                _cache[19] || (_cache[19] = _createElementVNode("span", null, "CD2 诊断", -1)),
+                _createElementVNode("span", _hoisted_35, _toDisplayString(pluginState.value.cd2_auth_label || "未配置"), 1)
+              ]),
+              _: 1
+            }),
+            _createVNode(_component_VCardText, null, {
+              default: _withCtx(() => [
+                (diagnosis.value)
+                  ? (_openBlock(), _createBlock(_component_VAlert, {
+                      key: 0,
+                      type: diagnosisAlertType.value,
+                      variant: "tonal"
+                    }, {
+                      default: _withCtx(() => [
+                        _createTextVNode(_toDisplayString(diagnosis.value.message), 1)
+                      ]),
+                      _: 1
+                    }, 8, ["type"]))
+                  : (_openBlock(), _createBlock(_component_VAlert, {
+                      key: 1,
+                      type: "info",
+                      variant: "tonal"
+                    }, {
+                      default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+                        _createTextVNode(" 还没有诊断记录。打开 115 资源弹层，选择 MoviePilot 分类后点击“诊断当前目录”即可检查当前认证模式和目标路径。 ", -1)
+                      ]))]),
+                      _: 1
+                    })),
+                (diagnosis.value)
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_36, [
+                      _createElementVNode("div", _hoisted_37, "认证模式：" + _toDisplayString(diagnosis.value.auth_label || "未知"), 1),
+                      (diagnosis.value.category_group && diagnosis.value.category_name)
+                        ? (_openBlock(), _createElementBlock("div", _hoisted_38, " 分类：" + _toDisplayString(diagnosis.value.category_group) + " / " + _toDisplayString(diagnosis.value.category_name), 1))
+                        : _createCommentVNode("", true),
+                      (diagnosis.value.target_path)
+                        ? (_openBlock(), _createElementBlock("div", _hoisted_39, "目标目录：" + _toDisplayString(diagnosis.value.target_path), 1))
+                        : _createCommentVNode("", true),
+                      (typeof diagnosis.value.directory_entries === 'number')
+                        ? (_openBlock(), _createElementBlock("div", _hoisted_40, " 目录可见条目：" + _toDisplayString(diagnosis.value.directory_entries), 1))
+                        : _createCommentVNode("", true)
+                    ]))
+                  : _createCommentVNode("", true)
+              ]),
+              _: 1
+            })
+          ]),
+          _: 1
+        }),
+        _createVNode(_component_VCard, {
           ref_key: "queueSectionRef",
           ref: queueSectionRef,
           class: "queue-panel",
@@ -763,7 +904,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VCardTitle, { class: "panel-title" }, {
               default: _withCtx(() => [
-                _cache[20] || (_cache[20] = _createElementVNode("span", null, "下载任务", -1)),
+                _cache[22] || (_cache[22] = _createElementVNode("span", null, "下载任务", -1)),
                 _createVNode(_component_VBtn, {
                   color: "warning",
                   variant: "text",
@@ -771,7 +912,7 @@ return (_ctx, _cache) => {
                   loading: queueLoading.value,
                   onClick: clearQueue
                 }, {
-                  default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+                  default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
                     _createTextVNode("清空队列", -1)
                   ]))]),
                   _: 1
@@ -789,8 +930,8 @@ return (_ctx, _cache) => {
                       type: "success",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
-                        _createTextVNode("当前“下载”会真实调用 CD2，并优先按 MoviePilot 的目录映射把盘链 115 链接提交到目标目录中。", -1)
+                      default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+                        _createTextVNode(" 当前“下载”会真实调用 CD2，并按你选中的 MoviePilot 分类解析目标目录。若 API Token 模式报权限不足，请切换到网页登录 Token 模式。 ", -1)
                       ]))]),
                       _: 1
                     }),
@@ -799,21 +940,24 @@ return (_ctx, _cache) => {
                         key: `${item.url}-${item.category_name}`,
                         class: _normalizeClass(["queue-card", { latest: latestQueueKey.value === `${item.url}-${item.category_name}` }])
                       }, [
-                        _createElementVNode("div", _hoisted_35, _toDisplayString(item.vod_name || item.title), 1),
-                        _createElementVNode("div", _hoisted_36, "分类：" + _toDisplayString(queueSubtitle(item)), 1),
+                        _createElementVNode("div", _hoisted_41, _toDisplayString(item.vod_name || item.title), 1),
+                        _createElementVNode("div", _hoisted_42, "分类：" + _toDisplayString(queueSubtitle(item)), 1),
+                        (item.auth_label)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_43, "提交认证：" + _toDisplayString(item.auth_label), 1))
+                          : _createCommentVNode("", true),
                         (item.target_path)
-                          ? (_openBlock(), _createElementBlock("div", _hoisted_37, "CD2 目录：" + _toDisplayString(item.target_path), 1))
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_44, "CD2 目录：" + _toDisplayString(item.target_path), 1))
                           : _createCommentVNode("", true),
                         (item.created_path)
-                          ? (_openBlock(), _createElementBlock("div", _hoisted_38, "检测到新目录：" + _toDisplayString(item.created_path), 1))
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_45, "检测到新目录：" + _toDisplayString(item.created_path), 1))
                           : _createCommentVNode("", true),
-                        _createElementVNode("div", _hoisted_39, [
+                        _createElementVNode("div", _hoisted_46, [
                           _createElementVNode("span", null, "来源：" + _toDisplayString(item.source || "未知"), 1),
                           _createElementVNode("span", null, "创建时间：" + _toDisplayString(item.queued_at), 1)
                         ]),
-                        _createElementVNode("div", _hoisted_40, _toDisplayString(item.status), 1),
-                        _createElementVNode("div", _hoisted_41, _toDisplayString(item.url), 1),
-                        _createElementVNode("div", _hoisted_42, "提取码：" + _toDisplayString(item.password || "无"), 1)
+                        _createElementVNode("div", _hoisted_47, _toDisplayString(item.status), 1),
+                        _createElementVNode("div", _hoisted_48, _toDisplayString(item.url), 1),
+                        _createElementVNode("div", _hoisted_49, "提取码：" + _toDisplayString(item.password || "无"), 1)
                       ], 2))
                     }), 128))
                   ]),
@@ -825,7 +969,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+                      default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
                         _createTextVNode("还没有下载任务。打开 115 资源弹层后点击“下载”，并选择一个 MoviePilot 分类即可提交到 115。", -1)
                       ]))]),
                       _: 1
@@ -872,11 +1016,11 @@ return (_ctx, _cache) => {
                         key: entry.url,
                         class: "dialog-entry"
                       }, [
-                        _createElementVNode("div", _hoisted_43, _toDisplayString(entry.title || "未命名资源"), 1),
-                        _createElementVNode("div", _hoisted_44, _toDisplayString(entrySubtitle(entry)), 1),
-                        _createElementVNode("div", _hoisted_45, _toDisplayString(entry.url), 1),
-                        _createElementVNode("div", _hoisted_46, "提取码：" + _toDisplayString(entry.password || "无"), 1),
-                        _createElementVNode("div", _hoisted_47, [
+                        _createElementVNode("div", _hoisted_50, _toDisplayString(entry.title || "未命名资源"), 1),
+                        _createElementVNode("div", _hoisted_51, _toDisplayString(entrySubtitle(entry)), 1),
+                        _createElementVNode("div", _hoisted_52, _toDisplayString(entry.url), 1),
+                        _createElementVNode("div", _hoisted_53, "提取码：" + _toDisplayString(entry.password || "无"), 1),
+                        _createElementVNode("div", _hoisted_54, [
                           (activeGroupName.value === '115')
                             ? (_openBlock(), _createBlock(_component_VBtn, {
                                 key: 0,
@@ -884,7 +1028,7 @@ return (_ctx, _cache) => {
                                 variant: "flat",
                                 onClick: $event => (openDownloadDialog(entry))
                               }, {
-                                default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+                                default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
                                   _createTextVNode("下载", -1)
                                 ]))]),
                                 _: 1
@@ -896,7 +1040,7 @@ return (_ctx, _cache) => {
                             rel: "noopener noreferrer",
                             variant: "text"
                           }, {
-                            default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
+                            default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
                               _createTextVNode("打开链接", -1)
                             ]))]),
                             _: 1
@@ -913,7 +1057,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                      default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
                         _createTextVNode("当前分组没有可展示的链接。", -1)
                       ]))]),
                       _: 1
@@ -930,13 +1074,13 @@ return (_ctx, _cache) => {
     _createVNode(_component_VDialog, {
       modelValue: downloadDialog.value,
       "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((downloadDialog).value = $event)),
-      "max-width": "720"
+      "max-width": "760"
     }, {
       default: _withCtx(() => [
         _createVNode(_component_VCard, { rounded: "xl" }, {
           default: _withCtx(() => [
             _createVNode(_component_VCardTitle, null, {
-              default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+              default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                 _createTextVNode("创建 115 下载任务", -1)
               ]))]),
               _: 1
@@ -947,18 +1091,30 @@ return (_ctx, _cache) => {
                   type: "info",
                   variant: "tonal"
                 }, {
-                  default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
-                    _createTextVNode(" 分类直接读取 MoviePilot 当前配置；提交时会先匹配 MoviePilot 的“存储 & 目录”，再按“CD2 MP目录映射”换算目标路径，最后才回退到分类映射和默认根目录。 ", -1)
+                  default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+                    _createTextVNode(" 当前会先匹配 MoviePilot 目录，再换算为 CD2 目标路径。建议先点一次“诊断当前目录”，确认当前认证模式是否适合做离线提交。 ", -1)
                   ]))]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_48, [
-                  _createElementVNode("div", _hoisted_49, [
-                    _cache[28] || (_cache[28] = _createElementVNode("span", { class: "download-label" }, "影视条目", -1)),
+                _createVNode(_component_VAlert, {
+                  type: pluginState.value.cd2_auth_mode === 'web_token' ? 'success' : 'warning',
+                  variant: "outlined"
+                }, {
+                  default: _withCtx(() => [
+                    _createTextVNode(" 当前提交认证：" + _toDisplayString(pluginState.value.cd2_auth_label || "未配置") + " ", 1),
+                    (pluginState.value.cd2_auth_mode === 'api_token')
+                      ? (_openBlock(), _createElementBlock("span", _hoisted_55, " 。若你已经在配置页填写了网页登录 Token，遇到离线权限不足时请切换到网页登录 Token 模式。 "))
+                      : _createCommentVNode("", true)
+                  ]),
+                  _: 1
+                }, 8, ["type"]),
+                _createElementVNode("div", _hoisted_56, [
+                  _createElementVNode("div", _hoisted_57, [
+                    _cache[30] || (_cache[30] = _createElementVNode("span", { class: "download-label" }, "影视条目", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedMedia.value?.vod_name || "未选择"), 1)
                   ]),
-                  _createElementVNode("div", _hoisted_50, [
-                    _cache[29] || (_cache[29] = _createElementVNode("span", { class: "download-label" }, "资源标题", -1)),
+                  _createElementVNode("div", _hoisted_58, [
+                    _cache[31] || (_cache[31] = _createElementVNode("span", { class: "download-label" }, "资源标题", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedEntry.value?.title || "未选择"), 1)
                   ])
                 ]),
@@ -974,7 +1130,31 @@ return (_ctx, _cache) => {
                   "hide-details": "auto"
                 }, null, 8, ["modelValue", "items", "loading"]),
                 (selectedCategoryLabel.value)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_51, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_59, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
+                  : _createCommentVNode("", true),
+                _createElementVNode("div", _hoisted_60, [
+                  _createVNode(_component_VBtn, {
+                    variant: "outlined",
+                    loading: diagnosisLoading.value,
+                    onClick: diagnoseCd2
+                  }, {
+                    default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                      _createTextVNode("诊断当前目录", -1)
+                    ]))]),
+                    _: 1
+                  }, 8, ["loading"])
+                ]),
+                (diagnosis.value)
+                  ? (_openBlock(), _createBlock(_component_VAlert, {
+                      key: 1,
+                      type: diagnosisAlertType.value,
+                      variant: "tonal"
+                    }, {
+                      default: _withCtx(() => [
+                        _createTextVNode(_toDisplayString(diagnosis.value.message), 1)
+                      ]),
+                      _: 1
+                    }, 8, ["type"]))
                   : _createCommentVNode("", true)
               ]),
               _: 1
@@ -986,7 +1166,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[5] || (_cache[5] = $event => (downloadDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -997,7 +1177,7 @@ return (_ctx, _cache) => {
                   loading: queueLoading.value,
                   onClick: queue115
                 }, {
-                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
+                  default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
                     _createTextVNode("提交到 115", -1)
                   ]))]),
                   _: 1
@@ -1016,6 +1196,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-dc6e7afe"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4bdc2a6d"]]);
 
 export { Page as default };

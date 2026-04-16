@@ -314,26 +314,106 @@ class CloudDrive2Client:
         self,
         base_url: str = "",
         token: str = "",
+        web_token: str = "",
+        auth_mode: str = "api_token",
         timeout: int = 20,
         detect_delay: float = 1.2,
     ):
-        self.base_url = self._normalize_base_url(base_url)
-        self.token = (token or "").strip()
-        self.timeout = timeout or 20
-        self.detect_delay = max(float(detect_delay or 1.2), 0.2)
+        self.base_url = ""
+        self.api_token = ""
+        self.web_token = ""
+        self.auth_mode = "api_token"
+        self.timeout = 20
+        self.detect_delay = 1.2
         self._session = requests.Session()
+        self.update_config(
+            base_url=base_url,
+            token=token,
+            web_token=web_token,
+            auth_mode=auth_mode,
+            timeout=timeout,
+            detect_delay=detect_delay,
+        )
 
     def update_config(
         self,
         base_url: str = "",
         token: str = "",
+        web_token: str = "",
+        auth_mode: str = "api_token",
         timeout: int = 20,
         detect_delay: float = 1.2,
     ) -> None:
         self.base_url = self._normalize_base_url(base_url)
-        self.token = (token or "").strip()
+        self.api_token = (token or "").strip()
+        self.web_token = (web_token or "").strip()
+        self.auth_mode = self._normalize_auth_mode(auth_mode)
         self.timeout = timeout or 20
         self.detect_delay = max(float(detect_delay or 1.2), 0.2)
+
+    @property
+    def token(self) -> str:
+        return self.web_token if self.auth_mode == "web_token" else self.api_token
+
+    def describe_auth(self) -> Dict[str, Any]:
+        return {
+            "mode": self.auth_mode,
+            "label": self.get_auth_label(),
+            "configured": bool(self.base_url and self.token),
+            "has_api_token": bool(self.api_token),
+            "has_web_token": bool(self.web_token),
+        }
+
+    def get_auth_label(self) -> str:
+        if self.auth_mode == "web_token":
+            return "网页登录 Token"
+        return "API Token"
+
+    def diagnose_target(self, target_path: str, has_alternate_auth: bool = False) -> Dict[str, Any]:
+        target = self.normalize_path(target_path)
+        if not self.base_url:
+            raise RuntimeError("请先在插件配置中填写 CD2 地址")
+        if not self.token:
+            raise RuntimeError(self._missing_token_message())
+
+        result: Dict[str, Any] = {
+            "status": "warning",
+            "target_path": target,
+            "auth_mode": self.auth_mode,
+            "auth_label": self.get_auth_label(),
+            "directory_readable": False,
+            "directory_entries": 0,
+            "offline_capability": "unknown",
+            "message": "",
+        }
+
+        try:
+            items = self.list_subfiles(target)
+        except Exception as err:
+            result["status"] = "error"
+            result["message"] = f"当前 {self.get_auth_label()} 无法读取目标目录：{err}"
+            return result
+
+        result["directory_readable"] = True
+        result["directory_entries"] = len(items)
+
+        if self.auth_mode == "web_token":
+            result["status"] = "success"
+            result["offline_capability"] = "ready_to_try"
+            result["message"] = (
+                "当前使用 CD2 网页登录 Token，目标目录可读取，可以继续尝试提交离线任务；"
+                "最终是否成功仍以 CD2/115 的实际返回为准。"
+            )
+            return result
+
+        result["offline_capability"] = "likely_blocked"
+        result["message"] = (
+            "当前使用 CD2 API Token，目标目录可读取，但目录读写能力不等于具备离线下载权限。"
+            "如果后续提交仍返回离线权限不足，请切换到“网页登录 Token”模式。"
+        )
+        if has_alternate_auth:
+            result["message"] += " 你当前已填写网页登录 Token，切换认证模式后可直接重试。"
+        return result
 
     def add_offline_file(self, url: str, target_path: str) -> Dict[str, str]:
         link = (url or "").strip()
@@ -414,8 +494,68 @@ class CloudDrive2Client:
         grpc_status = str(response.headers.get("Grpc-Status") or "").strip()
         grpc_message = unquote(str(response.headers.get("Grpc-Message") or "").strip())
         if grpc_status and grpc_status != "0":
-            raise RuntimeError(grpc_message or f"CD2 调用失败（grpc-status={grpc_status}）")
+            raise RuntimeError(self._humanize_grpc_message(grpc_message) or f"CD2 调用失败（grpc-status={grpc_status}）")
         return bytes(response.content or b"")
+
+    @staticmethod
+    def _humanize_grpc_message(message: str) -> str:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if not text:
+            return ""
+        if "add offline download permission required" in lowered:
+            return "CD2 当前挂载的 115 账号没有“离线下载/添加离线任务”权限，插件已成功提交到 CD2 接口，但被 CD2/115 侧拒绝。请先在 CD2 或 115 中确认该账号具备离线下载能力。"
+        return text
+
+    def _post_grpc(self, method: str, body: bytes) -> bytes:
+        if not self.base_url:
+            raise RuntimeError("请先在插件配置中填写 CD2 地址")
+        if not self.token:
+            raise RuntimeError(self._missing_token_message())
+
+        response = self._session.post(
+            f"{self.base_url}/clouddrive.CloudDriveFileSrv/{method}",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "accept": "application/grpc-web+proto",
+                "content-type": "application/grpc-web+proto",
+                "x-grpc-web": "1",
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
+        grpc_status = str(response.headers.get("Grpc-Status") or "").strip()
+        grpc_message = unquote(str(response.headers.get("Grpc-Message") or "").strip())
+        if grpc_status and grpc_status != "0":
+            raise RuntimeError(self._humanize_grpc_message(grpc_message) or f"CD2 调用失败（grpc-status={grpc_status}）")
+        return bytes(response.content or b"")
+
+    @staticmethod
+    def _humanize_grpc_message(message: str) -> str:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if not text:
+            return ""
+        if "add offline download permission required" in lowered:
+            return (
+                "CD2 当前挂载的 115 账号没有“离线下载 / 添加离线任务”权限，"
+                "插件请求已经到达 CD2 接口，但被 CD2/115 侧拒绝。"
+            )
+        return text
+
+    def _missing_token_message(self) -> str:
+        if self.auth_mode == "web_token":
+            return "请先在插件配置中填写 CD2 网页登录 Token（浏览器 localStorage.token）"
+        return "请先在插件配置中填写 CD2 API Token"
+
+    @staticmethod
+    def _normalize_auth_mode(mode: str) -> str:
+        value = str(mode or "").strip().lower()
+        if value == "web_token":
+            return "web_token"
+        return "api_token"
 
     @staticmethod
     def _wrap_request(parts: Iterable[bytes]) -> bytes:

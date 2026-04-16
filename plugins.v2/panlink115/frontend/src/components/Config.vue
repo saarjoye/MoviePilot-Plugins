@@ -10,6 +10,11 @@ const props = defineProps({
   }
 });
 
+const authModeItems = [
+  { title: "API Token", value: "api_token" },
+  { title: "网页登录 Token", value: "web_token" }
+];
+
 const form = reactive({
   enabled: false,
   username: "",
@@ -18,7 +23,9 @@ const form = reactive({
   max_results: 10,
   only_show_115: true,
   cd2_url: "",
+  cd2_auth_mode: "api_token",
   cd2_token: "",
+  cd2_web_token: "",
   cd2_default_root: "",
   cd2_directory_roots: "",
   cd2_category_roots: "",
@@ -33,7 +40,9 @@ function applyConfig(config = {}) {
   form.max_results = Number(config.max_results || 10);
   form.only_show_115 = config.only_show_115 !== false;
   form.cd2_url = String(config.cd2_url || "");
+  form.cd2_auth_mode = String(config.cd2_auth_mode || "api_token") === "web_token" ? "web_token" : "api_token";
   form.cd2_token = String(config.cd2_token || "");
+  form.cd2_web_token = String(config.cd2_web_token || "");
   form.cd2_default_root = String(config.cd2_default_root || "");
   form.cd2_directory_roots = String(config.cd2_directory_roots || "");
   form.cd2_category_roots = String(config.cd2_category_roots || "");
@@ -49,7 +58,9 @@ function saveConfig() {
     max_results: Number(form.max_results || 10),
     only_show_115: form.only_show_115,
     cd2_url: form.cd2_url.trim(),
+    cd2_auth_mode: form.cd2_auth_mode,
     cd2_token: form.cd2_token.trim(),
+    cd2_web_token: form.cd2_web_token.trim(),
     cd2_default_root: form.cd2_default_root.trim(),
     cd2_directory_roots: form.cd2_directory_roots,
     cd2_category_roots: form.cd2_category_roots,
@@ -69,8 +80,11 @@ watch(
     <VCardTitle>盘链 115 搜索配置</VCardTitle>
     <VCardText class="d-flex flex-column ga-4">
       <VAlert type="info" variant="tonal">
-        提交到 115 时会优先读取 MoviePilot 的“存储 & 目录”配置，先把所选分类解析成真实的媒体库存储与目录，
-        再按“CD2 MP目录映射”换算成 CD2 路径；只有无法换算时，才会回退到分类映射和默认根目录。
+        提交到 115 时会优先读取 MoviePilot 的“存储 & 目录”配置，再结合本插件的 MP 目录映射、分类映射和默认根目录，解析出最终 CD2 路径。
+      </VAlert>
+
+      <VAlert type="warning" variant="tonal">
+        当前环境已验证：CD2 API Token 的“读写”不等于具备“离线下载”权限。如果真实提交报离线权限不足，请改用“网页登录 Token”模式。
       </VAlert>
 
       <VRow>
@@ -114,8 +128,23 @@ watch(
           <VTextField
             v-model="form.cd2_url"
             label="CD2 地址"
-            placeholder="例如：https://cd2.example.com:19798"
+            placeholder="例如：https://cd2.example.com:5555"
           />
+        </VCol>
+      </VRow>
+
+      <VRow>
+        <VCol cols="12" md="6">
+          <VSelect
+            v-model="form.cd2_auth_mode"
+            :items="authModeItems"
+            item-title="title"
+            item-value="value"
+            label="CD2 鉴权模式"
+          />
+        </VCol>
+        <VCol cols="12" md="6">
+          <VTextField v-model="form.cd2_detect_delay" label="CD2 检测等待秒数" type="number" />
         </VCol>
       </VRow>
 
@@ -125,10 +154,25 @@ watch(
             v-model="form.cd2_token"
             label="CD2 API Token"
             type="password"
-            placeholder="填写 CD2 的 API Token"
+            placeholder="填写 API 令牌页里的 Token"
           />
         </VCol>
       </VRow>
+
+      <VRow>
+        <VCol cols="12">
+          <VTextField
+            v-model="form.cd2_web_token"
+            label="CD2 网页登录 Token"
+            type="password"
+            placeholder="填写浏览器 localStorage.token"
+          />
+        </VCol>
+      </VRow>
+
+      <VAlert type="info" variant="outlined">
+        网页登录 Token 的获取方式：先登录 CD2 网页，再在浏览器开发者工具里读取 `localStorage.token`。当前插件不会自动抓浏览器会话，需手动粘贴一次。
+      </VAlert>
 
       <VRow>
         <VCol cols="12">
@@ -159,14 +203,8 @@ watch(
             label="CD2 分类目录映射"
             rows="5"
             auto-grow
-            placeholder="每行一个映射，例如：&#10;综艺节目=/115open/媒体库/综艺节目&#10;电视剧/国产剧=/115open/媒体库/剧集/国产剧&#10;*=/115open/媒体库"
+            placeholder="每行一个映射，例如：&#10;电影/华语电影=/115open/媒体库/电影/华语电影&#10;剧集/国产剧=/115open/媒体库/剧集/国产剧&#10;*=/115open/媒体库"
           />
-        </VCol>
-      </VRow>
-
-      <VRow>
-        <VCol cols="12" md="6">
-          <VTextField v-model="form.cd2_detect_delay" label="CD2 检测等待秒数" type="number" />
         </VCol>
       </VRow>
     </VCardText>
