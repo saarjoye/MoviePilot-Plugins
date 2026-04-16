@@ -30,7 +30,11 @@ const pluginState = ref({
   cd2_auth_mode: "api_token",
   cd2_auth_label: "API Token",
   cd2_has_api_token: false,
-  cd2_has_web_token: false
+  cd2_has_web_token: false,
+  workflow_mode: "direct",
+  workflow_label: "分类直投",
+  cd2_pending_root: "",
+  cd2_pending_root_configured: false
 });
 const groupDialog = ref(false);
 const downloadDialog = ref(false);
@@ -50,6 +54,14 @@ const authSummaryText = computed(() => {
   }
   return `CD2 ${pluginState.value.cd2_auth_label || "未识别"} 模式`;
 });
+const workflowSummaryText = computed(() =>
+  pluginState.value.workflow_mode === "staging"
+    ? `待整理目录：${pluginState.value.cd2_pending_root || "未配置"}`
+    : "当前仍为分类直投模式"
+);
+const submitButtonText = computed(() =>
+  pluginState.value.workflow_mode === "staging" ? "提交到 115 待整理" : "提交到 115"
+);
 const groupCards = computed(() =>
   Object.entries(linkGroups.value || {}).map(([name, entries]) => ({
     name,
@@ -229,7 +241,11 @@ async function fetchState() {
       cd2_auth_mode: payload?.cd2_auth_mode || "api_token",
       cd2_auth_label: payload?.cd2_auth_label || "API Token",
       cd2_has_api_token: Boolean(payload?.cd2_has_api_token),
-      cd2_has_web_token: Boolean(payload?.cd2_has_web_token)
+      cd2_has_web_token: Boolean(payload?.cd2_has_web_token),
+      workflow_mode: payload?.workflow_mode || "direct",
+      workflow_label: payload?.workflow_label || "分类直投",
+      cd2_pending_root: payload?.cd2_pending_root || "",
+      cd2_pending_root_configured: Boolean(payload?.cd2_pending_root_configured)
     };
   } catch (error) {
     statusMessage.value = error?.message || "读取插件状态失败。";
@@ -416,6 +432,9 @@ onMounted(async () => {
               {{ pluginState.enabled ? "插件已启用" : "插件未启用" }}
             </VChip>
             <VChip size="small" variant="outlined">
+              {{ workflowSummaryText }}
+            </VChip>
+            <VChip size="small" variant="outlined">
               {{ pluginState.only_show_115 ? "当前仅显示 115" : "当前显示全部网盘" }}
             </VChip>
             <VChip :color="pluginState.cd2_configured ? 'primary' : 'warning'" size="small" variant="outlined">
@@ -588,6 +607,9 @@ onMounted(async () => {
             <VAlert type="success" variant="tonal">
               当前“下载”会真实调用 CD2，并按你选中的 MoviePilot 分类解析目标目录。若 API Token 模式报权限不足，请切换到网页登录 Token 模式。
             </VAlert>
+            <VAlert type="info" variant="outlined">
+              当前工作流：{{ pluginState.workflow_label }}。{{ workflowSummaryText }}
+            </VAlert>
             <article
               v-for="item in queueItems"
               :key="`${item.url}-${item.category_name}`"
@@ -599,6 +621,9 @@ onMounted(async () => {
               <div v-if="item.auth_label" class="queue-path">提交认证：{{ item.auth_label }}</div>
               <div v-if="item.target_path" class="queue-path">CD2 目录：{{ item.target_path }}</div>
               <div v-if="item.created_path" class="queue-path">检测到新目录：{{ item.created_path }}</div>
+              <div v-if="item.submit_path || item.target_path" class="queue-path">提交目录：{{ item.submit_path || item.target_path }}</div>
+              <div v-if="item.organize_path" class="queue-path">目标入库目录：{{ item.organize_path }}</div>
+              <div v-if="item.organize_status" class="queue-path">整理状态：{{ item.organize_status }}</div>
               <div class="queue-meta">
                 <span>来源：{{ item.source || "未知" }}</span>
                 <span>创建时间：{{ item.queued_at }}</span>
@@ -654,6 +679,10 @@ onMounted(async () => {
             </span>
           </VAlert>
 
+          <VAlert type="info" variant="outlined">
+            当前工作流：{{ pluginState.workflow_label }}。{{ workflowSummaryText }}
+          </VAlert>
+
           <div class="download-summary">
             <div class="download-row">
               <span class="download-label">影视条目</span>
@@ -679,6 +708,10 @@ onMounted(async () => {
           <div v-if="selectedCategoryLabel" class="selection-preview">
             当前任务将写入：{{ selectedCategoryLabel }}
           </div>
+
+          <VAlert v-if="pluginState.workflow_mode === 'staging'" type="warning" variant="tonal">
+            当前不会直接下载到你选择的分类目录，而是先提交到待整理目录；这里的分类仅作为后续整理入库意图。
+          </VAlert>
 
           <div class="dialog-actions">
             <VBtn variant="outlined" :loading="diagnosisLoading" @click="diagnoseCd2">诊断当前目录</VBtn>

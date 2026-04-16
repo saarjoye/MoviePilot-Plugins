@@ -76,24 +76,36 @@ const _hoisted_45 = {
   key: 2,
   class: "queue-path"
 };
-const _hoisted_46 = { class: "queue-meta" };
-const _hoisted_47 = { class: "queue-status" };
-const _hoisted_48 = { class: "queue-url" };
-const _hoisted_49 = { class: "queue-pass" };
-const _hoisted_50 = { class: "dialog-entry-title" };
-const _hoisted_51 = { class: "dialog-entry-subtitle" };
-const _hoisted_52 = { class: "dialog-entry-url" };
-const _hoisted_53 = { class: "dialog-entry-pass" };
-const _hoisted_54 = { class: "dialog-actions" };
-const _hoisted_55 = { key: 0 };
-const _hoisted_56 = { class: "download-summary" };
-const _hoisted_57 = { class: "download-row" };
-const _hoisted_58 = { class: "download-row" };
-const _hoisted_59 = {
+const _hoisted_46 = {
+  key: 3,
+  class: "queue-path"
+};
+const _hoisted_47 = {
+  key: 4,
+  class: "queue-path"
+};
+const _hoisted_48 = {
+  key: 5,
+  class: "queue-path"
+};
+const _hoisted_49 = { class: "queue-meta" };
+const _hoisted_50 = { class: "queue-status" };
+const _hoisted_51 = { class: "queue-url" };
+const _hoisted_52 = { class: "queue-pass" };
+const _hoisted_53 = { class: "dialog-entry-title" };
+const _hoisted_54 = { class: "dialog-entry-subtitle" };
+const _hoisted_55 = { class: "dialog-entry-url" };
+const _hoisted_56 = { class: "dialog-entry-pass" };
+const _hoisted_57 = { class: "dialog-actions" };
+const _hoisted_58 = { key: 0 };
+const _hoisted_59 = { class: "download-summary" };
+const _hoisted_60 = { class: "download-row" };
+const _hoisted_61 = { class: "download-row" };
+const _hoisted_62 = {
   key: 0,
   class: "selection-preview"
 };
-const _hoisted_60 = { class: "dialog-actions" };
+const _hoisted_63 = { class: "dialog-actions" };
 
 const {computed,nextTick,onMounted,ref} = await importShared('vue');
 
@@ -134,7 +146,11 @@ const pluginState = ref({
   cd2_auth_mode: "api_token",
   cd2_auth_label: "API Token",
   cd2_has_api_token: false,
-  cd2_has_web_token: false
+  cd2_has_web_token: false,
+  workflow_mode: "direct",
+  workflow_label: "分类直投",
+  cd2_pending_root: "",
+  cd2_pending_root_configured: false
 });
 const groupDialog = ref(false);
 const downloadDialog = ref(false);
@@ -154,6 +170,14 @@ const authSummaryText = computed(() => {
   }
   return `CD2 ${pluginState.value.cd2_auth_label || "未识别"} 模式`;
 });
+const workflowSummaryText = computed(() =>
+  pluginState.value.workflow_mode === "staging"
+    ? `待整理目录：${pluginState.value.cd2_pending_root || "未配置"}`
+    : "当前仍为分类直投模式"
+);
+computed(() =>
+  pluginState.value.workflow_mode === "staging" ? "提交到 115 待整理" : "提交到 115"
+);
 const groupCards = computed(() =>
   Object.entries(linkGroups.value || {}).map(([name, entries]) => ({
     name,
@@ -333,7 +357,11 @@ async function fetchState() {
       cd2_auth_mode: payload?.cd2_auth_mode || "api_token",
       cd2_auth_label: payload?.cd2_auth_label || "API Token",
       cd2_has_api_token: Boolean(payload?.cd2_has_api_token),
-      cd2_has_web_token: Boolean(payload?.cd2_has_web_token)
+      cd2_has_web_token: Boolean(payload?.cd2_has_web_token),
+      workflow_mode: payload?.workflow_mode || "direct",
+      workflow_label: payload?.workflow_label || "分类直投",
+      cd2_pending_root: payload?.cd2_pending_root || "",
+      cd2_pending_root_configured: Boolean(payload?.cd2_pending_root_configured)
     };
   } catch (error) {
     statusMessage.value = error?.message || "读取插件状态失败。";
@@ -541,6 +569,15 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }, 8, ["color"]),
+                _createVNode(_component_VChip, {
+                  size: "small",
+                  variant: "outlined"
+                }, {
+                  default: _withCtx(() => [
+                    _createTextVNode(_toDisplayString(workflowSummaryText.value), 1)
+                  ]),
+                  _: 1
+                }),
                 _createVNode(_component_VChip, {
                   size: "small",
                   variant: "outlined"
@@ -935,6 +972,15 @@ return (_ctx, _cache) => {
                       ]))]),
                       _: 1
                     }),
+                    _createVNode(_component_VAlert, {
+                      type: "info",
+                      variant: "outlined"
+                    }, {
+                      default: _withCtx(() => [
+                        _createTextVNode(" 当前工作流：" + _toDisplayString(pluginState.value.workflow_label) + "。" + _toDisplayString(workflowSummaryText.value), 1)
+                      ]),
+                      _: 1
+                    }),
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(queueItems.value, (item) => {
                       return (_openBlock(), _createElementBlock("article", {
                         key: `${item.url}-${item.category_name}`,
@@ -951,13 +997,22 @@ return (_ctx, _cache) => {
                         (item.created_path)
                           ? (_openBlock(), _createElementBlock("div", _hoisted_45, "检测到新目录：" + _toDisplayString(item.created_path), 1))
                           : _createCommentVNode("", true),
-                        _createElementVNode("div", _hoisted_46, [
+                        (item.submit_path || item.target_path)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_46, "提交目录：" + _toDisplayString(item.submit_path || item.target_path), 1))
+                          : _createCommentVNode("", true),
+                        (item.organize_path)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_47, "目标入库目录：" + _toDisplayString(item.organize_path), 1))
+                          : _createCommentVNode("", true),
+                        (item.organize_status)
+                          ? (_openBlock(), _createElementBlock("div", _hoisted_48, "整理状态：" + _toDisplayString(item.organize_status), 1))
+                          : _createCommentVNode("", true),
+                        _createElementVNode("div", _hoisted_49, [
                           _createElementVNode("span", null, "来源：" + _toDisplayString(item.source || "未知"), 1),
                           _createElementVNode("span", null, "创建时间：" + _toDisplayString(item.queued_at), 1)
                         ]),
-                        _createElementVNode("div", _hoisted_47, _toDisplayString(item.status), 1),
-                        _createElementVNode("div", _hoisted_48, _toDisplayString(item.url), 1),
-                        _createElementVNode("div", _hoisted_49, "提取码：" + _toDisplayString(item.password || "无"), 1)
+                        _createElementVNode("div", _hoisted_50, _toDisplayString(item.status), 1),
+                        _createElementVNode("div", _hoisted_51, _toDisplayString(item.url), 1),
+                        _createElementVNode("div", _hoisted_52, "提取码：" + _toDisplayString(item.password || "无"), 1)
                       ], 2))
                     }), 128))
                   ]),
@@ -1016,11 +1071,11 @@ return (_ctx, _cache) => {
                         key: entry.url,
                         class: "dialog-entry"
                       }, [
-                        _createElementVNode("div", _hoisted_50, _toDisplayString(entry.title || "未命名资源"), 1),
-                        _createElementVNode("div", _hoisted_51, _toDisplayString(entrySubtitle(entry)), 1),
-                        _createElementVNode("div", _hoisted_52, _toDisplayString(entry.url), 1),
-                        _createElementVNode("div", _hoisted_53, "提取码：" + _toDisplayString(entry.password || "无"), 1),
-                        _createElementVNode("div", _hoisted_54, [
+                        _createElementVNode("div", _hoisted_53, _toDisplayString(entry.title || "未命名资源"), 1),
+                        _createElementVNode("div", _hoisted_54, _toDisplayString(entrySubtitle(entry)), 1),
+                        _createElementVNode("div", _hoisted_55, _toDisplayString(entry.url), 1),
+                        _createElementVNode("div", _hoisted_56, "提取码：" + _toDisplayString(entry.password || "无"), 1),
+                        _createElementVNode("div", _hoisted_57, [
                           (activeGroupName.value === '115')
                             ? (_openBlock(), _createBlock(_component_VBtn, {
                                 key: 0,
@@ -1103,17 +1158,26 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createTextVNode(" 当前提交认证：" + _toDisplayString(pluginState.value.cd2_auth_label || "未配置") + " ", 1),
                     (pluginState.value.cd2_auth_mode === 'api_token')
-                      ? (_openBlock(), _createElementBlock("span", _hoisted_55, " 。若你已经在配置页填写了网页登录 Token，遇到离线权限不足时请切换到网页登录 Token 模式。 "))
+                      ? (_openBlock(), _createElementBlock("span", _hoisted_58, " 。若你已经在配置页填写了网页登录 Token，遇到离线权限不足时请切换到网页登录 Token 模式。 "))
                       : _createCommentVNode("", true)
                   ]),
                   _: 1
                 }, 8, ["type"]),
-                _createElementVNode("div", _hoisted_56, [
-                  _createElementVNode("div", _hoisted_57, [
+                _createVNode(_component_VAlert, {
+                  type: "info",
+                  variant: "outlined"
+                }, {
+                  default: _withCtx(() => [
+                    _createTextVNode(" 当前工作流：" + _toDisplayString(pluginState.value.workflow_label) + "。" + _toDisplayString(workflowSummaryText.value), 1)
+                  ]),
+                  _: 1
+                }),
+                _createElementVNode("div", _hoisted_59, [
+                  _createElementVNode("div", _hoisted_60, [
                     _cache[30] || (_cache[30] = _createElementVNode("span", { class: "download-label" }, "影视条目", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedMedia.value?.vod_name || "未选择"), 1)
                   ]),
-                  _createElementVNode("div", _hoisted_58, [
+                  _createElementVNode("div", _hoisted_61, [
                     _cache[31] || (_cache[31] = _createElementVNode("span", { class: "download-label" }, "资源标题", -1)),
                     _createElementVNode("span", null, _toDisplayString(selectedEntry.value?.title || "未选择"), 1)
                   ])
@@ -1130,15 +1194,27 @@ return (_ctx, _cache) => {
                   "hide-details": "auto"
                 }, null, 8, ["modelValue", "items", "loading"]),
                 (selectedCategoryLabel.value)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_59, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_62, " 当前任务将写入：" + _toDisplayString(selectedCategoryLabel.value), 1))
                   : _createCommentVNode("", true),
-                _createElementVNode("div", _hoisted_60, [
+                (pluginState.value.workflow_mode === 'staging')
+                  ? (_openBlock(), _createBlock(_component_VAlert, {
+                      key: 1,
+                      type: "warning",
+                      variant: "tonal"
+                    }, {
+                      default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                        _createTextVNode(" 当前不会直接下载到你选择的分类目录，而是先提交到待整理目录；这里的分类仅作为后续整理入库意图。 ", -1)
+                      ]))]),
+                      _: 1
+                    }))
+                  : _createCommentVNode("", true),
+                _createElementVNode("div", _hoisted_63, [
                   _createVNode(_component_VBtn, {
                     variant: "outlined",
                     loading: diagnosisLoading.value,
                     onClick: diagnoseCd2
                   }, {
-                    default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+                    default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                       _createTextVNode("诊断当前目录", -1)
                     ]))]),
                     _: 1
@@ -1146,7 +1222,7 @@ return (_ctx, _cache) => {
                 ]),
                 (diagnosis.value)
                   ? (_openBlock(), _createBlock(_component_VAlert, {
-                      key: 1,
+                      key: 2,
                       type: diagnosisAlertType.value,
                       variant: "tonal"
                     }, {
@@ -1166,7 +1242,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[5] || (_cache[5] = $event => (downloadDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+                  default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1177,7 +1253,7 @@ return (_ctx, _cache) => {
                   loading: queueLoading.value,
                   onClick: queue115
                 }, {
-                  default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
+                  default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
                     _createTextVNode("提交到 115", -1)
                   ]))]),
                   _: 1
@@ -1196,6 +1272,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4bdc2a6d"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-93160ece"]]);
 
 export { Page as default };

@@ -19,13 +19,15 @@ _PLUGIN_STATE: Dict[str, Any] = {
     "diagnosis": {},
 }
 
+_TASK_QUEUE_DATA_KEY = "task_queue_v2"
+
 
 class Panlink115(_PluginBase):
     plugin_name = "盘链 115 搜索"
     plugin_desc = "手动搜索盘链影视资源，展示 115 链接并提交到 CD2。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.10"
+    plugin_version = "0.4.12"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -43,6 +45,7 @@ class Panlink115(_PluginBase):
     _cd2_token: str = ""
     _cd2_web_token: str = ""
     _cd2_default_root: str = ""
+    _cd2_pending_root: str = ""
     _cd2_directory_roots: Dict[str, str] = {}
     _cd2_category_roots: Dict[str, str] = {}
     _cd2_detect_delay: float = 1.2
@@ -69,6 +72,7 @@ class Panlink115(_PluginBase):
         self._cd2_token = str(config.get("cd2_token") or "").strip()
         self._cd2_web_token = str(config.get("cd2_web_token") or "").strip()
         self._cd2_default_root = self._normalize_path(config.get("cd2_default_root"))
+        self._cd2_pending_root = self._normalize_path(config.get("cd2_pending_root"))
         self._cd2_directory_roots = self._parse_directory_roots(config.get("cd2_directory_roots"))
         self._cd2_category_roots = self._parse_category_roots(config.get("cd2_category_roots"))
         self._merge_legacy_category_roots(config)
@@ -299,6 +303,25 @@ class Panlink115(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "cd2_pending_root",
+                                            "label": "115 待整理目录",
+                                            "placeholder": "例如：/115open/待整理/Panlink115",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "cd2_directory_roots",
@@ -399,6 +422,14 @@ class Panlink115(_PluginBase):
                             "text": "插件不会再内置任何电影、剧集或综艺目录假设。目录解析顺序为：1）精确分类映射（顶层/子分类）；2）顶层分类映射；3）通配映射 *；4）默认根目录/顶层分类/子分类。",
                         },
                     },
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "warning",
+                            "variant": "tonal",
+                            "text": "配置“115 待整理目录”后，插件会先把资源提交到该目录；页面里选择的 MoviePilot 分类只作为后续整理入库意图，不再直接作为下载落点。",
+                        },
+                    },
                 ],
             }
         ], {
@@ -413,6 +444,7 @@ class Panlink115(_PluginBase):
             "cd2_token": "",
             "cd2_web_token": "",
             "cd2_default_root": "",
+            "cd2_pending_root": "",
             "cd2_directory_roots": "",
             "cd2_category_roots": "",
             "cd2_detect_delay": 1.2,
@@ -888,6 +920,10 @@ class Panlink115(_PluginBase):
             "cd2_auth_label": auth_info.get("label"),
             "cd2_has_api_token": bool(auth_info.get("has_api_token")),
             "cd2_has_web_token": bool(auth_info.get("has_web_token")),
+            "workflow_mode": self._get_workflow_mode(),
+            "workflow_label": self._get_workflow_label(),
+            "cd2_pending_root": self._cd2_pending_root,
+            "cd2_pending_root_configured": bool(self._cd2_pending_root),
             "keyword": self._last_keyword,
             "results": list(self._search_results),
             "selected_media": dict(self._selected_media or {}),
@@ -904,13 +940,18 @@ class Panlink115(_PluginBase):
             return {"success": False, "message": self._last_message, "diagnosis": {}}
 
         try:
-            target_path = self._resolve_cd2_target_path(group, name)
+            organize_path = self._resolve_cd2_target_path(group, name)
+            target_path = self._resolve_cd2_submit_path(group, name)
             diagnosis = self._build_cd2_client().diagnose_target(
                 target_path=target_path,
                 has_alternate_auth=self._has_alternate_cd2_auth(),
             )
             diagnosis["category_group"] = group
             diagnosis["category_name"] = name
+            diagnosis["workflow_mode"] = self._get_workflow_mode()
+            diagnosis["workflow_label"] = self._get_workflow_label()
+            diagnosis["submit_path"] = target_path
+            diagnosis["organize_path"] = organize_path
             self._last_diagnosis = diagnosis
             self._last_message = str(diagnosis.get("message") or "CD2 诊断完成。")
             self._persist_state()
@@ -994,6 +1035,7 @@ class Panlink115(_PluginBase):
             "target_path": result.get("target_path") or target_path,
             "created_name": result.get("created_name") or "",
             "created_path": result.get("created_path") or "",
+            "already_exists": bool(result.get("already_exists")),
             "auth_label": client.get_auth_label(),
             "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "已提交到 115",
@@ -1081,6 +1123,304 @@ class Panlink115(_PluginBase):
         ):
             return f"{text} 当前已配置网页登录 Token，可将 CD2 鉴权模式切换为“网页登录 Token”后重试。"
         return text
+
+    def api_queue_115(
+        self,
+        title: str = "",
+        url: str = "",
+        password: str = "",
+        source: str = "",
+        vod_id: str = "",
+        vod_name: str = "",
+        type_name: str = "",
+        category_group: str = "",
+        category_name: str = "",
+    ) -> Dict[str, Any]:
+        title = (title or "").strip() or "未命名资源"
+        vod_name = (vod_name or "").strip() or title
+        raw_url = (url or "").strip()
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        if not raw_url:
+            self._last_message = "缺少 115 链接，无法加入下载任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+        if not group or not name:
+            self._last_message = "请先选择当前 MoviePilot 已配置的分类后再创建下载任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        try:
+            share_url = CloudDrive2Client.append_share_password(raw_url, password)
+            target_path = self._resolve_cd2_target_path(group, name)
+            client = self._build_cd2_client()
+            logger.info(
+                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s target=%s",
+                self._cd2_auth_mode,
+                client.get_auth_label(),
+                target_path,
+            )
+            result = client.add_offline_file(url=share_url, target_path=target_path)
+        except Exception as err:
+            logger.error(
+                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
+                self._cd2_auth_mode,
+                bool(self._cd2_token),
+                bool(self._cd2_web_token),
+                err,
+            )
+            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        already_exists = bool(result.get("already_exists"))
+        item = {
+            "title": title,
+            "vod_id": str(vod_id or "").strip(),
+            "vod_name": vod_name,
+            "type_name": (type_name or "").strip(),
+            "url": share_url,
+            "password": (password or "").strip(),
+            "source": (source or "").strip(),
+            "category_group": group,
+            "category_name": name,
+            "target_path": result.get("target_path") or target_path,
+            "created_name": result.get("created_name") or "",
+            "created_path": result.get("created_path") or "",
+            "already_exists": already_exists,
+            "auth_label": client.get_auth_label(),
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "已提交到 115",
+        }
+        if already_exists:
+            item["status"] = "115 离线任务已存在"
+        elif item["created_path"]:
+            item["status"] = "已提交到 115，并检测到新目录"
+
+        if not any(
+            existing.get("url") == item["url"] and existing.get("target_path") == item["target_path"]
+            for existing in self._queued_115
+        ):
+            self._queued_115.insert(0, item)
+
+        if already_exists:
+            self._last_message = (
+                f"115 离线任务已存在：{vod_name} -> {item['target_path']}。"
+                "这表示 115 后端已记住这条链接，但不代表当前目录已经出现可用文件。"
+            )
+        elif item["created_path"]:
+            self._last_message = (
+                f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
+                f"{item['created_name'] or item['created_path']}。"
+            )
+        else:
+            self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
+        self._persist_state()
+        logger.info(
+            "Panlink115 submitted 115 task via CD2: %s -> %s (already_exists=%s)",
+            vod_name,
+            item["target_path"],
+            already_exists,
+        )
+        return {
+            "success": True,
+            "message": self._last_message,
+            "item": item,
+            "queue": list(self._queued_115),
+        }
+
+    def _restore_state(self) -> None:
+        persisted_queue = self._load_persisted_queue()
+        if persisted_queue is None:
+            self._queued_115 = list(_PLUGIN_STATE.get("queued_115") or [])
+        else:
+            self._queued_115 = persisted_queue
+        self._last_message = str(_PLUGIN_STATE.get("last_message") or "尚未开始搜索。")
+        self._last_keyword = str(_PLUGIN_STATE.get("last_keyword") or "")
+        self._search_results = list(_PLUGIN_STATE.get("search_results") or [])
+        selected = _PLUGIN_STATE.get("selected_media") or {}
+        self._selected_media = dict(selected) if isinstance(selected, dict) else None
+        self._link_groups = dict(_PLUGIN_STATE.get("link_groups") or {})
+        self._last_diagnosis = dict(_PLUGIN_STATE.get("diagnosis") or {})
+
+    def _persist_state(self) -> None:
+        _PLUGIN_STATE["queued_115"] = list(self._queued_115)
+        _PLUGIN_STATE["last_message"] = self._last_message
+        _PLUGIN_STATE["last_keyword"] = self._last_keyword
+        _PLUGIN_STATE["search_results"] = list(self._search_results)
+        _PLUGIN_STATE["selected_media"] = dict(self._selected_media or {})
+        _PLUGIN_STATE["link_groups"] = dict(self._link_groups)
+        _PLUGIN_STATE["diagnosis"] = dict(self._last_diagnosis or {})
+        self._persist_task_queue()
+
+    def _get_workflow_mode(self) -> str:
+        return "staging" if self._cd2_pending_root else "direct"
+
+    def _get_workflow_label(self) -> str:
+        return "待整理入库" if self._cd2_pending_root else "分类直投"
+
+    def _resolve_cd2_submit_path(self, category_group: str, category_name: str) -> str:
+        if self._cd2_pending_root:
+            return self._cd2_pending_root
+        return self._resolve_cd2_target_path(category_group, category_name)
+
+    def _persist_task_queue(self) -> None:
+        try:
+            self.save_data(_TASK_QUEUE_DATA_KEY, list(self._queued_115))
+        except Exception as err:
+            logger.warning("Panlink115 save task queue failed: %s", err)
+
+    def _load_persisted_queue(self) -> Optional[List[Dict[str, Any]]]:
+        try:
+            data = self.get_data(_TASK_QUEUE_DATA_KEY)
+        except Exception as err:
+            logger.warning("Panlink115 load task queue failed: %s", err)
+            return None
+
+        if data is None:
+            return None
+        if not isinstance(data, list):
+            return []
+        return [dict(item) for item in data if isinstance(item, dict)]
+
+    def api_queue_115(
+        self,
+        title: str = "",
+        url: str = "",
+        password: str = "",
+        source: str = "",
+        vod_id: str = "",
+        vod_name: str = "",
+        type_name: str = "",
+        category_group: str = "",
+        category_name: str = "",
+    ) -> Dict[str, Any]:
+        title = (title or "").strip() or "未命名资源"
+        vod_name = (vod_name or "").strip() or title
+        raw_url = (url or "").strip()
+        group = (category_group or "").strip()
+        name = (category_name or "").strip()
+        workflow_mode = self._get_workflow_mode()
+        if not raw_url:
+            self._last_message = "缺少 115 链接，无法创建任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+        if not group or not name:
+            self._last_message = "请先选择当前 MoviePilot 已配置的入库分类后再创建任务。"
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        try:
+            share_url = CloudDrive2Client.append_share_password(raw_url, password)
+            organize_path = self._resolve_cd2_target_path(group, name)
+            submit_path = self._resolve_cd2_submit_path(group, name)
+            client = self._build_cd2_client()
+            logger.info(
+                "Panlink115 submit via CD2: auth_mode=%s auth_label=%s submit=%s organize=%s workflow=%s",
+                self._cd2_auth_mode,
+                client.get_auth_label(),
+                submit_path,
+                organize_path,
+                workflow_mode,
+            )
+            result = client.add_offline_file(url=share_url, target_path=submit_path)
+        except Exception as err:
+            logger.error(
+                "Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s",
+                self._cd2_auth_mode,
+                bool(self._cd2_token),
+                bool(self._cd2_web_token),
+                err,
+            )
+            self._last_message = self._append_cd2_auth_hint(f"提交到 115 失败：{err}")
+            self._persist_state()
+            return {"success": False, "message": self._last_message, "queue": list(self._queued_115)}
+
+        already_exists = bool(result.get("already_exists"))
+        item = {
+            "title": title,
+            "vod_id": str(vod_id or "").strip(),
+            "vod_name": vod_name,
+            "type_name": (type_name or "").strip(),
+            "url": share_url,
+            "password": (password or "").strip(),
+            "source": (source or "").strip(),
+            "category_group": group,
+            "category_name": name,
+            "target_path": result.get("target_path") or submit_path,
+            "submit_path": result.get("target_path") or submit_path,
+            "organize_path": organize_path,
+            "workflow_mode": workflow_mode,
+            "workflow_label": self._get_workflow_label(),
+            "created_name": result.get("created_name") or "",
+            "created_path": result.get("created_path") or "",
+            "already_exists": already_exists,
+            "auth_label": client.get_auth_label(),
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "organize_status": "等待资源落地后整理入库" if workflow_mode == "staging" else "当前仍为分类直投，尚未接入整理链",
+            "status": "已提交到 115",
+        }
+        if already_exists:
+            item["status"] = "115 待整理任务已存在" if workflow_mode == "staging" else "115 离线任务已存在"
+        elif item["created_path"]:
+            item["status"] = "已提交到 115 待整理，并检测到新目录" if workflow_mode == "staging" else "已提交到 115，并检测到新目录"
+        elif workflow_mode == "staging":
+            item["status"] = "已提交到 115 待整理"
+
+        if not any(
+            existing.get("url") == item["url"]
+            and existing.get("target_path") == item["target_path"]
+            and existing.get("category_group") == item["category_group"]
+            and existing.get("category_name") == item["category_name"]
+            for existing in self._queued_115
+        ):
+            self._queued_115.insert(0, item)
+
+        if already_exists:
+            if workflow_mode == "staging":
+                self._last_message = (
+                    f"115 待整理任务已存在：{vod_name} -> {item['target_path']}。"
+                    f" 后续入库分类仍按 {group} / {name} 处理，但这不代表待整理目录已经出现可用文件。"
+                )
+            else:
+                self._last_message = (
+                    f"115 离线任务已存在：{vod_name} -> {item['target_path']}。"
+                    " 这表示 115 后端已经记住这条链接，但不代表当前目录已经出现可用文件。"
+                )
+        elif item["created_path"]:
+            if workflow_mode == "staging":
+                self._last_message = (
+                    f"已提交到 115 待整理：{vod_name} -> {item['target_path']}，检测到新目录 "
+                    f"{item['created_name'] or item['created_path']}。后续目标分类：{group} / {name}。"
+                )
+            else:
+                self._last_message = (
+                    f"已提交到 115：{vod_name} -> {item['target_path']}，检测到新目录 "
+                    f"{item['created_name'] or item['created_path']}。"
+                )
+        else:
+            if workflow_mode == "staging":
+                self._last_message = (
+                    f"已提交到 115 待整理：{vod_name} -> {item['target_path']}。"
+                    f" 后续将按 {group} / {name} 整理入库。"
+                )
+            else:
+                self._last_message = f"已提交到 115：{vod_name} -> {item['target_path']}。"
+
+        self._persist_state()
+        logger.info(
+            "Panlink115 submitted 115 task via CD2: %s -> %s (workflow=%s already_exists=%s)",
+            vod_name,
+            item["target_path"],
+            workflow_mode,
+            already_exists,
+        )
+        return {
+            "success": True,
+            "message": self._last_message,
+            "item": item,
+            "queue": list(self._queued_115),
+        }
 
     @staticmethod
     def _normalize_cd2_auth_mode(value: Any) -> str:

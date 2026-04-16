@@ -27,6 +27,7 @@ const form = reactive({
   cd2_token: "",
   cd2_web_token: "",
   cd2_default_root: "",
+  cd2_pending_root: "",
   cd2_directory_roots: "",
   cd2_category_roots: "",
   cd2_detect_delay: 1.2
@@ -44,6 +45,7 @@ function applyConfig(config = {}) {
   form.cd2_token = String(config.cd2_token || "");
   form.cd2_web_token = String(config.cd2_web_token || "");
   form.cd2_default_root = String(config.cd2_default_root || "");
+  form.cd2_pending_root = String(config.cd2_pending_root || "");
   form.cd2_directory_roots = String(config.cd2_directory_roots || "");
   form.cd2_category_roots = String(config.cd2_category_roots || "");
   form.cd2_detect_delay = Number(config.cd2_detect_delay || 1.2);
@@ -62,6 +64,7 @@ function saveConfig() {
     cd2_token: form.cd2_token.trim(),
     cd2_web_token: form.cd2_web_token.trim(),
     cd2_default_root: form.cd2_default_root.trim(),
+    cd2_pending_root: form.cd2_pending_root.trim(),
     cd2_directory_roots: form.cd2_directory_roots,
     cd2_category_roots: form.cd2_category_roots,
     cd2_detect_delay: Number(form.cd2_detect_delay || 1.2)
@@ -85,6 +88,10 @@ watch(
 
       <VAlert type="warning" variant="tonal">
         当前环境已验证：CD2 API Token 的“读写”不等于具备“离线下载”权限。如果真实提交报离线权限不足，请改用“网页登录 Token”模式。
+      </VAlert>
+
+      <VAlert type="warning" variant="outlined">
+        配置“115 待整理目录”后，插件会先把资源统一提交到该目录；页面里选择的 MoviePilot 分类只作为后续整理入库意图，不再直接作为下载落点。
       </VAlert>
 
       <VRow>
@@ -180,6 +187,16 @@ watch(
             v-model="form.cd2_default_root"
             label="CD2 默认根目录"
             placeholder="例如：/115open/媒体库"
+          />
+        </VCol>
+      </VRow>
+
+      <VRow>
+        <VCol cols="12">
+          <VTextField
+            v-model="form.cd2_pending_root"
+            label="115 待整理目录"
+            placeholder="例如：/115open/待整理/Panlink115"
           />
         </VCol>
       </VRow>

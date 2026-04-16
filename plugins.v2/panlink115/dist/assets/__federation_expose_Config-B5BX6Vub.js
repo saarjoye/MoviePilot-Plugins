@@ -39,6 +39,7 @@ const form = reactive({
   cd2_token: "",
   cd2_web_token: "",
   cd2_default_root: "",
+  cd2_pending_root: "",
   cd2_directory_roots: "",
   cd2_category_roots: "",
   cd2_detect_delay: 1.2
@@ -56,6 +57,7 @@ function applyConfig(config = {}) {
   form.cd2_token = String(config.cd2_token || "");
   form.cd2_web_token = String(config.cd2_web_token || "");
   form.cd2_default_root = String(config.cd2_default_root || "");
+  form.cd2_pending_root = String(config.cd2_pending_root || "");
   form.cd2_directory_roots = String(config.cd2_directory_roots || "");
   form.cd2_category_roots = String(config.cd2_category_roots || "");
   form.cd2_detect_delay = Number(config.cd2_detect_delay || 1.2);
@@ -74,6 +76,7 @@ function saveConfig() {
     cd2_token: form.cd2_token.trim(),
     cd2_web_token: form.cd2_web_token.trim(),
     cd2_default_root: form.cd2_default_root.trim(),
+    cd2_pending_root: form.cd2_pending_root.trim(),
     cd2_directory_roots: form.cd2_directory_roots,
     cd2_category_roots: form.cd2_category_roots,
     cd2_detect_delay: Number(form.cd2_detect_delay || 1.2)
@@ -103,7 +106,7 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createBlock(_component_VCard, null, {
     default: _withCtx(() => [
       _createVNode(_component_VCardTitle, null, {
-        default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
+        default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
           _createTextVNode("盘链 115 搜索配置", -1)
         ]))]),
         _: 1
@@ -114,7 +117,7 @@ return (_ctx, _cache) => {
             type: "info",
             variant: "tonal"
           }, {
-            default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+            default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
               _createTextVNode(" 提交到 115 时会优先读取 MoviePilot 的“存储 & 目录”配置，再结合本插件的 MP 目录映射、分类映射和默认根目录，解析出最终 CD2 路径。 ", -1)
             ]))]),
             _: 1
@@ -123,8 +126,17 @@ return (_ctx, _cache) => {
             type: "warning",
             variant: "tonal"
           }, {
-            default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
               _createTextVNode(" 当前环境已验证：CD2 API Token 的“读写”不等于具备“离线下载”权限。如果真实提交报离线权限不足，请改用“网页登录 Token”模式。 ", -1)
+            ]))]),
+            _: 1
+          }),
+          _createVNode(_component_VAlert, {
+            type: "warning",
+            variant: "outlined"
+          }, {
+            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+              _createTextVNode(" 配置“115 待整理目录”后，插件会先把资源统一提交到该目录；页面里选择的 MoviePilot 分类只作为后续整理入库意图，不再直接作为下载落点。 ", -1)
             ]))]),
             _: 1
           }),
@@ -315,7 +327,7 @@ return (_ctx, _cache) => {
             type: "info",
             variant: "outlined"
           }, {
-            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
               _createTextVNode(" 网页登录 Token 的获取方式：先登录 CD2 网页，再在浏览器开发者工具里读取 `localStorage.token`。当前插件不会自动抓浏览器会话，需手动粘贴一次。 ", -1)
             ]))]),
             _: 1
@@ -340,9 +352,25 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_VCol, { cols: "12" }, {
                 default: _withCtx(() => [
+                  _createVNode(_component_VTextField, {
+                    modelValue: form.cd2_pending_root,
+                    "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((form.cd2_pending_root) = $event)),
+                    label: "115 待整理目录",
+                    placeholder: "例如：/115open/待整理/Panlink115"
+                  }, null, 8, ["modelValue"])
+                ]),
+                _: 1
+              })
+            ]),
+            _: 1
+          }),
+          _createVNode(_component_VRow, null, {
+            default: _withCtx(() => [
+              _createVNode(_component_VCol, { cols: "12" }, {
+                default: _withCtx(() => [
                   _createVNode(_component_VTextarea, {
                     modelValue: form.cd2_directory_roots,
-                    "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((form.cd2_directory_roots) = $event)),
+                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((form.cd2_directory_roots) = $event)),
                     label: "CD2 MP目录映射",
                     rows: "5",
                     "auto-grow": "",
@@ -360,7 +388,7 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_VTextarea, {
                     modelValue: form.cd2_category_roots,
-                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((form.cd2_category_roots) = $event)),
+                    "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((form.cd2_category_roots) = $event)),
                     label: "CD2 分类目录映射",
                     rows: "5",
                     "auto-grow": "",
@@ -381,16 +409,16 @@ return (_ctx, _cache) => {
             color: "primary",
             onClick: saveConfig
           }, {
-            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode("保存配置", -1)
             ]))]),
             _: 1
           }),
           _createVNode(_component_VBtn, {
             variant: "text",
-            onClick: _cache[14] || (_cache[14] = $event => (emit('close')))
+            onClick: _cache[15] || (_cache[15] = $event => (emit('close')))
           }, {
-            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+            default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
               _createTextVNode("关闭", -1)
             ]))]),
             _: 1

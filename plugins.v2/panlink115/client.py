@@ -415,7 +415,7 @@ class CloudDrive2Client:
             result["message"] += " 你当前已填写网页登录 Token，切换认证模式后可直接重试。"
         return result
 
-    def add_offline_file(self, url: str, target_path: str) -> Dict[str, str]:
+    def add_offline_file(self, url: str, target_path: str) -> Dict[str, Any]:
         link = (url or "").strip()
         target = self.normalize_path(target_path)
         if not link:
@@ -434,7 +434,17 @@ class CloudDrive2Client:
                 self._encode_string_field(2, target),
             ]
         )
-        self._post_grpc("AddOfflineFiles", payload)
+        try:
+            self._post_grpc("AddOfflineFiles", payload)
+        except Exception as err:
+            if self._is_duplicate_offline_error(err):
+                return {
+                    "target_path": target,
+                    "created_name": "",
+                    "created_path": "",
+                    "already_exists": True,
+                }
+            raise
 
         created_item: Dict[str, str] = {}
         for _ in range(4):
@@ -456,6 +466,7 @@ class CloudDrive2Client:
             "target_path": target,
             "created_name": str(created_item.get("name") or "").strip(),
             "created_path": str(created_item.get("full_path") or "").strip(),
+            "already_exists": False,
         }
 
     def list_subfiles(self, path: str) -> List[Dict[str, str]]:
@@ -549,6 +560,17 @@ class CloudDrive2Client:
         if self.auth_mode == "web_token":
             return "请先在插件配置中填写 CD2 网页登录 Token（浏览器 localStorage.token）"
         return "请先在插件配置中填写 CD2 API Token"
+
+    @staticmethod
+    def _is_duplicate_offline_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        return (
+            "code: 10008" in text
+            or "任务已存在" in text
+            or "重复的链接地址" in text
+        )
 
     @staticmethod
     def _normalize_auth_mode(mode: str) -> str:
