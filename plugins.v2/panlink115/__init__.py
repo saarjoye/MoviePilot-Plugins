@@ -27,7 +27,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持提交到 CD2 / 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.13"
+    plugin_version = "0.4.14"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -112,23 +112,309 @@ class Panlink115(_PluginBase):
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return ([{"component": "VForm", "content": []}], {
-            "enabled": False,
-            "username": "",
-            "password": "",
-            "timeout": 20,
-            "max_results": 10,
-            "only_show_115": True,
-            "cd2_url": "",
-            "cd2_auth_mode": "api_token",
-            "cd2_token": "",
-            "cd2_web_token": "",
-            "cd2_default_root": "",
-            "cd2_pending_root": "",
-            "cd2_directory_roots": "",
-            "cd2_category_roots": "",
-            "cd2_detect_delay": 1.2,
-        })
+        return (
+            [
+                {
+                    "component": "VForm",
+                    "content": [
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VSwitch",
+                                            "props": {"model": "enabled", "label": "启用插件"},
+                                        }
+                                    ],
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VSwitch",
+                                            "props": {"model": "only_show_115", "label": "仅显示 115 资源"},
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "username",
+                                                "label": "盘链账号",
+                                                "placeholder": "填写盘链用户名",
+                                            },
+                                        }
+                                    ],
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "password",
+                                                "label": "盘链密码",
+                                                "type": "password",
+                                                "placeholder": "填写盘链密码",
+                                            },
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "timeout",
+                                                "label": "请求超时秒数",
+                                                "type": "number",
+                                            },
+                                        }
+                                    ],
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "max_results",
+                                                "label": "搜索结果数量",
+                                                "type": "number",
+                                            },
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_url",
+                                                "label": "CD2 地址",
+                                                "placeholder": "例如：https://cd2.example.com:5555",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VSelect",
+                                            "props": {
+                                                "model": "cd2_auth_mode",
+                                                "label": "CD2 认证模式",
+                                                "items": [
+                                                    {"title": "API Token", "value": "api_token"},
+                                                    {"title": "网页登录 Token", "value": "web_token"},
+                                                ],
+                                                "itemTitle": "title",
+                                                "itemValue": "value",
+                                            },
+                                        }
+                                    ],
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12, "md": 6},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_detect_delay",
+                                                "label": "CD2 检测等待秒数",
+                                                "type": "number",
+                                            },
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_token",
+                                                "label": "CD2 API Token",
+                                                "type": "password",
+                                                "placeholder": "填写 CD2 API Token",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_web_token",
+                                                "label": "CD2 网页登录 Token",
+                                                "type": "password",
+                                                "placeholder": "填写浏览器 localStorage.token",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_default_root",
+                                                "label": "CD2 默认根目录",
+                                                "placeholder": "例如：/115open/媒体库",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextField",
+                                            "props": {
+                                                "model": "cd2_pending_root",
+                                                "label": "115 待整理目录",
+                                                "placeholder": "例如：/115open/待整理/Panlink115",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextarea",
+                                            "props": {
+                                                "model": "cd2_directory_roots",
+                                                "label": "CD2 MP目录映射",
+                                                "rows": 5,
+                                                "autoGrow": True,
+                                                "placeholder": "每行一个映射，例如：\nlocal:D:/115挂载/媒体库=/115open/媒体库",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VTextarea",
+                                            "props": {
+                                                "model": "cd2_category_roots",
+                                                "label": "CD2 分类目录映射",
+                                                "rows": 5,
+                                                "autoGrow": True,
+                                                "placeholder": "每行一个映射，例如：\n电影/华语电影=/115open/媒体库/电影/华语电影\n*=/115open/媒体库",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VAlert",
+                            "props": {
+                                "type": "info",
+                                "variant": "tonal",
+                                "text": "如果你主要通过前端页面配置，这里也会同步保存相同字段。此表单恢复后，MP 插件配置弹窗将重新显示可编辑项。",
+                            },
+                        },
+                    ],
+                }
+            ],
+            {
+                "enabled": False,
+                "username": "",
+                "password": "",
+                "timeout": 20,
+                "max_results": 10,
+                "only_show_115": True,
+                "cd2_url": "",
+                "cd2_auth_mode": "api_token",
+                "cd2_token": "",
+                "cd2_web_token": "",
+                "cd2_default_root": "",
+                "cd2_pending_root": "",
+                "cd2_directory_roots": "",
+                "cd2_category_roots": "",
+                "cd2_detect_delay": 1.2,
+            },
+        )
 
     def api_state(self) -> Dict[str, Any]:
         auth_info = self._get_cd2_auth_info()
