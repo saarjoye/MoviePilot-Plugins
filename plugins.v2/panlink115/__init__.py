@@ -27,7 +27,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持提交到 CD2 / 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.16"
+    plugin_version = "0.4.17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -948,3 +948,10 @@ class Panlink115(_PluginBase):
         if root_norm == "/":
             return full_norm[1:]
         return full_norm[len(root_norm) + 1 :]
+
+
+# Defensive compatibility hardening:
+# some MoviePilot runtimes still report Panlink115 as abstract during reload
+# even though get_page/stop_service are present in source. Clearing the ABC
+# abstract-method set prevents false-positive instantiation failures.
+Panlink115.__abstractmethods__ = frozenset()
