@@ -28,7 +28,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持提交到 CD2 / 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.19"
+    plugin_version = "0.4.20"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -552,8 +552,8 @@ class Panlink115(_PluginBase):
             share_url, share_password = CloudDrive2Client.normalize_share_link(raw_url, password)
             organize_path = self._resolve_cd2_target_path(group, name)
             submit_path = self._resolve_cd2_submit_path(group, name)
-            client = self._build_cd2_client()
-            logger.info("Panlink115 submit via CD2 AddSharedLink: auth_mode=%s auth_label=%s submit=%s organize=%s workflow=%s", self._cd2_auth_mode, client.get_auth_label(), submit_path, organize_path, workflow_mode)
+            client = self._select_cd2_submit_client(submit_path)
+            logger.info("Panlink115 submit via CD2 AddSharedLink: auth_mode=%s auth_label=%s submit=%s organize=%s workflow=%s", client.auth_mode, client.get_auth_label(), submit_path, organize_path, workflow_mode)
             result = client.add_shared_link(url=share_url, target_path=submit_path, password=share_password)
         except Exception as err:
             logger.error("Panlink115 submit to CD2 failed: auth_mode=%s has_api_token=%s has_web_token=%s error=%s", self._cd2_auth_mode, bool(self._cd2_token), bool(self._cd2_web_token), err)
@@ -622,6 +622,25 @@ class Panlink115(_PluginBase):
         else:
             self._cd2_client.update_config(base_url=self._cd2_url, token=self._cd2_token, web_token=self._cd2_web_token, auth_mode=self._cd2_auth_mode, timeout=self._timeout, detect_delay=self._cd2_detect_delay)
         return self._cd2_client
+
+    def _build_cd2_client_for_mode(self, auth_mode: str) -> CloudDrive2Client:
+        mode = self._normalize_cd2_auth_mode(auth_mode)
+        if mode == self._cd2_auth_mode:
+            return self._build_cd2_client()
+        return CloudDrive2Client(
+            base_url=self._cd2_url,
+            token=self._cd2_token,
+            web_token=self._cd2_web_token,
+            auth_mode=mode,
+            timeout=self._timeout,
+            detect_delay=self._cd2_detect_delay,
+        )
+
+    def _select_cd2_submit_client(self, submit_path: str) -> CloudDrive2Client:
+        if self._cd2_auth_mode == "web_token" and self._cd2_token and self._normalize_path(submit_path).startswith("/115open"):
+            logger.info("Panlink115 auto switch submit auth mode to API Token for 115open target: %s", submit_path)
+            return self._build_cd2_client_for_mode("api_token")
+        return self._build_cd2_client()
 
     def _get_cd2_auth_info(self) -> Dict[str, Any]:
         return self._build_cd2_client().describe_auth()
