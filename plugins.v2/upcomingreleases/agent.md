@@ -146,3 +146,20 @@
 
 ### Verification
 - `Verified | 已验证`：`python -m py_compile __init__.py` 通过。
+## 2026-04-17 Update Mark 8
+
+### User Follow-up
+- 用户诉求：Netflix 平台已可显示数据，但页面标题仍主要是英文，希望优先显示中文剧名，同时不要影响现有订阅、筛选和识别主逻辑。
+
+### Fix Applied
+- `Implemented | 已实施`：新增 `display_title` 识别显示字段，页面序列化输出优先使用识别结果中的中文或本地化标题，原始源标题仍保留在 `original_title`，不改动原始抓取 `title`。
+- `Implemented | 已实施`：`_cache_recognition()` 现在会把识别出的 `display_title` 一并写入识别缓存，避免每次页面打开都重新推断显示名。
+- `Implemented | 已实施`：`_build_text_fallback_recognition()` 也补充了 `display_title` 兜底字段；当未识别出中文名时，仍回退展示原始标题，不影响订阅规则与匹配键。
+- `Implemented | 已实施`：为避免旧识别缓存缺少 `display_title` 导致页面仍显示英文，本轮同步将缓存结构版本提升到 `11`，触发识别缓存按新字段重建。
+- `Implemented | 已实施`：本轮有效代码变更已同步更新插件版本号到 `0.6.21`，发布时间保持 `2026-04-17`。
+
+### Verification
+- `Verified | 已验证`：`python -m py_compile __init__.py` 通过。
+
+### Implementation Note
+- `Implementation note | 实施说明`：当前中文显示名依赖已有识别链路可提供的本地化标题字段；若识别源本身没有中文名称，则页面仍会显示原始英文名，这是当前最稳妥且不破坏原逻辑的实现路径。

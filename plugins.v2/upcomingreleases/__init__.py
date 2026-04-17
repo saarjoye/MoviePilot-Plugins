@@ -213,7 +213,7 @@ NETFLIX_GENRE_NAME_MAP = {
 }
 
 
-CACHE_SCHEMA_VERSION = 9
+CACHE_SCHEMA_VERSION = 11
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
@@ -405,7 +405,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.18"
+    plugin_version = "0.6.21"
     plugin_release_date = "2026-04-17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -1662,7 +1662,7 @@ class UpcomingReleases(_PluginBase):
             merged_groups.setdefault(key, []).append(item)
         return [self._merge_browser_group(group_items) for group_items in merged_groups.values()]
 
-    def _merge_browser_group(self, group_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_browser_group(self, group_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         ranked_items = sorted(
             group_items,
             key=lambda item: (
@@ -1699,26 +1699,81 @@ class UpcomingReleases(_PluginBase):
         primary["detail_link"] = detail_links[0] if detail_links else primary.get("detail_link")
         primary["detail_links"] = detail_links
         primary["reserve_count"] = reserve_count
-        if stories:
-            primary["story"] = max(stories, key=len)
-        return primary
-
-    def _serialize_browser_item(self, item: Dict[str, Any], username: Optional[str] = None) -> Dict[str, Any]:
-        story_text = self._clean_text(item.get("story"))
-        if len(story_text) > 140:
-            story_text = f"{story_text[:140].rstrip()}..."
-        time_key = item.get("time_key")
-        recognition = self._get_cached_recognition(item, populate=True, require_ids=False) or {}
-        subscription_status = self._get_item_subscription_status(
-            item,
-            username=username,
-            recognition=recognition,
-        )
-        return {
-            "media_id": item.get("media_id"),
-            "title": item.get("title"),
-            "year": item.get("year"),
-            "poster": item.get("poster"),
+        if stories:
+            primary["story"] = max(stories, key=len)
+        return primary
+
+    def _contains_cjk(self, text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", self._clean_text(text)))
+
+    def _extract_media_display_title(self, media: MediaInfo, fallback_title: Optional[str] = None) -> str:
+        fallback = self._clean_text(fallback_title)
+        candidates: List[str] = []
+        attr_names = [
+            "title",
+            "name",
+            "display_title",
+            "cn_name",
+            "zh_name",
+            "chinese_title",
+            "translated_title",
+            "title_zh",
+            "douban_title",
+        ]
+        for attr in attr_names:
+            value = getattr(media, attr, None)
+            if isinstance(value, str):
+                text_value = self._clean_text(value)
+                if text_value and text_value not in candidates:
+                    candidates.append(text_value)
+
+        model_dump = getattr(media, "model_dump", None)
+        if callable(model_dump):
+            try:
+                payload = model_dump()
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                for key in attr_names:
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        text_value = self._clean_text(value)
+                        if text_value and text_value not in candidates:
+                            candidates.append(text_value)
+
+        for candidate in candidates:
+            if self._contains_cjk(candidate):
+                return candidate
+        for candidate in candidates:
+            if candidate and candidate != fallback:
+                return candidate
+        return fallback
+
+    def _get_display_title(self, item: Dict[str, Any], recognition: Optional[Dict[str, Any]] = None) -> str:
+        recognition = recognition or {}
+        display_title = self._clean_text(recognition.get("display_title"))
+        if display_title:
+            return display_title
+        return self._clean_text(item.get("title"))
+
+    def _serialize_browser_item(self, item: Dict[str, Any], username: Optional[str] = None) -> Dict[str, Any]:
+        story_text = self._clean_text(item.get("story"))
+        if len(story_text) > 140:
+            story_text = f"{story_text[:140].rstrip()}..."
+        time_key = item.get("time_key")
+        recognition = self._get_cached_recognition(item, populate=True, require_ids=False) or {}
+        display_title = self._get_display_title(item, recognition=recognition)
+        subscription_status = self._get_item_subscription_status(
+            item,
+            username=username,
+            recognition=recognition,
+        )
+        return {
+            "media_id": item.get("media_id"),
+            "title": display_title,
+            "original_title": item.get("title"),
+            "year": item.get("year"),
+            "poster": item.get("poster"),
             "detail_link": item.get("detail_link"),
             "platform": item.get("platform"),
             "platform_label": item.get("platform_label"),
@@ -2521,6 +2576,7 @@ class UpcomingReleases(_PluginBase):
         if not media:
             return
         resolved_type_key = type_key or item.get("type_key") or "tv"
+        display_title = self._extract_media_display_title(media, fallback_title=item.get("title"))
         record = {
             "recognition_failed": False,
             "type_key": resolved_type_key,
@@ -2528,7 +2584,8 @@ class UpcomingReleases(_PluginBase):
             "douban_id": media.douban_id,
             "bangumi_id": media.bangumi_id,
             "title": item.get("title"),
-            "year": item.get("year"),
+            "display_title": display_title or item.get("title"),
+            "year": item.get("year"),
             "country_codes": sorted(self._extract_region_codes(media)),
             "genre_names": sorted(self._extract_genre_names(media, item)),
             "updated": int(time.time()),
@@ -2895,7 +2952,8 @@ class UpcomingReleases(_PluginBase):
             "tmdb_id": None,
             "douban_id": None,
             "bangumi_id": None,
-            "title": item.get("title"),
+            "title": item.get("title"),
+            "display_title": item.get("title"),
             "year": item.get("year"),
             "country_codes": country_codes,
             "genre_names": genre_names,
