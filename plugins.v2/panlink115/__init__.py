@@ -30,7 +30,7 @@ class Panlink115(_PluginBase):
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持直连提交到 115。"
     plugin_icon = "https://115.com/favicon.ico"
     plugin_color = "#2F77FF"
-    plugin_version = "0.4.22"
+    plugin_version = "0.4.23"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "panlink115_"
@@ -1243,7 +1243,7 @@ class Panlink115(_Panlink115AbstractBase):
     # runtimes that keep stale ABC flags on the original class can still
     # instantiate the plugin successfully.
     plugin_desc = "手动搜索盘链影视资源，展示 115 分享链接，并支持直连提交到 115。"
-    plugin_version = "0.4.22"
+    plugin_version = "0.4.23"
 
     def get_page(self) -> Optional[List[dict]]:
         return None

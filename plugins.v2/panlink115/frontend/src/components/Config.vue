@@ -7,6 +7,10 @@ const props = defineProps({
   initialConfig: {
     type: Object,
     default: () => ({})
+  },
+  saving: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -50,8 +54,8 @@ watch(
 </script>
 
 <template>
-  <VCard>
-    <VCardTitle>盘链 115 搜索配置</VCardTitle>
+  <VCard :loading="saving">
+    <VCardTitle>盘链 115 插件配置</VCardTitle>
     <VCardText class="d-flex flex-column ga-4">
       <VAlert type="info" variant="tonal">
         插件已切换为直连 115 模式，不再依赖 CD2。目标目录会复用 MoviePilot 中已配置的 u115 存储路径。
@@ -93,12 +97,12 @@ watch(
         label="115 网页 Cookie"
         rows="5"
         auto-grow
-        placeholder="粘贴已登录 115 网页的完整 Cookie"
+        placeholder="粘贴已登录 115 网页后的完整 Cookie"
       />
     </VCardText>
     <VCardActions class="px-4 pb-4">
-      <VBtn color="primary" @click="saveConfig">保存配置</VBtn>
-      <VBtn variant="text" @click="emit('close')">关闭</VBtn>
+      <VBtn color="primary" :loading="saving" :disabled="saving" @click="saveConfig">保存配置</VBtn>
+      <VBtn variant="text" :disabled="saving" @click="emit('close')">关闭</VBtn>
     </VCardActions>
   </VCard>
 </template>

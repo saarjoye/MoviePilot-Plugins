@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from "vue";
+import Config from "./Config.vue";
 
 const props = defineProps({
   api: {
@@ -14,6 +15,8 @@ const searching = ref(false);
 const loadingVodId = ref("");
 const queueLoading = ref(false);
 const categoryLoading = ref(false);
+const configDialog = ref(false);
+const configSaving = ref(false);
 const searchResults = ref([]);
 const selectedMedia = ref(null);
 const linkGroups = ref({});
@@ -27,6 +30,7 @@ const downloadDialog = ref(false);
 const activeGroupName = ref("");
 const activeEntries = ref([]);
 const selectedEntry = ref(null);
+const pluginConfig = ref(defaultPluginConfig());
 const pluginState = ref({
   enabled: false,
   only_show_115: true,
@@ -59,6 +63,31 @@ const groupCards = computed(() =>
 const selectedCategory = computed(() =>
   categoryOptions.value.find((item) => item.key === selectedCategoryKey.value) || null
 );
+
+function defaultPluginConfig() {
+  return {
+    enabled: false,
+    username: "",
+    password: "",
+    timeout: 20,
+    max_results: 10,
+    only_show_115: true,
+    u115_cookie: ""
+  };
+}
+
+function normalizePluginConfig(config = {}) {
+  const defaults = defaultPluginConfig();
+  return {
+    enabled: Boolean(config.enabled),
+    username: String(config.username ?? defaults.username),
+    password: String(config.password ?? defaults.password),
+    timeout: Number(config.timeout || defaults.timeout),
+    max_results: Number(config.max_results || defaults.max_results),
+    only_show_115: config.only_show_115 !== false,
+    u115_cookie: String(config.u115_cookie ?? defaults.u115_cookie)
+  };
+}
 
 function normalizePayload(response) {
   return response?.data ?? response ?? {};
@@ -130,11 +159,14 @@ function flattenCategories(payload) {
   return options;
 }
 
-function pickDefaultCategoryKey() {
-  if (!categoryOptions.value.length) {
+function pickDefaultCategoryKey(options = categoryOptions.value) {
+  if (!options.length) {
     return "";
   }
-  return categoryOptions.value[0].key;
+  if (options.some((item) => item.key === selectedCategoryKey.value)) {
+    return selectedCategoryKey.value;
+  }
+  return options[0].key;
 }
 
 async function fetchMpApi(path, init = {}) {
@@ -178,8 +210,9 @@ async function fetchCategories(force = false) {
   categoryLoading.value = true;
   try {
     const payload = await fetchMpApi("media/category");
-    categoryOptions.value = flattenCategories(payload);
-    selectedCategoryKey.value = pickDefaultCategoryKey();
+    const options = flattenCategories(payload);
+    categoryOptions.value = options;
+    selectedCategoryKey.value = pickDefaultCategoryKey(options);
   } catch (error) {
     statusMessage.value = error?.message || "读取 MoviePilot 分类失败。";
   } finally {
@@ -212,8 +245,53 @@ async function fetchState() {
       workflow_label: payload?.workflow_label || "直连 115",
       direct_target_hint: payload?.direct_target_hint || ""
     };
+    pluginConfig.value = {
+      ...pluginConfig.value,
+      enabled: Boolean(payload?.enabled),
+      max_results: Number(payload?.max_results || 10),
+      only_show_115: Boolean(payload?.only_show_115)
+    };
   } catch (error) {
     statusMessage.value = error?.message || "读取插件状态失败。";
+  }
+}
+
+async function openConfigDialog() {
+  if (configSaving.value) {
+    return;
+  }
+  try {
+    const payload = await fetchMpApi("plugin/Panlink115");
+    pluginConfig.value = normalizePluginConfig(payload);
+  } catch (error) {
+    pluginConfig.value = normalizePluginConfig(pluginConfig.value);
+    statusMessage.value = error?.message || "读取插件配置失败。";
+  }
+  configDialog.value = true;
+}
+
+async function savePluginConfig(conf) {
+  if (configSaving.value) {
+    return;
+  }
+  configSaving.value = true;
+  try {
+    const nextConfig = normalizePluginConfig(conf);
+    await fetchMpApi("plugin/Panlink115", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(nextConfig)
+    });
+    pluginConfig.value = nextConfig;
+    configDialog.value = false;
+    statusMessage.value = "插件配置已保存。";
+    await fetchState();
+  } catch (error) {
+    statusMessage.value = error?.message || "保存插件配置失败。";
+  } finally {
+    configSaving.value = false;
   }
 }
 
@@ -340,6 +418,11 @@ onMounted(async () => {
       <div class="hero-side">
         <VChip color="primary" variant="outlined">{{ pluginState.workflow_label }}</VChip>
         <div class="hero-meta">{{ authSummaryText }}</div>
+        <div class="hero-actions">
+          <VBtn color="primary" variant="flat" @click="openConfigDialog">
+            {{ pluginState.u115_cookie_configured ? "插件配置" : "配置 115 Cookie" }}
+          </VBtn>
+        </div>
       </div>
     </div>
 
@@ -352,8 +435,20 @@ onMounted(async () => {
       variant="outlined"
       class="mb-6"
     >
-      MP u115：{{ pluginState.mp_u115_ready ? "已就绪" : "未就绪" }}，
-      115 Cookie：{{ pluginState.u115_cookie_configured ? "已配置" : "未配置" }}
+      <div class="status-alert">
+        <div class="status-alert-copy">
+          <span>MP u115：{{ pluginState.mp_u115_ready ? "已就绪" : "未就绪" }}</span>
+          <span>115 Cookie：{{ pluginState.u115_cookie_configured ? "已配置" : "未配置" }}</span>
+        </div>
+        <VBtn
+          :color="pluginState.u115_cookie_configured ? 'primary' : 'warning'"
+          variant="flat"
+          size="small"
+          @click="openConfigDialog"
+        >
+          {{ pluginState.u115_cookie_configured ? "修改配置" : "立即配置" }}
+        </VBtn>
+      </div>
     </VAlert>
 
     <div class="panel-card">
@@ -476,7 +571,9 @@ onMounted(async () => {
               </div>
               <div class="dialog-entry-url">{{ entry.url }}</div>
               <div class="dialog-entry-pass">提取码：{{ entry.password || "无" }}</div>
-              <VBtn color="primary" :disabled="activeGroupName !== '115'" @click="chooseEntry(entry)"> {{ submitButtonText }} </VBtn>
+              <VBtn color="primary" :disabled="activeGroupName !== '115'" @click="chooseEntry(entry)">
+                {{ submitButtonText }}
+              </VBtn>
             </VCardText>
           </VCard>
         </VCardText>
@@ -516,6 +613,15 @@ onMounted(async () => {
           <VBtn color="primary" :loading="queueLoading" :disabled="!selectedCategory" @click="submitSelectedEntry">提交</VBtn>
         </VCardActions>
       </VCard>
+    </VDialog>
+
+    <VDialog v-model="configDialog" max-width="820">
+      <Config
+        :initial-config="pluginConfig"
+        :saving="configSaving"
+        @save="savePluginConfig"
+        @close="configDialog = false"
+      />
     </VDialog>
   </div>
 </template>
@@ -574,6 +680,11 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.hero-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .panel-card {
   padding: 22px;
 }
@@ -593,6 +704,19 @@ onMounted(async () => {
 
 .panel-subtitle {
   color: rgba(15, 23, 42, 0.62);
+}
+
+.status-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-alert-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
 }
 
 .search-bar {
@@ -619,6 +743,10 @@ onMounted(async () => {
 .queue-card,
 .dialog-card {
   border-radius: 22px;
+}
+
+.group-card {
+  cursor: pointer;
 }
 
 .result-title,
@@ -683,6 +811,12 @@ onMounted(async () => {
   color: rgba(15, 23, 42, 0.72);
 }
 
+.dialog-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .queue-card.latest {
   border-color: rgba(47, 119, 255, 0.48);
   box-shadow: 0 0 0 3px rgba(47, 119, 255, 0.08);
@@ -698,6 +832,16 @@ onMounted(async () => {
   .hero-side {
     min-width: 0;
     align-items: flex-start;
+  }
+
+  .hero-actions,
+  .status-alert {
+    width: 100%;
+  }
+
+  .status-alert {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .search-bar {
