@@ -107,6 +107,7 @@ const defaults = {
   enable_tencent: true,
   enable_youku: true,
   enable_mgtv: true,
+  enable_netflix: true,
   auto_subscribe_rules: '[]',
 };
 
@@ -132,6 +133,7 @@ const PLATFORM_OPTIONS = [
   { value: 'tencent', label: '腾讯视频' },
   { value: 'youku', label: '优酷' },
   { value: 'mgtv', label: '芒果 TV' },
+  { value: 'netflix', label: 'Netflix' },
 ];
 
 const REGION_OPTIONS = [
@@ -589,6 +591,15 @@ return (_ctx, _cache) => {
             [_vModelCheckbox, config.enable_mgtv]
           ]),
           _cache[26] || (_cache[26] = _createTextVNode(" 芒果 TV", -1))
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.enable_netflix) = $event)),
+            type: "checkbox"
+          }, null, 512), [
+            [_vModelCheckbox, config.enable_netflix]
+          ]),
+          _createTextVNode(" Netflix")
         ])
       ])
     ]),

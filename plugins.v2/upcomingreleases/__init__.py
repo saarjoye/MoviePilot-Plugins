@@ -48,7 +48,8 @@ PLATFORM_LABELS = {
     "iqiyi": "爱奇艺",
     "tencent": "腾讯视频",
     "youku": "优酷",
-    "mgtv": "芒果TV",
+    "mgtv": "芒果TV",
+    "netflix": "Netflix",
 }
 
 TYPE_LABELS = {
@@ -86,7 +87,10 @@ PLATFORM_ALIAS_MAP = {
     "优酷": "youku",
     "mgtv": "mgtv",
     "芒果tv": "mgtv",
-    "芒果": "mgtv",
+    "芒果": "mgtv",
+    "netflix": "netflix",
+    "奈飞": "netflix",
+    "网飞": "netflix",
 }
 
 TYPE_ALIAS_MAP = {
@@ -178,7 +182,37 @@ TENCENT_CHANNELS = {
     "movie": {"channel_id": "100173", "upcoming_value": "999", "type_key": "movie"},
 }
 
-CACHE_SCHEMA_VERSION = 8
+NETFLIX_RELEASES_URL = "https://about.netflix.com/api/data/releases"
+NETFLIX_RELEASES_REFERER = "https://about.netflix.com/en/new-to-watch"
+NETFLIX_DEFAULT_REGION = "us"
+NETFLIX_DEFAULT_LANGUAGE = "en"
+NETFLIX_COLLECTION_TYPE_MAP = {
+    2170013: "tv",
+    2173907: "variety",
+    2694103: "movie",
+    81500273: "kids",
+}
+NETFLIX_GENRE_TYPE_MAP = {
+    100148: "documentary",
+    100199: "variety",
+    100173: "anime",
+    2070367: "kids",
+}
+NETFLIX_GENRE_NAME_MAP = {
+    81246423: "惊悚",
+    2070367: "少儿",
+    100148: "纪录片",
+    100199: "真人秀",
+    81325761: "悬疑",
+    81325760: "冒险",
+    1305630: "喜剧",
+    1307182: "剧情",
+    100173: "动画",
+    81246426: "奇幻",
+}
+
+
+CACHE_SCHEMA_VERSION = 9
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
@@ -368,10 +402,10 @@ def extract_balanced_object(text: str, marker: str) -> Optional[str]:
 
 class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
-    plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
+    plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.15"
-    plugin_release_date = "2026-04-15"
+    plugin_version = "0.6.16"
+    plugin_release_date = "2026-04-17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -386,7 +420,8 @@ class UpcomingReleases(_PluginBase):
         "enable_iqiyi": True,
         "enable_tencent": True,
         "enable_youku": True,
-        "enable_mgtv": True,
+        "enable_mgtv": True,
+        "enable_netflix": True,
         "cache_ttl_minutes": 180,
         "push_enabled": True,
         "push_cron": "0 9,18 * * *",
@@ -1566,21 +1601,35 @@ class UpcomingReleases(_PluginBase):
             return release_text
         return "??"
 
-    def _get_item_region_text(self, item: Dict[str, Any]) -> str:
-        record = self._get_cached_recognition(item, populate=True, require_ids=False)
-        labels = []
-        for code in record.get("country_codes") or []:
-            label = REGION_CODE_LABELS.get(str(code).upper(), str(code).upper())
-            if label not in labels:
+    def _get_item_region_text(self, item: Dict[str, Any]) -> str:
+        direct_codes = item.get("region_codes") or []
+        if direct_codes:
+            labels = []
+            for code in direct_codes:
+                label = REGION_CODE_LABELS.get(str(code).upper(), str(code).upper())
+                if label not in labels:
+                    labels.append(label)
+            if labels:
+                return " / ".join(labels[:3])
+
+        record = self._get_cached_recognition(item, populate=True, require_ids=False)
+        labels = []
+        for code in record.get("country_codes") or []:
+            label = REGION_CODE_LABELS.get(str(code).upper(), str(code).upper())
+            if label not in labels:
                 labels.append(label)
         return " / ".join(labels[:3]) if labels else "待识别"
 
-    def _get_item_genre_text(self, item: Dict[str, Any]) -> str:
-        record = self._get_cached_recognition(item, populate=True, require_ids=False)
-        labels = []
-        for genre_name in record.get("genre_names") or []:
-            text_value = self._clean_text(genre_name)
-            if text_value and text_value not in labels:
+    def _get_item_genre_text(self, item: Dict[str, Any]) -> str:
+        direct_genres = [self._clean_text(value) for value in item.get("genre_names") or [] if self._clean_text(value)]
+        if direct_genres:
+            return " / ".join(direct_genres[:4])
+
+        record = self._get_cached_recognition(item, populate=True, require_ids=False)
+        labels = []
+        for genre_name in record.get("genre_names") or []:
+            text_value = self._clean_text(genre_name)
+            if text_value and text_value not in labels:
                 labels.append(text_value)
         if labels:
             return " / ".join(labels[:4])
@@ -1831,11 +1880,13 @@ class UpcomingReleases(_PluginBase):
                 items.extend(self._safe_fetch("爱奇艺", self._fetch_iqiyi))
             if self._config.get("enable_tencent"):
                 items.extend(self._safe_fetch("腾讯视频", self._fetch_tencent))
-            if self._config.get("enable_youku"):
-                items.extend(self._safe_fetch("优酷", self._fetch_youku))
-            if self._config.get("enable_mgtv"):
-                items.extend(self._safe_fetch("芒果TV", self._fetch_mgtv))
-            items = self._finalize_items(items)
+            if self._config.get("enable_youku"):
+                items.extend(self._safe_fetch("优酷", self._fetch_youku))
+            if self._config.get("enable_mgtv"):
+                items.extend(self._safe_fetch("芒果TV", self._fetch_mgtv))
+            if self._config.get("enable_netflix"):
+                items.extend(self._safe_fetch("Netflix", self._fetch_netflix))
+            items = self._finalize_items(items)
             self._cache = {"timestamp": now_ts, "items": items}
             try:
                 self._persist_cache()
@@ -2259,13 +2310,110 @@ class UpcomingReleases(_PluginBase):
                     year=year,
                 )
             )
-        logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
-        return items
-
-    def _build_item(
-        self,
-        platform: str,
-        raw_id: str,
+        logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
+        return items
+
+    def _fetch_netflix(self) -> List[Dict[str, Any]]:
+        today = datetime.now().date()
+        items: List[Dict[str, Any]] = []
+        seen = set()
+        page = 1
+        total_pages = 1
+
+        while page <= total_pages:
+            response = self._request_json(
+                (
+                    f"{NETFLIX_RELEASES_URL}?countryCode={NETFLIX_DEFAULT_REGION}"
+                    f"&language={NETFLIX_DEFAULT_LANGUAGE}&page={page}"
+                ),
+                headers={
+                    "Referer": NETFLIX_RELEASES_REFERER,
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            if not response:
+                break
+
+            total_pages = max(page, safe_int(response.get("totalPages"), page))
+            for entry in response.get("data") or []:
+                raw_id = str(entry.get("videoID") or entry.get("id") or "").strip()
+                if not raw_id or raw_id in seen:
+                    continue
+
+                title = self._clean_text(entry.get("title1"))
+                subtitle = self._clean_text(entry.get("title2"))
+                start_time_ms = safe_int(entry.get("startTime"), 0)
+                if not title or not start_time_ms:
+                    continue
+
+                release_dt = datetime.utcfromtimestamp(start_time_ms / 1000).date()
+                if release_dt < today:
+                    continue
+
+                type_key = self._resolve_netflix_type_key(entry, title, subtitle)
+                genre_names = self._resolve_netflix_genre_names(entry, type_key)
+                story = subtitle if subtitle and subtitle.lower() != title.lower() else ""
+
+                item = self._build_item(
+                    platform="netflix",
+                    raw_id=raw_id,
+                    title=title,
+                    type_key=type_key,
+                    release_date=release_dt.strftime("%Y-%m-%d"),
+                    release_text=story or "Netflix 即将上线",
+                    poster=self._clean_text(entry.get("image")),
+                    detail_link=f"https://www.netflix.com/watch/{raw_id}",
+                    story=story,
+                    year=str(release_dt.year),
+                )
+                item["region_codes"] = ["US"]
+                item["genre_names"] = genre_names
+                item["platforms"] = ["netflix"]
+                item["platform_labels"] = [PLATFORM_LABELS["netflix"]]
+                items.append(item)
+                seen.add(raw_id)
+
+            page += 1
+
+        logger.info(f"[UpcomingReleases] Netflix抓取到 {len(items)} 条")
+        return items
+
+    def _resolve_netflix_type_key(self, entry: Dict[str, Any], title: str, subtitle: str = "") -> str:
+        genre_id = safe_int(entry.get("genre"), 0)
+        if genre_id in NETFLIX_GENRE_TYPE_MAP:
+            return NETFLIX_GENRE_TYPE_MAP[genre_id]
+
+        subtitle_lower = subtitle.lower()
+        if any(keyword in subtitle_lower for keyword in ["season", "part", "chapter", "volume", "book", "episodes"]):
+            return "tv"
+
+        collection_id = safe_int(entry.get("collection"), 0)
+        if collection_id in NETFLIX_COLLECTION_TYPE_MAP:
+            return NETFLIX_COLLECTION_TYPE_MAP[collection_id]
+
+        return self._keyword_type_key(" ".join(filter(None, [title, subtitle])))
+
+    def _resolve_netflix_genre_names(self, entry: Dict[str, Any], type_key: str) -> List[str]:
+        labels: List[str] = []
+        genre_label = NETFLIX_GENRE_NAME_MAP.get(safe_int(entry.get("genre"), 0))
+        if genre_label:
+            labels.append(genre_label)
+
+        type_fallback = {
+            "anime": "动画",
+            "documentary": "纪录片",
+            "kids": "少儿",
+            "variety": "真人秀",
+        }.get(type_key)
+        if type_fallback and type_fallback not in labels:
+            labels.append(type_fallback)
+        return labels
+
+    def _build_item(
+        self,
+        platform: str,
+        raw_id: str,
         title: str,
         type_key: str,
         release_date: Optional[str],
@@ -2579,6 +2727,9 @@ class UpcomingReleases(_PluginBase):
         expected = self._normalize_region_values(regions)
         if not expected:
             return True
+        direct_codes = self._normalize_region_values(item.get("region_codes") or [])
+        if direct_codes:
+            return bool(direct_codes & expected)
         failed_cached = False
         cache_keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))]
         for key in cache_keys:
@@ -2601,7 +2752,7 @@ class UpcomingReleases(_PluginBase):
         expected = self._normalize_genre_values(genres)
         if not expected:
             return True
-        actual = set()
+        actual = set(self._normalize_genre_values(item.get("genre_names") or []))
         failed_cached = False
         cache_keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))]
         for key in cache_keys:
@@ -2884,7 +3035,7 @@ class UpcomingReleases(_PluginBase):
     def _ensure_security_domains(self):
         if self._security_domains_ready:
             return
-        domains = ["iqiyipic.com", "qpic.cn", "ykimg.com", "hitv.com", "mgtv.com"]
+        domains = ["iqiyipic.com", "qpic.cn", "ykimg.com", "hitv.com", "mgtv.com", "nflximg.net", "dnm.nflximg.net"]
         for domain in domains:
             if domain not in settings.SECURITY_IMAGE_DOMAINS:
                 settings.SECURITY_IMAGE_DOMAINS.append(domain)
