@@ -1,4 +1,5 @@
-import copy
+import copy
+import os
 import json
 import re
 import time
@@ -7,7 +8,7 @@ from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends
@@ -404,7 +405,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.17"
+    plugin_version = "0.6.18"
     plugin_release_date = "2026-04-17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -2319,6 +2320,9 @@ class UpcomingReleases(_PluginBase):
         seen = set()
         page = 1
         total_pages = 1
+        proxy_url = self._get_netflix_proxy_url()
+        if proxy_url:
+            logger.info("[UpcomingReleases] Netflix requests will use MoviePilot proxy configuration")
 
         while page <= total_pages:
             response = {}
@@ -2333,6 +2337,7 @@ class UpcomingReleases(_PluginBase):
                         "Accept": "application/json, text/plain, */*",
                         "Accept-Language": "en-US,en;q=0.9",
                     },
+                    proxy_url=proxy_url,
                 )
                 if response:
                     break
@@ -3075,23 +3080,48 @@ class UpcomingReleases(_PluginBase):
         }
         self.save_data("cache", cache_payload)
 
-    def _persist_recognize_cache(self):
-        self.save_data(
-            "recognize_cache",
-            {
-                "schema_version": CACHE_SCHEMA_VERSION,
-                "records": self._recognize_cache,
-            },
-        )
-        self._recognize_dirty = False
-
-    def _request_text(
-        self,
-        url: str,
-        method: str = "GET",
-        headers: Optional[Dict[str, str]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    def _persist_recognize_cache(self):
+        self.save_data(
+            "recognize_cache",
+            {
+                "schema_version": CACHE_SCHEMA_VERSION,
+                "records": self._recognize_cache,
+            },
+        )
+        self._recognize_dirty = False
+
+    def _build_proxy_url(self, raw_proxy: Any) -> str:
+        proxy = self._clean_text(raw_proxy)
+        if not proxy:
+            return ""
+        if "://" not in proxy:
+            return f"http://{proxy}"
+        return proxy
+
+    def _get_netflix_proxy_url(self) -> str:
+        proxy_candidates = [
+            getattr(settings, "PROXY_HOST", None),
+            getattr(settings, "proxy_host", None),
+            os.environ.get("PROXY_HOST"),
+            os.environ.get("HTTPS_PROXY"),
+            os.environ.get("https_proxy"),
+            os.environ.get("HTTP_PROXY"),
+            os.environ.get("http_proxy"),
+        ]
+        for value in proxy_candidates:
+            proxy_url = self._build_proxy_url(value)
+            if proxy_url:
+                return proxy_url
+        return ""
+
+    def _request_text(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        proxy_url: str = "",
+    ) -> str:
         req_headers = dict(DEFAULT_HEADERS)
         if headers:
             req_headers.update(headers)
@@ -3100,12 +3130,17 @@ class UpcomingReleases(_PluginBase):
             data = json.dumps(json_body).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
             method = "POST"
-        request = Request(url, headers=req_headers, data=data, method=method)
-        try:
-            with urlopen(request, timeout=20) as response:
-                content = response.read()
-                charset = response.headers.get_content_charset() or "utf-8"
-                return content.decode(charset, errors="ignore")
+        request = Request(url, headers=req_headers, data=data, method=method)
+        try:
+            if proxy_url:
+                opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                response_context = opener.open(request, timeout=20)
+            else:
+                response_context = urlopen(request, timeout=20)
+            with response_context as response:
+                content = response.read()
+                charset = response.headers.get_content_charset() or "utf-8"
+                return content.decode(charset, errors="ignore")
         except HTTPError as err:
             logger.warning(f"[UpcomingReleases] 请求失败 {url}: HTTP {err.code}")
         except URLError as err:
@@ -3114,14 +3149,15 @@ class UpcomingReleases(_PluginBase):
             logger.warning(f"[UpcomingReleases] 请求异常 {url}: {err}")
         return ""
 
-    def _request_json(
-        self,
-        url: str,
-        method: str = "GET",
-        headers: Optional[Dict[str, str]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        text = self._request_text(url, method=method, headers=headers, json_body=json_body)
+    def _request_json(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        proxy_url: str = "",
+    ) -> Dict[str, Any]:
+        text = self._request_text(url, method=method, headers=headers, json_body=json_body, proxy_url=proxy_url)
         if not text:
             return {}
         try:

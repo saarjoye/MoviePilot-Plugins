@@ -1,5 +1,11 @@
 # Agent Notes
 
+## Project Rules
+
+- `Rule | 规则`：凡是对插件代码产生了实际变更，且会影响插件行为、抓取逻辑、接口、UI 展示、配置项、定时任务、订阅规则、修复结果或用户可感知输出时，必须同步更新 `__init__.py` 中的 `plugin_version`。
+- `Rule | 规则`：若本次变更属于新的发布批次，还必须同步检查并更新 `plugin_release_date`，确保版本信息与实际代码状态一致。
+- `Rule | 规则`：仅修改 `agent.md`、注释、纯文档说明，且不影响插件运行逻辑时，可以不更新版本号；其余情况默认需要更新版本号。
+
 ## 2026-04-17
 
 ### User Request
@@ -127,3 +133,16 @@
 ### Fix Applied
 - `Implemented | 已实施`：将 `_fetch_netflix()` 改为“单页最多重试 3 次；非第一页失败时仅跳过当前页，不中断整个分页抓取”。
 - `Expected result | 预期结果`：避免因 Netflix 官方分页接口偶发 `502` 或代理错误，导致后续包含未来条目的分页未被抓取。
+
+## 2026-04-17 Update Mark 7
+
+### User Follow-up
+- 用户怀疑：奈飞源在实际 MoviePilot 环境里可能需要走系统代理，其它平台不需要。
+
+### Fix Applied
+- `Implemented | 已实施`：Netflix 请求链路现在会优先读取 MoviePilot 运行时中的 `settings.PROXY_HOST`；若该字段不存在，再回退读取环境变量 `PROXY_HOST`、`HTTPS_PROXY`、`HTTP_PROXY`。
+- `Implemented | 已实施`：代理仅作用于 Netflix 请求；爱奇艺、腾讯视频、优酷、芒果TV 仍保持原来的直连逻辑。
+- `Implemented | 已实施`：本次代码变更已同步把插件版本号更新为 `0.6.18`。
+
+### Verification
+- `Verified | 已验证`：`python -m py_compile __init__.py` 通过。
