@@ -112,3 +112,18 @@
 ### Known Limits
 - `Known limit | 已知限制`：当前实现固定抓取 `US + en` 的 Netflix 官方公开片单；如果后续要支持更多地区，需要继续参数化 `countryCode/language`。
 - `Known limit | 已知限制`：Netflix 官方接口返回的 collection/genre 编码语义不完全等同于 MoviePilot 现有分类，因此当前 `type_key/genre_names` 采用“官方 genre 映射 + 现有插件语义兼容”的折中映射。
+
+## 2026-04-17 Update Mark 6
+
+### Issue Found
+- 用户反馈：页面已出现 `Netflix` 平台筛选，但点击后显示 `0` 条。
+- `Verified fact | 已验证事实`：官方接口分页数据中，`2026-04-17` 之后的未来条目主要集中在后两页。
+  - Page 1: future count = 0
+  - Page 2: future count = 0
+  - Page 3: future count = 11
+  - Page 4: future count = 18
+- `Inference | 基于证据的推断`：若前两页抓取成功、后续分页请求中断或失败，就会出现“平台选项存在，但未来条目为 0”的表象。
+
+### Fix Applied
+- `Implemented | 已实施`：将 `_fetch_netflix()` 改为“单页最多重试 3 次；非第一页失败时仅跳过当前页，不中断整个分页抓取”。
+- `Expected result | 预期结果`：避免因 Netflix 官方分页接口偶发 `502` 或代理错误，导致后续包含未来条目的分页未被抓取。

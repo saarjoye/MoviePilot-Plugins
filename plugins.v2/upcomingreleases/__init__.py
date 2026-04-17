@@ -404,7 +404,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.16"
+    plugin_version = "0.6.17"
     plugin_release_date = "2026-04-17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -2321,19 +2321,28 @@ class UpcomingReleases(_PluginBase):
         total_pages = 1
 
         while page <= total_pages:
-            response = self._request_json(
-                (
-                    f"{NETFLIX_RELEASES_URL}?countryCode={NETFLIX_DEFAULT_REGION}"
-                    f"&language={NETFLIX_DEFAULT_LANGUAGE}&page={page}"
-                ),
-                headers={
-                    "Referer": NETFLIX_RELEASES_REFERER,
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            )
+            response = {}
+            for attempt in range(3):
+                response = self._request_json(
+                    (
+                        f"{NETFLIX_RELEASES_URL}?countryCode={NETFLIX_DEFAULT_REGION}"
+                        f"&language={NETFLIX_DEFAULT_LANGUAGE}&page={page}"
+                    ),
+                    headers={
+                        "Referer": NETFLIX_RELEASES_REFERER,
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                if response:
+                    break
+                time.sleep(1)
             if not response:
-                break
+                logger.warning(f"[UpcomingReleases] Netflix page {page} request failed after retries")
+                if page == 1:
+                    break
+                page += 1
+                continue
 
             total_pages = max(page, safe_int(response.get("totalPages"), page))
             for entry in response.get("data") or []:
