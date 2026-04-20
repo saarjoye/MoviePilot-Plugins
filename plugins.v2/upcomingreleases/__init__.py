@@ -405,8 +405,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.21"
-    plugin_release_date = "2026-04-17"
+    plugin_version = "0.6.22"
+    plugin_release_date = "2026-04-20"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -995,9 +995,7 @@ class UpcomingReleases(_PluginBase):
             bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
             mediaid=self._make_subscribe_mediaid(item),
             season=resolved_season,
-            message=False,
             exist_ok=True,
-            source="upcoming page subscribe",
             username=username,
         )
         logger.info(f"[UpcomingReleases] page subscribe result: title={item.get('title')} sid={sid} message={message or ''}")
@@ -2643,11 +2641,9 @@ class UpcomingReleases(_PluginBase):
                         bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
                         mediaid=self._make_subscribe_mediaid(item),
                         season=resolved_season,
-                        message=False,
                         exist_ok=True,
-                        source=f"upcoming auto subscribe:{rule.get('name')}",
                         username=default_username,
-                    )
+                    )
                     logger.info(f"[UpcomingReleases] auto subscribe result: rule={rule.get('name')} title={item.get('title')} sid={sid} message={message or ''}")
                     if sid and not self._is_exists_message(message):
                         summary["added"].append(detail)

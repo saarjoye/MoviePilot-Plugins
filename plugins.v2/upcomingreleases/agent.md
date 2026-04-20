@@ -163,3 +163,20 @@
 
 ### Implementation Note
 - `Implementation note | 实施说明`：当前中文显示名依赖已有识别链路可提供的本地化标题字段；若识别源本身没有中文名称，则页面仍会显示原始英文名，这是当前最稳妥且不破坏原逻辑的实现路径。
+
+## 2026-04-20 Update Mark
+
+### User Follow-up
+- 用户诉求：希望插件新增的订阅走 MP 自己的订阅通知，同时确认 MP 订阅页能否给插件来源加角标。
+
+### Verified Facts
+- `Verified fact | 已验证事实`：当前工作区 `__init__.py` 的 `page_subscribe()` 与 `_run_auto_subscribe()` 仍向 `SubscribeChain.add()` 传入 `message=False` 与自定义 `source`，这会让新增订阅无法按 MP 默认订阅通知链路派发。
+- `Verified fact | 已验证事实`：插件写入订阅时仍使用 `mediaid=upcomingreleases:<media_id>` 作为记录标识，因此后端层面可以区分“这是待播插件创建的订阅”。
+- `Known limit | 已知限制`：当前插件仓库只包含插件后端与插件自身页面产物，不包含 MP 主程序的订阅页前端扩展点；因此不能仅靠插件代码在 MP 订阅卡片上直接渲染插件名角标。
+
+### Fix Applied
+- `Implemented | 已实施`：已移除两处 `SubscribeChain.add()` 调用中的 `message=False` 与自定义 `source`，让新增订阅回归 MP 默认订阅通知渠道。
+- `Implemented | 已实施`：已将插件版本更新为 `0.6.22`，发布时间更新为 `2026-04-20`。
+
+### Verification
+- `Verified | 已验证`：`python -m py_compile upcomingreleases\\__init__.py` 通过。
