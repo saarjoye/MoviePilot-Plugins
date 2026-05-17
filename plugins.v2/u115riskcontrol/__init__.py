@@ -37,7 +37,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控默认参数、运行态状态页和风控触发事件日志。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -533,7 +533,7 @@ class U115RiskControl(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> Tuple[str, Optional[str]]:
-        return "default", None
+        return "vuetify", None
 
     def _apply_patch(self):
         try:
