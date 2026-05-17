@@ -37,7 +37,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控默认参数、运行态状态页和风控触发事件日志。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -104,6 +104,46 @@ class U115RiskControl(_PluginBase):
         return []
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
+        try:
+            return self._get_form_impl()
+        except Exception as exc:
+            logger.exception("[U115RiskControl] get_form render failed")
+            fallback_form = [
+                {
+                    "component": "VForm",
+                    "content": [
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 12},
+                                    "content": [
+                                        {
+                                            "component": "VAlert",
+                                            "props": {
+                                                "type": "error",
+                                                "variant": "tonal",
+                                                "title": "配置页渲染失败",
+                                                "text": f"插件配置页渲染异常：{exc}",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                self._build_switch_col("enabled", "启用插件", sm=12),
+                            ],
+                        },
+                    ],
+                }
+            ]
+            return fallback_form, dict(DEFAULT_CONFIG)
+
+    def _get_form_impl(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         low_risk_note = (
             "当前默认值已经按低风控思路设置：普通接口 QPS=1、下载接口 QPS=1、"
             "115 返回访问上限后的冷却=3600 秒、小时软阈值=60、主动冷却=1200 秒。"
@@ -119,37 +159,116 @@ class U115RiskControl(_PluginBase):
                 "component": "VForm",
                 "content": [
                     {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": (
-                                "此插件不会直接修改 MoviePilot 核心源码，而是在运行时为 u115 存储注入低风控参数。"
-                            ),
-                        },
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "warning",
-                            "variant": "tonal",
-                            "text": low_risk_note,
-                        },
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": mp_default_note,
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "插件说明",
+                                            "text": "此插件不会直接修改 MoviePilot 核心源码，而是在运行时为 u115 存储注入低风控参数。",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
                     },
                     {
                         "component": "VRow",
                         "content": [
-                            self._build_switch_col("enabled", "启用插件"),
-                            self._build_switch_col("startup_log", "启动时输出补丁日志"),
-                            self._build_switch_col("strict_mode", "严格兼容模式"),
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "低风控默认值",
+                                            "text": low_risk_note,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "MP 原始默认值提示",
+                                            "text": mp_default_note,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {"component": "VDivider", "props": {"class": "my-4"}},
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "基础开关",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._build_switch_col("enabled", "启用插件", sm=4),
+                            self._build_switch_col("startup_log", "启动时输出补丁日志", sm=4),
+                            self._build_switch_col("strict_mode", "严格兼容模式", sm=4),
+                        ],
+                    },
+                    {"component": "VDivider", "props": {"class": "my-4"}},
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "风控参数",
+                                        },
+                                    }
+                                ],
+                            }
                         ],
                     },
                     {
@@ -204,22 +323,23 @@ class U115RiskControl(_PluginBase):
                             ),
                         ],
                     },
+                    {"component": "VDivider", "props": {"class": "my-4"}},
                     {
                         "component": "VRow",
                         "content": [
-                            self._build_switch_col("enable_event_log", "记录风控事件日志"),
+                            self._build_switch_col("enable_event_log", "记录风控事件日志", sm=4),
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
+                                "props": {"cols": 12, "sm": 8},
                                 "content": [
                                     {
                                         "component": "VAlert",
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "text": (
-                                                "推荐用法：先保持默认低风控值运行一段时间，再根据“风控事件日志”里的触发来源和阈值决定是否继续放宽。"
-                                            ),
+                                            "density": "compact",
+                                            "title": "建议",
+                                            "text": "先保持默认低风控值运行一段时间，再根据风控事件日志里的触发来源和阈值决定是否继续放宽。",
                                         },
                                     }
                                 ],
@@ -232,89 +352,178 @@ class U115RiskControl(_PluginBase):
         return form, dict(DEFAULT_CONFIG)
 
     def get_page(self) -> List[dict]:
+        try:
+            return self._get_page_impl()
+        except Exception as exc:
+            logger.exception("[U115RiskControl] get_page render failed")
+            return [
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [
+                                {
+                                    "component": "VAlert",
+                                    "props": {
+                                        "type": "error",
+                                        "variant": "tonal",
+                                        "title": "状态页渲染失败",
+                                        "text": f"插件状态页渲染异常：{exc}",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+
+    def _get_page_impl(self) -> List[dict]:
         status_text = self._last_status
         if self._last_error:
             status_text = f"{status_text} | {self._last_error}"
 
         logs = self._event_logs[-self._max_event_log_count :]
-        log_rows = [self._build_event_row(event) for event in reversed(logs)]
-        if not log_rows:
-            log_rows = [
-                {
-                    "component": "div",
-                    "props": {"class": "text-body-2"},
-                    "text": "暂无风控事件。当前还没有命中 115 硬风控，也没有触发插件侧主动冷却。",
-                }
-            ]
+        lines = [self._format_event_line(event) for event in reversed(logs)]
+        event_text = "\n\n".join(lines) if lines else "暂无风控事件。当前还没有命中 115 硬风控，也没有触发插件侧主动冷却。"
 
         return [
             {
                 "component": "VRow",
                 "content": [
-                    self._build_info_card(
-                        title="运行状态",
-                        lines=[
-                            f"启用状态：{'已启用' if self._enabled else '已禁用'}",
-                            f"补丁状态：{status_text}",
-                            f"当前实例数：{self._patched_instances}",
-                            f"最近事件来源：{self._last_event_source}",
-                            f"最近事件类型：{self._last_event_type}",
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "density": "compact",
+                                    "title": "运行状态",
+                                    "text": (
+                                        f"启用状态：{'已启用' if self._enabled else '已禁用'} | "
+                                        f"补丁状态：{status_text} | "
+                                        f"当前实例数：{self._patched_instances} | "
+                                        f"最近事件来源：{self._last_event_source} | "
+                                        f"最近事件类型：{self._last_event_type}"
+                                    ),
+                                },
+                            }
                         ],
-                    ),
-                    self._build_info_card(
-                        title="低风控默认值",
-                        lines=[
-                            f"普通接口 QPS：{self._api_qps}",
-                            f"下载接口 QPS：{self._download_qps}",
-                            f"115 硬风控冷却：{self._limit_sleep_seconds} 秒",
-                            f"小时软阈值：{self._hourly_soft_limit}",
-                            f"主动冷却：{self._hourly_soft_cooldown} 秒",
-                        ],
-                    ),
+                    }
                 ],
             },
             {
                 "component": "VRow",
                 "content": [
-                    self._build_info_card(
-                        title="风控统计",
-                        lines=[
-                            f"插件软阈值命中次数：{self._soft_limit_hits}",
-                            f"115 硬风控命中次数：{self._hard_limit_hits}",
-                            f"当前冷却状态：{self._current_cooldown_reason}",
-                            f"当前剩余冷却：{self._current_cooldown_remaining} 秒",
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "sm": 4},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "warning",
+                                    "variant": "tonal",
+                                    "title": "风控统计",
+                                    "text": (
+                                        f"插件软阈值命中：{self._soft_limit_hits}\n"
+                                        f"115 硬风控命中：{self._hard_limit_hits}\n"
+                                        f"当前冷却状态：{self._current_cooldown_reason}\n"
+                                        f"当前剩余冷却：{self._current_cooldown_remaining} 秒"
+                                    ),
+                                },
+                            }
                         ],
-                    ),
-                    self._build_info_card(
-                        title="MP 原始默认值",
-                        lines=[
-                            f"普通接口 QPS：{MP_DEFAULTS['api_qps']}",
-                            f"下载接口 QPS：{MP_DEFAULTS['download_qps']}",
-                            f"115 硬风控冷却：{MP_DEFAULTS['limit_sleep_seconds']} 秒",
-                            "小时软阈值：无",
-                            "主动冷却：无",
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "sm": 4},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "success",
+                                    "variant": "tonal",
+                                    "title": "当前生效参数",
+                                    "text": (
+                                        f"普通接口 QPS：{self._api_qps}\n"
+                                        f"下载接口 QPS：{self._download_qps}\n"
+                                        f"115 硬风控冷却：{self._limit_sleep_seconds} 秒\n"
+                                        f"小时软阈值：{self._hourly_soft_limit}\n"
+                                        f"主动冷却：{self._hourly_soft_cooldown} 秒"
+                                    ),
+                                },
+                            }
                         ],
-                    ),
-                    self._build_info_card(
-                        title="触发源判断",
-                        lines=[
-                            "一级来源：MoviePilot / 内置 u115",
-                            "二级来源：插件侧主动冷却",
-                            "事件会区分：补丁生效 / 插件软阈值 / 115 硬风控",
-                            "建议根据事件来源决定是降 QPS 还是降每小时整理量",
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "sm": 4},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "title": "MP 原始默认值",
+                                    "text": (
+                                        f"普通接口 QPS：{MP_DEFAULTS['api_qps']}\n"
+                                        f"下载接口 QPS：{MP_DEFAULTS['download_qps']}\n"
+                                        f"115 硬风控冷却：{MP_DEFAULTS['limit_sleep_seconds']} 秒\n"
+                                        "小时软阈值：无\n"
+                                        "主动冷却：无"
+                                    ),
+                                },
+                            }
                         ],
-                    ),
+                    },
                 ],
             },
             {
-                "component": "VCard",
-                "props": {"variant": "tonal"},
+                "component": "VRow",
                 "content": [
-                    {"component": "VCardTitle", "text": "最近风控事件日志"},
                     {
-                        "component": "VCardText",
-                        "content": log_rows,
-                    },
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "density": "compact",
+                                    "title": "触发源判断",
+                                    "text": "一级来源：MoviePilot / 内置 u115；二级来源：插件侧主动冷却。事件会区分补丁生效 / 插件软阈值 / 115 硬风控，建议根据事件来源决定是降 QPS 还是降每小时整理量。",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "component": "VRow",
+                "props": {"class": "mt-2"},
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VTextarea",
+                                "props": {
+                                    "label": "最近风控事件日志",
+                                    "modelValue": event_text,
+                                    "readonly": True,
+                                    "rows": 14,
+                                    "auto-grow": True,
+                                },
+                            }
+                        ],
+                    }
                 ],
             },
         ]
@@ -647,16 +856,17 @@ class U115RiskControl(_PluginBase):
             if len(self._event_logs) > self._max_event_log_count:
                 self._event_logs = self._event_logs[-self._max_event_log_count :]
 
-    def _build_switch_col(self, model: str, label: str) -> Dict[str, Any]:
+    def _build_switch_col(self, model: str, label: str, sm: int = 4) -> Dict[str, Any]:
         return {
             "component": "VCol",
-            "props": {"cols": 12, "md": 4},
+            "props": {"cols": 12, "sm": sm},
             "content": [
                 {
                     "component": "VSwitch",
                     "props": {
                         "model": model,
                         "label": label,
+                        "hide-details": True,
                     },
                 }
             ],
@@ -672,7 +882,7 @@ class U115RiskControl(_PluginBase):
     ) -> Dict[str, Any]:
         return {
             "component": "VCol",
-            "props": {"cols": 12, "md": 4},
+            "props": {"cols": 12, "sm": 4},
             "content": [
                 {
                     "component": "VTextField",
@@ -689,56 +899,15 @@ class U115RiskControl(_PluginBase):
             ],
         }
 
-    def _build_info_card(self, *, title: str, lines: List[str]) -> Dict[str, Any]:
-        return {
-            "component": "VCol",
-            "props": {"cols": 12, "md": 6},
-            "content": [
-                {
-                    "component": "VCard",
-                    "props": {"variant": "tonal"},
-                    "content": [
-                        {"component": "VCardTitle", "text": title},
-                        {
-                            "component": "VCardText",
-                            "content": [
-                                {
-                                    "component": "div",
-                                    "props": {"class": "text-body-2 mb-2"},
-                                    "text": line,
-                                }
-                                for line in lines
-                            ],
-                        },
-                    ],
-                }
-            ],
-        }
-
-    def _build_event_row(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        title = f"{event.get('time')} | {event.get('source')}"
-        body = (
-            f"事件类型：{event.get('event_type')} | "
-            f"接口：{event.get('endpoint')} | "
-            f"命中阈值：{event.get('threshold')}"
+    def _format_event_line(self, event: Dict[str, Any]) -> str:
+        return (
+            f"[{event.get('time')}] {event.get('source')}\n"
+            f"事件类型：{event.get('event_type')}\n"
+            f"接口：{event.get('endpoint')}\n"
+            f"命中阈值：{event.get('threshold')}\n"
+            f"详情：{event.get('detail')}\n"
+            f"建议：{event.get('suggestion')}"
         )
-        detail = str(event.get("detail") or "")
-        suggestion = str(event.get("suggestion") or "")
-        return {
-            "component": "VCard",
-            "props": {"class": "mb-3", "variant": "outlined"},
-            "content": [
-                {"component": "VCardTitle", "text": title},
-                {
-                    "component": "VCardText",
-                    "content": [
-                        {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": body},
-                        {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": detail},
-                        {"component": "div", "props": {"class": "text-caption"}, "text": f"建议：{suggestion}"},
-                    ],
-                },
-            ],
-        }
 
     def _normalize_config(self, config: Optional[dict]) -> Dict[str, Any]:
         merged = dict(DEFAULT_CONFIG)

@@ -99,13 +99,14 @@
     "name": "u115风控参数",
     "description": "为 MoviePilot 的 u115 存储提供低风控默认参数、运行态状态页和风控触发事件日志。",
     "labels": "工具,115,风控",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/U115RiskControl.jpg",
     "author": "wYw",
     "level": 1,
     "history": {
       "v0.1.0": "u115风控参数 0.1.0 发布到 v2 插件市场",
-      "v0.1.2": "u115风控参数 0.1.2 发布，补充 MP 原始默认值提示与低风控默认参数说明"
+      "v0.1.2": "u115风控参数 0.1.2 发布，补充 MP 原始默认值提示与低风控默认参数说明",
+      "v0.1.3": "u115风控参数 0.1.3 发布，收敛页面 schema 并增加渲染兜底，修复点击插件空白页问题"
     },
     "v2": true
   }
