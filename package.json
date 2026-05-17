@@ -94,5 +94,18 @@
       "v0.4.23": "盘链 115 搜索 0.4.23 通过 Web 面板发布"
     },
     "v2": true
+  },
+  "U115RiskControl": {
+    "name": "u115风控参数",
+    "description": "为 MoviePilot 的 u115 存储注入可持久的限流参数，降低 115 Open API 风控概率。",
+    "labels": "影视,工具",
+    "version": "0.1.0",
+    "icon": "U115RiskControl.jpg",
+    "author": "wYw",
+    "level": 1,
+    "history": {
+      "v0.1.0": "u115风控参数 0.1.0 通过 Web 面板发布"
+    },
+    "v2": true
   }
 }
