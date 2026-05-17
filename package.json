@@ -98,13 +98,13 @@
   "U115RiskControl": {
     "name": "u115风控参数",
     "description": "为 MoviePilot 的 u115 存储注入可持久的限流参数，降低 115 Open API 风控概率。",
-    "labels": "影视,工具",
+    "labels": "工具,115,风控",
     "version": "0.1.0",
-    "icon": "U115RiskControl.jpg",
+    "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/U115RiskControl.jpg",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v0.1.0": "u115风控参数 0.1.0 通过 Web 面板发布"
+      "v0.1.0": "u115风控参数 0.1.0 发布到 v2 插件市场"
     },
     "v2": true
   }
