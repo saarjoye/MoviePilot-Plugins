@@ -20,7 +20,7 @@ class HRManager(_PluginBase):
     # 插件图标
     plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -428,7 +428,7 @@ class HRManager(_PluginBase):
                         title="【HR管理】新HR种子添加",
                         text=f"种子 {torrent_name} 已添加到下载器并标记为HR种子\n"\
                              f"站点：{site_name}\n"\
-                             f"需要满足：做种时间 ≥ {site_config.get('time', 0)}小时，分享率 ≥ {site_config.get('hr_ratio', 0)}"
+                             f"需要满足任一条件：做种时间 ≥ {site_config.get('time', 0)}小时，或分享率 ≥ {site_config.get('hr_ratio', 0)}"
                     )
                     logger.info(f"发送HR种子添加通知：{torrent_name}")
                 
@@ -677,7 +677,7 @@ class HRManager(_PluginBase):
                     title="【HR管理】新HR种子添加",
                     text=f"种子 {torrent_name} 已添加到下载器并标记为HR种子\n"
                          f"站点：{site_name}\n"
-                         f"需要满足：做种时间 ≥ {site_config.get('time', 0)}小时，分享率 ≥ {site_config.get('hr_ratio', 0)}"
+                         f"需要满足任一条件：做种时间 ≥ {site_config.get('time', 0)}小时，或分享率 ≥ {site_config.get('hr_ratio', 0)}"
                 )
                 logger.info(f"发送HR种子添加通知：{torrent_name}")
             else:
@@ -855,14 +855,24 @@ class HRManager(_PluginBase):
                         logger.info(f"HR要求 - 做种时间：{time_requirement}小时，分享率：{ratio_requirement}")
                         logger.info(f"当前状态 - 做种时间：{seeding_time:.2f}小时，分享率：{ratio:.2f}")
 
-                        # 检查是否超过HR满足期限
+                        # 检查是否满足HR条件：已配置的时间/分享率要求满足任一项即可
+                        time_ok, ratio_ok, hr_finished = self._check_hr_completion(
+                            seeding_time=seeding_time,
+                            ratio=ratio,
+                            time_requirement=time_requirement,
+                            ratio_requirement=ratio_requirement,
+                        )
+
+                        logger.info(f"HR条件检查 - 做种时间: {'✓' if time_ok else '✗'}, 分享率: {'✓' if ratio_ok else '✗'}，任一条件完成: {'✓' if hr_finished else '✗'}")
+
+                        # 检查是否超过HR满足期限；已满足任一HR条件的种子直接进入完成流程
                         added_time = torrent.get("added_time")
                         if added_time and hr_deadline_days > 0:
                             # 计算已过去的天数
                             days_passed = (datetime.now() - datetime.fromtimestamp(added_time)).days
                             logger.info(f"HR期限检查 - 已过去：{days_passed}天，要求期限：{hr_deadline_days}天")
                             
-                            if days_passed > hr_deadline_days:
+                            if days_passed > hr_deadline_days and not hr_finished:
                                 # 超过期限，发送警告通知
                                 logger.warning(f"⚠ 种子 {torrent_name} 已超过HR满足期限 {hr_deadline_days}天")
                                 self.post_message(
@@ -876,15 +886,9 @@ class HRManager(_PluginBase):
                                 logger.info(f"发送HR期限警告通知：{torrent_name}")
                                 continue
 
-                        # 检查是否满足HR条件
-                        time_ok = seeding_time >= time_requirement
-                        ratio_ok = ratio >= ratio_requirement
-                        
-                        logger.info(f"HR条件检查 - 做种时间: {'✓' if time_ok else '✗'}, 分享率: {'✓' if ratio_ok else '✗'}")
-                        
-                        if time_ok and ratio_ok:
+                        if hr_finished:
                             # 移除HR标签，添加出种标签
-                            logger.info(f"🎉 种子 {torrent_name} 已满足所有HR条件！")
+                            logger.info(f"🎉 种子 {torrent_name} 已满足HR任一完成条件！")
                             logger.info(f"正在更新种子标签：移除 '{self._hr_tag}'，添加 '{self._finished_tag}'")
                             
                             try:
@@ -1216,6 +1220,28 @@ class HRManager(_PluginBase):
         score = (deadline_pressure * 0.5 + time_pressure * 0.3 + ratio_pressure * 0.2) * 100
         return round(min(100.0, max(0.0, score)), 2)
 
+    @staticmethod
+    def _check_hr_completion(
+            seeding_time: float,
+            ratio: float,
+            time_requirement: float,
+            ratio_requirement: float) -> Tuple[bool, bool, bool]:
+        """
+        检查HR完成状态。
+        只有大于0的配置项才作为有效要求；多个有效要求满足任一项即可完成。
+        """
+        time_ok = time_requirement <= 0 or seeding_time >= time_requirement
+        ratio_ok = ratio_requirement <= 0 or ratio >= ratio_requirement
+
+        enabled_results = []
+        if time_requirement > 0:
+            enabled_results.append(seeding_time >= time_requirement)
+        if ratio_requirement > 0:
+            enabled_results.append(ratio >= ratio_requirement)
+
+        finished = any(enabled_results) if enabled_results else True
+        return time_ok, ratio_ok, finished
+
     def _calculate_alert_info(
             self,
             seeding_time: float,
@@ -1229,12 +1255,20 @@ class HRManager(_PluginBase):
         """
         time_progress = 1.0 if time_requirement <= 0 else min(1.0, seeding_time / max(time_requirement, 1.0))
         ratio_progress = 1.0 if ratio_requirement <= 0 else min(1.0, ratio / max(ratio_requirement, 1.0))
-        progress = min(time_progress, ratio_progress)
+        progress_candidates = []
+        if time_requirement > 0:
+            progress_candidates.append(time_progress)
+        if ratio_requirement > 0:
+            progress_candidates.append(ratio_progress)
+        progress = max(progress_candidates) if progress_candidates else 1.0
         progress_percent = round(progress * 100, 1)
 
-        time_ok = seeding_time >= time_requirement
-        ratio_ok = ratio >= ratio_requirement
-        finished = time_ok and ratio_ok
+        _, _, finished = self._check_hr_completion(
+            seeding_time=seeding_time,
+            ratio=ratio,
+            time_requirement=time_requirement,
+            ratio_requirement=ratio_requirement,
+        )
 
         remaining_deadline_days = None
         is_timeout = False
