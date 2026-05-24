@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -69,7 +69,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -86,7 +86,12 @@ class TingBookSync(_PluginBase):
         return []
 
     def get_api(self) -> list[dict[str, Any]]:
-        return []
+        return [
+            {"path": "/state", "endpoint": self.api_state, "methods": ["GET"], "summary": "读取听书同步配置", "auth": "bear"},
+            {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
+            {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
+            {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
+        ]
 
     def get_service(self) -> list[dict[str, Any]]:
         if not self.get_state():
@@ -106,19 +111,40 @@ class TingBookSync(_PluginBase):
         return build_form_schema(), dict(self._config)
 
     def get_page(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "component": "VAlert",
-                "props": {
-                    "type": "info",
-                    "variant": "tonal",
-                    "text": "当前版本仅 dry-run：扫描、模拟上传、生成 STRM，不访问 115。",
-                },
-            }
-        ]
+        return build_page_schema(self)
 
     def stop_service(self) -> None:
         self._last_results = []
+
+    def api_state(self) -> dict[str, Any]:
+        return {
+            "success": True,
+            "config": normalize_config(getattr(self, "_config", {})),
+            "last_results": list(getattr(self, "_last_results", [])),
+            "dry_run_only": True,
+        }
+
+    def api_browse(self, path: str = "/", storage: str = "local", dirs_only: bool | str = False) -> dict[str, Any]:
+        try:
+            items = browse_storage_path(path=path or "/", storage=storage or "local", dirs_only=parse_bool(dirs_only))
+            return {"success": True, "storage": storage or "local", "path": path or "/", "items": items}
+        except Exception as exc:
+            return {"success": False, "storage": storage or "local", "path": path or "/", "items": [], "message": str(exc)}
+
+    def page_browse(self, path: str = "/", storage: str = "local") -> dict[str, Any]:
+        self._browse_path = path or "/"
+        self._browse_storage = storage or "local"
+        return {"success": True, "message": "ok"}
+
+    def page_select(self, field: str, path: str, storage: str = "local") -> dict[str, Any]:
+        if field not in {"watch_dir", "strm_output_dir", "target_115_dir"}:
+            return {"success": False, "message": "invalid field"}
+        config = normalize_config(getattr(self, "_config", {}))
+        config[field] = path or ""
+        self._config = config
+        if hasattr(self, "update_config"):
+            self.update_config(config)
+        return {"success": True, "message": "ok"}
 
     def scan_once(self) -> list[dict[str, str]]:
         config = normalize_config(getattr(self, "_config", {}))
@@ -173,42 +199,47 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def parse_bool(value: bool | str) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_form_schema() -> list[dict[str, Any]]:
-    directory_items = get_directory_options()
-    remote_items = get_remote_directory_options()
     return [
         {
             "component": "VForm",
             "content": [
                 {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
                 {
-                    "component": "VSelect",
+                    "component": "VTextField",
                     "props": {
                         "model": "watch_dir",
                         "label": "下载监听目录",
-                        "items": directory_items,
-                        "placeholder": "选择听书系统下载完成后的监听根目录",
                         "clearable": True,
+                        "prepend-inner-icon": "mdi-folder-search-outline",
+                        "hint": "可在插件详情页使用 MP 资源目录浏览选择；当前字段保存最终路径。",
+                        "persistent-hint": True,
                     },
                 },
                 {
-                    "component": "VSelect",
+                    "component": "VTextField",
                     "props": {
                         "model": "strm_output_dir",
                         "label": "STRM 生成目录",
-                        "items": directory_items,
-                        "placeholder": "选择 STRM 根目录，将自动按下载目录分类建文件夹",
                         "clearable": True,
+                        "prepend-inner-icon": "mdi-folder-open-outline",
+                        "hint": "STRM 将按下载监听目录下的分类子目录自动新建分类文件夹。",
+                        "persistent-hint": True,
                     },
                 },
                 {
-                    "component": "VSelect",
+                    "component": "VTextField",
                     "props": {
                         "model": "target_115_dir",
                         "label": "115 目标目录",
-                        "items": remote_items,
-                        "placeholder": "选择或保留 /Audiobooks",
                         "clearable": True,
+                        "prepend-inner-icon": "mdi-folder-upload-outline",
                     },
                 },
                 {"component": "VTextField", "props": {"model": "scan_interval", "label": "扫描间隔（秒）", "type": "number"}},
@@ -221,26 +252,127 @@ def build_form_schema() -> list[dict[str, Any]]:
     ]
 
 
-def get_directory_options() -> list[str]:
-    options: list[str] = []
+def build_page_schema(plugin: TingBookSync) -> list[dict[str, Any]]:
+    page_api_base = f"plugin/{plugin.__class__.__name__}"
+    config = normalize_config(getattr(plugin, "_config", {}))
+    storage = str(getattr(plugin, "_browse_storage", "") or "local")
+    path = str(getattr(plugin, "_browse_path", "") or "/")
+    browse_result = plugin.api_browse(path=path, storage=storage, dirs_only=False)
+    items = browse_result.get("items", [])
+    dirs = [item for item in items if item.get("type") == "dir"]
+    files = [item for item in items if item.get("type") != "dir"]
+    return [
+        {
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "text": "当前版本仅 dry-run：扫描、模拟上传、生成 STRM，不访问 115。下方目录浏览器使用 MP 资源目录能力，可从 / 展开选择真实目录。",
+            },
+        },
+        {
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mt-3"},
+            "content": [
+                {"component": "VCardTitle", "text": "资源目录浏览"},
+                {
+                    "component": "VCardText",
+                    "content": [
+                        {
+                            "component": "VAlert",
+                            "props": {
+                                "type": "success" if browse_result.get("success") else "error",
+                                "variant": "tonal",
+                                "density": "compact",
+                                "text": f"当前位置：{storage}:{path}" if browse_result.get("success") else str(browse_result.get("message") or "目录读取失败"),
+                            },
+                        },
+                        {
+                            "component": "VRow",
+                            "props": {"class": "mt-2"},
+                            "content": [
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "watch_dir", "label": "下载监听目录", "readonly": True}, "text": config["watch_dir"]}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "strm_output_dir", "label": "STRM 生成目录", "readonly": True}, "text": config["strm_output_dir"]}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "target_115_dir", "label": "115 目标目录", "readonly": True}, "text": config["target_115_dir"]}]},
+                            ],
+                        },
+                        {"component": "VBtn", "props": {"class": "mr-2 mt-2", "variant": "outlined", "prependIcon": "mdi-folder-home-outline"}, "text": "回到 /", "events": {"click": {"api": f"{page_api_base}/page_browse", "method": "GET", "params": {"storage": storage, "path": "/"}}}},
+                        {"component": "VBtn", "props": {"class": "mr-2 mt-2", "color": "primary", "variant": "tonal", "prependIcon": "mdi-download"}, "text": "选为下载监听目录", "events": {"click": {"api": f"{page_api_base}/page_select", "method": "GET", "params": {"field": "watch_dir", "storage": storage, "path": path}}}},
+                        {"component": "VBtn", "props": {"class": "mr-2 mt-2", "color": "success", "variant": "tonal", "prependIcon": "mdi-file-link-outline"}, "text": "选为 STRM 生成目录", "events": {"click": {"api": f"{page_api_base}/page_select", "method": "GET", "params": {"field": "strm_output_dir", "storage": storage, "path": path}}}},
+                        {"component": "VBtn", "props": {"class": "mt-2", "color": "warning", "variant": "tonal", "prependIcon": "mdi-folder-upload-outline"}, "text": "选为 115 目标目录", "events": {"click": {"api": f"{page_api_base}/page_select", "method": "GET", "params": {"field": "target_115_dir", "storage": storage, "path": path}}}},
+                    ],
+                },
+                {"component": "VDivider"},
+                {
+                    "component": "VList",
+                    "props": {"density": "compact", "lines": "one"},
+                    "content": [build_directory_item(item, page_api_base, storage) for item in dirs[:100]]
+                    + [{"component": "VListItem", "props": {"prependIcon": "mdi-file-outline", "subtitle": str(item.get("path") or "")}, "text": str(item.get("name") or item.get("path") or "")} for item in files[:50]],
+                },
+            ],
+        },
+    ]
+
+
+def build_directory_item(item: dict[str, Any], page_api_base: str, storage: str) -> dict[str, Any]:
+    path = str(item.get("path") or "")
+    return {
+        "component": "VListItem",
+        "props": {"prependIcon": "mdi-folder-outline", "subtitle": path},
+        "text": str(item.get("name") or path or "/"),
+        "events": {"click": {"api": f"{page_api_base}/page_browse", "method": "GET", "params": {"storage": item.get("storage") or storage, "path": path}}},
+    }
+
+
+def browse_storage_path(path: str = "/", storage: str = "local", dirs_only: bool = False) -> list[dict[str, Any]]:
     try:
-        from app.helper.directory import DirectoryHelper
-        for directory in DirectoryHelper().get_dirs():
-            for attr in ("download_path", "library_path", "target_path"):
-                value = str(getattr(directory, attr, "") or "").strip()
-                if value and value not in options:
-                    options.append(value)
+        from app import schemas
+        from app.chain.storage import StorageChain
+
+        fileitem = schemas.FileItem(storage=storage or "local", path=path or "/", type="dir")
+        raw_items = StorageChain().list_files(fileitem, recursion=False) or []
+        items = [storage_item_to_dict(item) for item in raw_items]
     except Exception:
-        pass
-    return options
+        items = browse_local_path(path=path or "/", storage=storage or "local")
+    if dirs_only:
+        items = [item for item in items if item.get("type") == "dir"]
+    return sorted(items, key=lambda item: (item.get("type") != "dir", str(item.get("name") or "").lower()))
 
 
-def get_remote_directory_options() -> list[str]:
-    options = ["/Audiobooks"]
-    for value in get_directory_options():
-        if value.startswith("/") and value not in options:
-            options.append(value)
-    return options
+def storage_item_to_dict(item: Any) -> dict[str, Any]:
+    item_type = str(getattr(item, "type", "") or "")
+    path = str(getattr(item, "path", "") or "")
+    name = str(getattr(item, "name", "") or path or "/")
+    return {
+        "storage": str(getattr(item, "storage", "") or "local"),
+        "type": item_type,
+        "name": name,
+        "path": path,
+        "isDir": item_type == "dir",
+        "size": getattr(item, "size", None),
+        "modifyTime": getattr(item, "modify_time", None),
+    }
+
+
+def browse_local_path(path: str = "/", storage: str = "local") -> list[dict[str, Any]]:
+    if path in {"", "/"}:
+        roots = [Path(anchor) for anchor in sorted({Path.cwd().anchor or "/"})]
+    else:
+        roots = [Path(path)]
+    items: list[dict[str, Any]] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        if root.is_file():
+            items.append({"storage": storage, "type": "file", "name": root.name, "path": str(root), "isDir": False, "size": root.stat().st_size})
+            continue
+        for child in root.iterdir():
+            try:
+                is_dir = child.is_dir()
+                items.append({"storage": storage, "type": "dir" if is_dir else "file", "name": child.name, "path": str(child), "isDir": is_dir, "size": None if is_dir else child.stat().st_size})
+            except OSError:
+                continue
+    return items
 
 
 def now_iso() -> str:

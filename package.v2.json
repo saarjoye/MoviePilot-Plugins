@@ -110,13 +110,14 @@
     "name": "听书同步",
     "description": "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。",
     "labels": "听书,工具",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
     "history": {
       "v0.1.1": "TingBookSync 0.1.1 author changed to wYw",
-      "v0.1.2": "TingBookSync 0.1.2 使用目录选择配置并按下载分类生成 STRM"
+      "v0.1.2": "TingBookSync 0.1.2 使用目录选择配置并按下载分类生成 STRM",
+      "v0.1.3": "TingBookSync 0.1.3 增加 MP 资源目录浏览选择"
     }
   }
 }

@@ -5,7 +5,7 @@ MoviePilot 听书同步插件 dry-run 骨架。
 当前版本只做：
 
 - 读取 `watch_dir`。
-- 从 MoviePilot 目录候选中选择下载监听目录、STRM 生成目录和 115 目标目录。
+- 在插件详情页使用 MP 资源目录浏览选择下载监听目录、STRM 生成目录和 115 目标目录。
 - 扫描下载监听目录下的 `.tingbook.ready`，兼容 `staging` 和分类子目录。
 - 校验 `metadata.json` 和分集文件。
 - 执行上传 dry-run 并写回 `uploaded`。
