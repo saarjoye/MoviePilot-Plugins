@@ -116,7 +116,7 @@
     "name": "听书同步",
     "description": "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。",
     "labels": "听书,工具",
-    "version": "0.1.19",
+    "version": "0.1.20",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
@@ -139,7 +139,8 @@
       "v0.1.16": "TingBookSync 0.1.16 修复已完成任务被重复扫描上传",
       "v0.1.17": "TingBookSync 0.1.17 增加同步状态重置并在 STRM 缺失时重新处理",
       "v0.1.18": "TingBookSync 0.1.18 增加 ADS 已存在检测和媒体库刷新",
-      "v0.1.19": "TingBookSync 0.1.19 修复播放 token 持久化并强制刷新 ADS"
+      "v0.1.19": "TingBookSync 0.1.19 修复播放 token 持久化并强制刷新 ADS",
+      "v0.1.20": "TingBookSync 0.1.20 增加整理记录和单本重新处理"
     },
     "v2": true
   }

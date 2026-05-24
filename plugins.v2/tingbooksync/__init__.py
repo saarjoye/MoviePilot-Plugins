@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -23,7 +24,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.19"
+PLUGIN_VERSION = "0.1.20"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -110,7 +111,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.19"
+    plugin_version = "0.1.20"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -137,6 +138,8 @@ class TingBookSync(_PluginBase):
             {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
             {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"], "summary": "读取运行日志", "auth": "bear"},
             {"path": "/logs/clear", "endpoint": self.api_clear_logs, "methods": ["POST"], "summary": "清空运行日志", "auth": "bear"},
+            {"path": "/records", "endpoint": self.api_records, "methods": ["GET"], "summary": "读取整理记录", "auth": "bear"},
+            {"path": "/records/reset", "endpoint": self.api_reset_record, "methods": ["POST"], "summary": "重置单本整理记录", "auth": "bear"},
             {"path": "/sync/reset", "endpoint": self.api_reset_sync, "methods": ["POST"], "summary": "重置已完成同步状态", "auth": "bear"},
             {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
@@ -206,13 +209,59 @@ class TingBookSync(_PluginBase):
         self._add_log("info", "运行日志已清空", "logs")
         return {"success": True, "message": "运行日志已清空"}
 
+    def api_records(self, q: str = "", status: str = "", limit: int | str = 200) -> dict[str, Any]:
+        config = normalize_config(getattr(self, "_config", {}))
+        watch_dir = str(config["watch_dir"]).strip()
+        if not watch_dir:
+            return {"success": False, "message": "下载监听目录为空，无法读取整理记录", "items": []}
+        try:
+            size = max(1, min(500, int(limit)))
+        except Exception:
+            size = 200
+        try:
+            strm_root = Path(str(config["strm_output_dir"])) if str(config["strm_output_dir"]).strip() else None
+            records = list_sync_records(Path(watch_dir), strm_root)
+        except Exception as exc:
+            self._add_log("error", f"读取整理记录失败：{exc}", "records")
+            return {"success": False, "message": str(exc), "items": []}
+        query = str(q or "").strip().lower()
+        status_filter = str(status or "").strip()
+        if query:
+            records = [item for item in records if query in json.dumps(item, ensure_ascii=False).lower()]
+        if status_filter:
+            records = [item for item in records if str(item.get("status") or "") == status_filter]
+        return {"success": True, "items": records[:size], "total": len(records)}
+
+    def api_reset_record(self, bookDir: str = "", book_dir: str = "") -> dict[str, Any]:
+        config = normalize_config(getattr(self, "_config", {}))
+        watch_dir = str(config["watch_dir"]).strip()
+        raw_book_dir = str(bookDir or book_dir or "").strip()
+        if not watch_dir:
+            return {"success": False, "message": "下载监听目录为空，无法重置整理记录"}
+        if not raw_book_dir:
+            return {"success": False, "message": "缺少 bookDir"}
+        target = Path(raw_book_dir)
+        watch_root = Path(watch_dir)
+        scan_root = watch_root / "staging" if (watch_root / "staging").exists() else watch_root
+        if not path_is_under(target, scan_root):
+            return {"success": False, "message": "只能处理下载监听目录下的听书记录"}
+        try:
+            strm_root = Path(str(config["strm_output_dir"])) if str(config["strm_output_dir"]).strip() else None
+            count = reset_book_sync_state(target, strm_root)
+        except Exception as exc:
+            self._add_log("error", f"单本重新处理失败：{target.name}，{exc}", "records")
+            return {"success": False, "message": str(exc)}
+        self._add_log("info", f"已重置单本整理记录：{target.name}，删除状态文件 {count} 个；下次扫描会重新上传并生成 STRM", "records")
+        return {"success": True, "message": "已重置该书整理记录，下次扫描会重新上传并生成 STRM", "count": count}
+
     def api_reset_sync(self) -> dict[str, Any]:
         config = normalize_config(getattr(self, "_config", {}))
         watch_dir = str(config["watch_dir"]).strip()
         if not watch_dir:
             return {"success": False, "message": "下载监听目录为空，无法重置同步状态"}
         try:
-            count = reset_completed_sync_state(Path(watch_dir))
+            strm_root = Path(str(config["strm_output_dir"])) if str(config["strm_output_dir"]).strip() else None
+            count = reset_completed_sync_state(Path(watch_dir), strm_root)
         except Exception as exc:
             self._add_log("error", f"重置同步状态失败：{exc}", "sync")
             return {"success": False, "message": str(exc)}
@@ -971,9 +1020,8 @@ def sync_strm_output_missing(sync: dict) -> bool:
     return not output_dir.exists() or not any(output_dir.rglob("*.strm"))
 
 
-def reset_completed_sync_state(library: Path) -> int:
-    staging = library / "staging"
-    scan_root = staging if staging.exists() else library
+def reset_completed_sync_state(library: Path, strm_output_root: Path | None = None) -> int:
+    scan_root = scan_root_for_library(library)
     if not scan_root.exists():
         raise TingBookSyncError(f"监听目录不存在: {scan_root}")
     count = 0
@@ -982,11 +1030,117 @@ def reset_completed_sync_state(library: Path) -> int:
         sync = read_sync_status(book_dir)
         if str(sync.get("status") or "") not in {"uploaded", "strm_generated", "ads_exists"}:
             continue
+        delete_strm_dir_if_safe(sync, strm_output_root)
         for path in (book_dir / SYNC_FILENAME, book_dir / EPISODE_URLS_FILENAME):
             if path.exists():
                 path.unlink()
         count += 1
     return count
+
+
+def scan_root_for_library(library: Path) -> Path:
+    staging = library / "staging"
+    return staging if staging.exists() else library
+
+
+def path_is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def delete_strm_dir_if_safe(sync: dict, strm_output_root: Path | None = None) -> bool:
+    strm_path = str(sync.get("strmPath") or "").strip()
+    if not strm_path or not strm_output_root:
+        return False
+    output_dir = Path(strm_path)
+    if not path_is_under(output_dir, strm_output_root):
+        return False
+    if output_dir.exists() and output_dir.is_dir():
+        shutil.rmtree(output_dir)
+        return True
+    return False
+
+
+def reset_book_sync_state(book_dir: Path, strm_output_root: Path | None = None) -> int:
+    if not book_dir.exists() or not book_dir.is_dir():
+        raise TingBookSyncError(f"涔︾洰褰曚笉瀛樺湪: {book_dir}")
+    if not (book_dir / READY_FILENAME).exists():
+        raise TingBookSyncError(f"涔︾洰褰曠己灏?ready 鏍囪: {book_dir}")
+    sync = read_sync_status(book_dir)
+    delete_strm_dir_if_safe(sync, strm_output_root)
+    count = 0
+    for path in (book_dir / SYNC_FILENAME, book_dir / EPISODE_URLS_FILENAME):
+        if path.exists():
+            path.unlink()
+            count += 1
+    return count
+
+
+def list_sync_records(library: Path, strm_output_root: Path | None = None) -> list[dict[str, Any]]:
+    scan_root = scan_root_for_library(library)
+    if not scan_root.exists():
+        raise TingBookSyncError(f"鐩戝惉鐩綍涓嶅瓨鍦? {scan_root}")
+    records: list[dict[str, Any]] = []
+    for ready_file in sorted(scan_root.rglob(READY_FILENAME), key=lambda item: str(item.parent).lower()):
+        book_dir = ready_file.parent
+        if book_dir.name.endswith(".tmp"):
+            continue
+        metadata: dict[str, Any] = {}
+        sync: dict[str, Any] = {}
+        metadata_error = ""
+        sync_error = ""
+        try:
+            metadata = load_metadata(book_dir)
+        except Exception as exc:
+            metadata_error = str(exc)
+        try:
+            sync = read_sync_status(book_dir)
+        except Exception as exc:
+            sync_error = str(exc)
+        episodes = metadata.get("episodes") if isinstance(metadata.get("episodes"), list) else []
+        episode_url_count = 0
+        episode_url_path = book_dir / EPISODE_URLS_FILENAME
+        if episode_url_path.exists():
+            try:
+                episode_urls = json.loads(episode_url_path.read_text(encoding="utf-8"))
+                if isinstance(episode_urls, dict):
+                    episode_url_count = len(episode_urls)
+            except Exception:
+                episode_url_count = 0
+        strm_path = str(sync.get("strmPath") or "").strip()
+        strm_count = 0
+        strm_exists = False
+        if strm_path:
+            output_dir = Path(strm_path)
+            if not strm_output_root or path_is_under(output_dir, strm_output_root):
+                strm_exists = output_dir.exists()
+                if output_dir.exists() and output_dir.is_dir():
+                    strm_count = sum(1 for _ in output_dir.rglob("*.strm"))
+        records.append(
+            {
+                "bookDir": str(book_dir),
+                "bookName": book_dir.name,
+                "taskId": str(sync.get("taskId") or metadata.get("taskId") or ""),
+                "title": str(metadata.get("title") or book_dir.name),
+                "author": str(metadata.get("author") or ""),
+                "category": str(metadata.get("category") or ""),
+                "status": str(sync.get("status") or ("failed" if metadata_error or sync_error else "pending")),
+                "stage": str(sync.get("stage") or ""),
+                "provider": str(sync.get("provider") or ""),
+                "remotePath": str(sync.get("remotePath") or ""),
+                "strmPath": strm_path,
+                "strmExists": strm_exists,
+                "episodeCount": len(episodes),
+                "uploadedCount": episode_url_count,
+                "strmCount": strm_count,
+                "message": str(sync.get("message") or metadata_error or sync_error or ""),
+                "updatedAt": str(sync.get("updatedAt") or metadata.get("createdAt") or ""),
+            }
+        )
+    return sorted(records, key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
 
 
 def ads_configured(config: dict[str, Any]) -> bool:
@@ -1027,6 +1181,10 @@ def ads_request_json(config: dict[str, Any], method: str, path: str, query: dict
     try:
         with urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8")
+    except HTTPError as exc:
+        if exc.code == 404 and path.startswith("/api/libraries/"):
+            raise TingBookSyncError(f"ADS 媒体库 API 返回 404：请确认 ADS 媒体库 ID 正确，且 API Token 有权限访问该媒体库。请求路径: {path}") from exc
+        raise TingBookSyncError(f"ADS API 请求失败: {method.upper()} {path}: HTTP Error {exc.code}: {exc.reason}") from exc
     except Exception as exc:
         raise TingBookSyncError(f"ADS API 请求失败: {method.upper()} {path}: {exc}") from exc
     if not text.strip():
