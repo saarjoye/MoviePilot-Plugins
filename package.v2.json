@@ -135,7 +135,7 @@
       "v0.1.18": "TingBookSync 0.1.18 增加 ADS 已存在检测和媒体库刷新",
       "v0.1.19": "TingBookSync 0.1.19 修复播放 token 持久化并强制刷新 ADS",
       "v0.1.20": "TingBookSync 0.1.20 增加整理记录和单本重新处理",
-      "v0.1.21": "TingBookSync 0.1.21 修复 STRM token 重签和整理模式"
+      "v0.1.21": "TingBookSync 0.1.21 增强整理操作进度日志"
     }
   }
 }

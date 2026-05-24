@@ -124,6 +124,7 @@ export default defineComponent({
     const saving = ref(false);
     const logLoading = ref(false);
     const recordLoading = ref(false);
+    const activeRecordAction = ref("");
     const recordQuery = ref("");
     const message = ref("请选择目录并保存配置。");
     const error = ref("");
@@ -254,6 +255,12 @@ export default defineComponent({
         : `确认重新生成《${title}》的 STRM？\n会优先使用本地 pickcode；没有时从 115 已有文件补齐 pickcode，不会主动重新上传。`;
       if (!window.confirm(messageText)) return;
       recordLoading.value = true;
+      activeRecordAction.value = mode;
+      const refreshTimer = window.setInterval(() => {
+        fetchRecords();
+        fetchLogs();
+      }, 2000);
+      message.value = mode === "reupload" ? "正在重新上传并生成 STRM，请等待..." : "正在重新生成 STRM，请等待...";
       try {
         const payload = await request(`plugin/TingBookSync/records/reset${buildQuery({ bookDir: item.bookDir, mode })}`, { method: "POST" });
         message.value = payload?.message || "整理记录处理完成";
@@ -262,6 +269,8 @@ export default defineComponent({
       } catch (err) {
         error.value = err?.message || "重置整理记录失败";
       } finally {
+        window.clearInterval(refreshTimer);
+        activeRecordAction.value = "";
         recordLoading.value = false;
       }
     }
@@ -390,8 +399,8 @@ export default defineComponent({
         h("div", { class: "d-flex align-center justify-space-between ga-2 flex-wrap mt-3" }, [
           h("span", { class: "text-caption text-medium-emphasis" }, item.updatedAt ? `更新时间：${compactTime(item.updatedAt)}` : ""),
           h("div", { class: "d-flex ga-2 flex-wrap" }, [
-            h(c("VBtn"), { color: "primary", variant: "tonal", size: "small", prependIcon: "mdi-link-variant-plus", loading: recordLoading.value, onClick: () => resetRecord(item, "strm") }, () => "重新生成 STRM"),
-            h(c("VBtn"), { color: "warning", variant: "tonal", size: "small", prependIcon: "mdi-cloud-upload-outline", loading: recordLoading.value, onClick: () => resetRecord(item, "reupload") }, () => "重新上传并生成"),
+            h(c("VBtn"), { color: "primary", variant: "tonal", size: "small", prependIcon: "mdi-link-variant-plus", loading: recordLoading.value && activeRecordAction.value === "strm", disabled: recordLoading.value, onClick: () => resetRecord(item, "strm") }, () => recordLoading.value && activeRecordAction.value === "strm" ? "正在生成 STRM" : "重新生成 STRM"),
+            h(c("VBtn"), { color: "warning", variant: "tonal", size: "small", prependIcon: "mdi-cloud-upload-outline", loading: recordLoading.value && activeRecordAction.value === "reupload", disabled: recordLoading.value, onClick: () => resetRecord(item, "reupload") }, () => recordLoading.value && activeRecordAction.value === "reupload" ? "正在重新上传" : "重新上传并生成"),
           ]),
         ]),
       ]));

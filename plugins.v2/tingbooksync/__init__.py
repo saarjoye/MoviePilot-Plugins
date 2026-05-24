@@ -252,15 +252,20 @@ class TingBookSync(_PluginBase):
         try:
             if action == "reupload":
                 strm_root = Path(strm_output_dir)
+                self._add_log("info", f"开始重新上传并生成 STRM：{target.name}", "records")
                 reset_book_sync_state(target, strm_root)
+                self._add_log("info", f"重新上传前状态已清理：{target.name}", "records")
                 upload_result = upload_book_to_u115(target, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+                self._add_log("info", f"重新上传完成，开始生成 STRM：{target.name} -> {upload_result.remote_path}", "records")
                 episode_url_map = read_episode_url_map(target, str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                 strm_result = generate_strm_files(target, strm_root, str(config["target_115_dir"]), overwrite=True, download_root=Path(watch_dir), episode_url_map=episode_url_map, require_episode_urls=True)
                 self._add_log("info", f"已重新上传并生成 STRM：{target.name} created={strm_result.created}, skipped={strm_result.skipped}", "records")
                 return {"success": True, "message": "已重新上传到 115 并生成 STRM", "status": "strm_generated", "remotePath": upload_result.remote_path, "strmPath": str(strm_result.output_dir)}
             if action != "strm":
                 return {"success": False, "message": "不支持的整理模式"}
+            self._add_log("info", f"开始使用现有 115 文件重新生成 STRM：{target.name}", "records")
             episode_url_map = ensure_episode_url_map_from_u115(target, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+            self._add_log("info", f"pickcode 已就绪，开始写入 STRM：{target.name}", "records")
             strm_result = generate_strm_files(target, Path(strm_output_dir), str(config["target_115_dir"]), overwrite=True, download_root=Path(watch_dir), episode_url_map=episode_url_map, require_episode_urls=True)
         except Exception as exc:
             self._add_log("error", f"单本重新处理失败：{target.name}，{exc}", "records")
@@ -572,6 +577,7 @@ def ensure_episode_url_map_from_u115(book_dir: Path, remote_root: str, public_ba
     existing = read_episode_pickcodes(book_dir)
     missing = [str(item["filename"]) for item in metadata["episodes"] if not existing.get(str(item["filename"]))]
     if missing:
+        write_json(book_dir / SYNC_FILENAME, sync_payload(str(metadata["taskId"]), "resolving_pickcode", "resolving_pickcode", f"从 115 已有文件补齐 pickcode: {len(missing)} 个", "115", normalize_remote_root(remote_root)))
         found = find_existing_u115_pickcodes(book_dir, remote_root, missing)
         existing.update(found)
     still_missing = [str(item["filename"]) for item in metadata["episodes"] if not existing.get(str(item["filename"]))]
