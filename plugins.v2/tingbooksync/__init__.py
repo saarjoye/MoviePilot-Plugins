@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.18"
+PLUGIN_VERSION = "0.1.19"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -110,7 +110,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.18"
+    plugin_version = "0.1.19"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -118,6 +118,8 @@ class TingBookSync(_PluginBase):
 
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         self._config = normalize_config(config or {})
+        if not (config or {}).get("play_token_secret"):
+            self._persist_config()
         self._last_results: list[dict[str, str]] = []
         self._logs: list[dict[str, str]] = []
         self._add_log("info", "插件已初始化", "init")
@@ -171,6 +173,13 @@ class TingBookSync(_PluginBase):
 
     def stop_service(self) -> None:
         self._last_results = []
+
+    def _persist_config(self) -> None:
+        if hasattr(self, "update_config"):
+            try:
+                self.update_config(dict(self._config))
+            except Exception:
+                pass
 
     def api_state(self) -> dict[str, Any]:
         return {
@@ -303,6 +312,11 @@ class TingBookSync(_PluginBase):
                     self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
                 elif result.status == "strm_generated":
                     self._add_log("info", f"已完成，跳过上传：{result.book_dir.name}", "scan")
+                    if sync_ads_refresh_needed(result.book_dir, config):
+                        refresh_message = ads_refresh_library(config)
+                        mark_ads_refreshed(result.book_dir, config, refresh_message)
+                        item["message"] = f"{item['message']}; {refresh_message}"
+                        self._add_log("info", f"{refresh_message}：{result.book_dir.name}", "ads")
                 if item["status"] == "uploaded" and strm_output_dir:
                     episode_url_map = read_episode_url_map(result.book_dir)
                     strm_result = generate_strm_files(
@@ -320,6 +334,7 @@ class TingBookSync(_PluginBase):
                     self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
                     if ads_configured(config):
                         refresh_message = ads_refresh_library(config)
+                        mark_ads_refreshed(result.book_dir, config, refresh_message)
                         self._add_log("info", refresh_message, "ads")
             except Exception as exc:
                 item["status"] = "failed"
@@ -1105,8 +1120,25 @@ def ads_find_existing_book(book_dir: Path, config: dict[str, Any]) -> dict[str, 
 def ads_refresh_library(config: dict[str, Any]) -> str:
     require_ads_config(config)
     library_id = quote(str(config.get("ads_library_id") or "").strip(), safe="")
-    ads_request_json(config, "POST", f"/api/libraries/{library_id}/scan")
+    ads_request_json(config, "POST", f"/api/libraries/{library_id}/scan", {"force": "1"})
     return "ADS 媒体库刷新已触发"
+
+
+def sync_ads_refresh_needed(book_dir: Path, config: dict[str, Any]) -> bool:
+    if not ads_configured(config):
+        return False
+    sync = read_sync_status(book_dir)
+    if str(sync.get("status") or "") != "strm_generated":
+        return False
+    return str(sync.get("adsLibraryId") or "") != str(config.get("ads_library_id") or "").strip() or not str(sync.get("adsRefreshedAt") or "").strip()
+
+
+def mark_ads_refreshed(book_dir: Path, config: dict[str, Any], message: str) -> None:
+    sync = read_sync_status(book_dir)
+    sync["adsLibraryId"] = str(config.get("ads_library_id") or "").strip()
+    sync["adsRefreshedAt"] = now_iso()
+    sync["adsMessage"] = str(message or "")[:500]
+    write_json(book_dir / SYNC_FILENAME, sync)
 
 
 def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:
