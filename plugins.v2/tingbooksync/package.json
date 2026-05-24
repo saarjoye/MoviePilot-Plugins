@@ -1,7 +1,7 @@
 {
   "id": "tingbooksync",
   "name": "听书同步",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。",
   "author": "wYw",
   "level": 1,
