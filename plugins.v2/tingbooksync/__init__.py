@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.17"
+PLUGIN_VERSION = "0.1.18"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -99,6 +99,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_adopt_loose_audio": True,
     "scrape_metadata": False,
     "public_base_url": "",
+    "ads_enabled": False,
+    "ads_base_url": "",
+    "ads_token": "",
+    "ads_library_id": "",
 }
 
 
@@ -106,7 +110,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.17"
+    plugin_version = "0.1.18"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -277,6 +281,20 @@ class TingBookSync(_PluginBase):
             }
             try:
                 if result.status == "scanning":
+                    if config.get("ads_enabled"):
+                        require_ads_config(config)
+                    if ads_configured(config):
+                        self._add_log("info", f"ADS 去重检查：{result.book_dir.name}", "ads")
+                        existing = ads_find_existing_book(result.book_dir, config)
+                        if existing:
+                            title = existing.get("title") or result.book_dir.name
+                            message = f"ADS 已存在同名资源，跳过 115 上传和 STRM 生成: {title}"
+                            item["status"] = "ads_exists"
+                            item["message"] = message
+                            write_json(result.book_dir / SYNC_FILENAME, sync_payload(result.task_id, "ads_exists", "ads_exists", message, "ads"))
+                            self._add_log("info", message, "ads")
+                            payload.append(item)
+                            continue
                     self._add_log("info", f"准备上传到 115：{result.book_dir.name} -> {config['target_115_dir']}", "upload")
                     upload_result = upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                     item["status"] = upload_result.status
@@ -300,6 +318,9 @@ class TingBookSync(_PluginBase):
                     item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
                     item["strmPath"] = str(strm_result.output_dir)
                     self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
+                    if ads_configured(config):
+                        refresh_message = ads_refresh_library(config)
+                        self._add_log("info", refresh_message, "ads")
             except Exception as exc:
                 item["status"] = "failed"
                 item["message"] = str(exc)
@@ -333,6 +354,10 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["auto_adopt_loose_audio"] = bool(normalized.get("auto_adopt_loose_audio", True))
     normalized["scrape_metadata"] = bool(normalized.get("scrape_metadata", False))
     normalized["public_base_url"] = str(normalized.get("public_base_url") or "").strip().rstrip("/")
+    normalized["ads_enabled"] = bool(normalized.get("ads_enabled", False))
+    normalized["ads_base_url"] = str(normalized.get("ads_base_url") or "").strip().rstrip("/")
+    normalized["ads_token"] = str(normalized.get("ads_token") or "").strip()
+    normalized["ads_library_id"] = str(normalized.get("ads_library_id") or "").strip()
     normalized["play_token_secret"] = str(normalized.get("play_token_secret") or "").strip() or make_secret()
     normalized["scan_interval"] = max(60, int(normalized.get("scan_interval") or 300))
     normalized["min_file_count"] = max(1, int(normalized.get("min_file_count") or 1))
@@ -439,6 +464,10 @@ def build_form_schema() -> list[dict[str, Any]]:
                 {"component": "VSwitch", "props": {"model": "auto_adopt_loose_audio", "label": "自动接管散音频"}},
                 {"component": "VSwitch", "props": {"model": "scrape_metadata", "label": "联网刮削补全书籍信息"}},
                 {"component": "VTextField", "props": {"model": "public_base_url", "label": "MP 外部访问地址", "clearable": True, "hint": "用于写入 302 STRM，例如 http://192.168.1.10:3000；留空则写相对地址。", "persistent-hint": True}},
+                {"component": "VSwitch", "props": {"model": "ads_enabled", "label": "启用 ADS 去重与刷新"}},
+                {"component": "VTextField", "props": {"model": "ads_base_url", "label": "ADS 地址", "clearable": True, "hint": "例如 http://192.168.1.10:13378，不要填写路径后缀。", "persistent-hint": True}},
+                {"component": "VTextField", "props": {"model": "ads_token", "label": "ADS API Token", "type": "password", "clearable": True}},
+                {"component": "VTextField", "props": {"model": "ads_library_id", "label": "ADS 媒体库 ID", "clearable": True}},
             ],
         }
     ]
@@ -892,7 +921,7 @@ def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult
             if existing_status == "strm_generated" and sync_strm_output_missing(existing_sync):
                 status = "scanning"
                 message = "strm output missing, reprocess"
-            elif existing_status in {"uploaded", "strm_generated"}:
+            elif existing_status in {"uploaded", "strm_generated", "ads_exists"}:
                 status = existing_status
                 message = str(existing_sync.get("message") or f"already {existing_status}")
             else:
@@ -936,13 +965,148 @@ def reset_completed_sync_state(library: Path) -> int:
     for ready_file in sorted(scan_root.rglob(READY_FILENAME), key=lambda item: str(item.parent).lower()):
         book_dir = ready_file.parent
         sync = read_sync_status(book_dir)
-        if str(sync.get("status") or "") not in {"uploaded", "strm_generated"}:
+        if str(sync.get("status") or "") not in {"uploaded", "strm_generated", "ads_exists"}:
             continue
         for path in (book_dir / SYNC_FILENAME, book_dir / EPISODE_URLS_FILENAME):
             if path.exists():
                 path.unlink()
         count += 1
     return count
+
+
+def ads_configured(config: dict[str, Any]) -> bool:
+    return bool(config.get("ads_enabled")) and bool(str(config.get("ads_base_url") or "").strip()) and bool(str(config.get("ads_token") or "").strip()) and bool(str(config.get("ads_library_id") or "").strip())
+
+
+def require_ads_config(config: dict[str, Any]) -> None:
+    if not bool(config.get("ads_enabled")):
+        return
+    missing = []
+    if not str(config.get("ads_base_url") or "").strip():
+        missing.append("ADS 地址")
+    if not str(config.get("ads_token") or "").strip():
+        missing.append("ADS API Token")
+    if not str(config.get("ads_library_id") or "").strip():
+        missing.append("ADS 媒体库 ID")
+    if missing:
+        raise TingBookSyncError("ADS 已启用但配置不完整: " + ", ".join(missing))
+
+
+def ads_request_json(config: dict[str, Any], method: str, path: str, query: dict[str, str] | None = None, timeout: int = 15) -> Any:
+    require_ads_config(config)
+    base_url = str(config.get("ads_base_url") or "").strip().rstrip("/")
+    token = str(config.get("ads_token") or "").strip()
+    url = f"{base_url}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    data = b"" if method.upper() != "GET" else None
+    request = Request(
+        url,
+        data=data,
+        method=method.upper(),
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            text = response.read().decode("utf-8")
+    except Exception as exc:
+        raise TingBookSyncError(f"ADS API 请求失败: {method.upper()} {path}: {exc}") from exc
+    if not text.strip():
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TingBookSyncError(f"ADS API 响应不是 JSON: {exc.msg}") from exc
+
+
+def normalize_match_text(value: Any) -> str:
+    text = str(value or "").lower()
+    return "".join(re.findall(r"[a-z0-9\u4e00-\u9fff]+", text))
+
+
+def extract_ads_title_author(item: Any) -> tuple[str, str]:
+    if not isinstance(item, dict):
+        return "", ""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    media = item.get("media") if isinstance(item.get("media"), dict) else {}
+    media_metadata = media.get("metadata") if isinstance(media.get("metadata"), dict) else {}
+    title = str(item.get("title") or item.get("name") or metadata.get("title") or metadata.get("titleIgnorePrefix") or media_metadata.get("title") or media_metadata.get("titleIgnorePrefix") or "")
+    author_value = item.get("author") or item.get("authorName") or metadata.get("authorName") or metadata.get("author") or media_metadata.get("authorName") or media_metadata.get("author") or metadata.get("authors") or media_metadata.get("authors") or ""
+    if isinstance(author_value, list):
+        author = " ".join(str(author.get("name") if isinstance(author, dict) else author) for author in author_value)
+    else:
+        author = str(author_value or "")
+    return title, author
+
+
+def iter_ads_candidates(value: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+            return
+        if not isinstance(node, dict):
+            return
+        title, _ = extract_ads_title_author(node)
+        if title:
+            candidates.append(node)
+        for child in node.values():
+            if isinstance(child, (dict, list)):
+                visit(child)
+
+    visit(value)
+    deduped: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in candidates:
+        marker = id(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(item)
+    return deduped
+
+
+def ads_item_matches(metadata: dict[str, Any], item: dict[str, Any]) -> bool:
+    expected_title = normalize_match_text(metadata.get("title") or "")
+    expected_author = normalize_match_text(metadata.get("author") or "")
+    title, author = extract_ads_title_author(item)
+    candidate_title = normalize_match_text(title)
+    candidate_author = normalize_match_text(author)
+    if not expected_title or not candidate_title:
+        return False
+    title_matches = expected_title == candidate_title or (len(expected_title) >= 4 and expected_title in candidate_title) or (len(candidate_title) >= 4 and candidate_title in expected_title)
+    if not title_matches:
+        return False
+    if expected_author and candidate_author:
+        return expected_author == candidate_author or expected_author in candidate_author or candidate_author in expected_author
+    return True
+
+
+def ads_find_existing_book(book_dir: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+    require_ads_config(config)
+    metadata = load_metadata(book_dir)
+    title = str(metadata.get("title") or book_dir.name).strip()
+    if not title:
+        return None
+    library_id = quote(str(config.get("ads_library_id") or "").strip(), safe="")
+    payload = ads_request_json(config, "GET", f"/api/libraries/{library_id}/search", {"q": title})
+    for item in iter_ads_candidates(payload):
+        if ads_item_matches(metadata, item):
+            matched_title, matched_author = extract_ads_title_author(item)
+            return {"id": str(item.get("id") or item.get("libraryItemId") or ""), "title": matched_title, "author": matched_author}
+    return None
+
+
+def ads_refresh_library(config: dict[str, Any]) -> str:
+    require_ads_config(config)
+    library_id = quote(str(config.get("ads_library_id") or "").strip(), safe="")
+    ads_request_json(config, "POST", f"/api/libraries/{library_id}/scan")
+    return "ADS 媒体库刷新已触发"
 
 
 def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:
