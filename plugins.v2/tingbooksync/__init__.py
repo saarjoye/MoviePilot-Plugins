@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.13"
+PLUGIN_VERSION = "0.1.14"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -106,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.13"
+    plugin_version = "0.1.14"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -263,6 +263,7 @@ class TingBookSync(_PluginBase):
             }
             try:
                 if result.status == "scanning":
+                    self._add_log("info", f"准备上传到 115：{result.book_dir.name} -> {config['target_115_dir']}", "upload")
                     upload_result = upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                     item["status"] = upload_result.status
                     item["message"] = upload_result.message
@@ -288,8 +289,8 @@ class TingBookSync(_PluginBase):
                 item["message"] = str(exc)
                 write_json(result.book_dir / SYNC_FILENAME, sync_payload(result.task_id, "failed", "failed", str(exc), "115", str(item.get("remotePath", ""))))
                 self._add_log("error", f"处理失败：{result.book_dir.name}，{exc}", "scan")
-            if item["status"] == "failed":
-                self._add_log("error", f"扫描失败：{result.book_dir.name}，{result.message}", "scan")
+            if result.status == "failed":
+                self._add_log("error", f"扫描校验失败：{result.book_dir.name}，{result.message}", "scan")
             payload.append(item)
         self._last_results = payload
         self._add_log("info", f"扫描完成：共 {len(payload)} 个结果", "scan")
@@ -914,9 +915,16 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
     episode_urls: dict[str, str] = {}
     for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
         filename = str(episode["filename"])
-        uploaded = storage_chain.upload_file(target_dir, book_dir / filename, new_name=Path(filename).name)
+        local_file = book_dir / filename
+        if not local_file.exists():
+            raise TingBookSyncError(f"115 上传前本地文件不存在: {filename}")
+        write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", f"115 上传中: {filename}", "115", remote_path))
+        try:
+            uploaded = storage_chain.upload_file(target_dir, local_file, new_name=Path(filename).name)
+        except Exception as exc:
+            raise TingBookSyncError(f"115 上传异常: {filename}: {exc}") from exc
         if not uploaded:
-            raise TingBookSyncError(f"115 上传失败: {filename}")
+            raise TingBookSyncError(f"115 上传失败，MoviePilot 未返回文件项: {filename}")
         pickcode = str(getattr(uploaded, "pickcode", "") or "")
         if not pickcode:
             detail = storage_chain.get_file_item("u115", Path(str(getattr(uploaded, "path", "") or Path(str(getattr(target_dir, "path", remote_path))) / Path(filename).name)))
