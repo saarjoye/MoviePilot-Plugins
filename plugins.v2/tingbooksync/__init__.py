@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.21"
+PLUGIN_VERSION = "0.1.22"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -111,7 +111,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.21"
+    plugin_version = "0.1.22"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -264,8 +264,11 @@ class TingBookSync(_PluginBase):
             if action != "strm":
                 return {"success": False, "message": "不支持的整理模式"}
             self._add_log("info", f"开始使用现有 115 文件重新生成 STRM：{target.name}", "records")
+            metadata = load_metadata(target)
+            write_json(target / SYNC_FILENAME, sync_payload(str(metadata["taskId"]), "resolving_pickcode", "resolving_pickcode", "重新生成 STRM：正在从本地记录或 115 已有文件获取 pickcode", "115", normalize_remote_root(str(config["target_115_dir"]))))
             episode_url_map = ensure_episode_url_map_from_u115(target, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
             self._add_log("info", f"pickcode 已就绪，开始写入 STRM：{target.name}", "records")
+            write_json(target / SYNC_FILENAME, sync_payload(str(metadata["taskId"]), "strm_generating", "strm_generating", "pickcode 已就绪，正在写入 STRM", "115", normalize_remote_root(str(config["target_115_dir"]))))
             strm_result = generate_strm_files(target, Path(strm_output_dir), str(config["target_115_dir"]), overwrite=True, download_root=Path(watch_dir), episode_url_map=episode_url_map, require_episode_urls=True)
         except Exception as exc:
             self._add_log("error", f"单本重新处理失败：{target.name}，{exc}", "records")
@@ -548,6 +551,49 @@ def read_episode_pickcodes(book_dir: Path) -> dict[str, str]:
     return result
 
 
+def normalize_episode_match_name(value: str) -> str:
+    stem = Path(str(value or "").strip()).stem.lower()
+    stem = re.sub(r"^\s*\d{1,6}\s*[-_.、集章回话节]*\s*", "", stem)
+    stem = re.sub(r"[\s\-_.,，。:：;；()（）\[\]【】《》<>]+", "", stem)
+    return stem
+
+
+def episode_filename_matches(expected: str, actual: str) -> bool:
+    expected_path = Path(expected).name
+    actual_path = Path(actual).name
+    if expected_path == actual_path:
+        return True
+    if expected_path.lower() == actual_path.lower():
+        return True
+    expected_key = normalize_episode_match_name(expected_path)
+    actual_key = normalize_episode_match_name(actual_path)
+    return bool(expected_key and actual_key and (expected_key == actual_key or expected_key in actual_key or actual_key in expected_key))
+
+
+def file_item_pickcode(item: Any) -> str:
+    if not item:
+        return ""
+    if isinstance(item, dict):
+        return str(item.get("pickcode") or item.get("pick_code") or "").strip()
+    return str(getattr(item, "pickcode", "") or getattr(item, "pick_code", "") or "").strip()
+
+
+def file_item_name(item: Any) -> str:
+    if not item:
+        return ""
+    if isinstance(item, dict):
+        return str(item.get("name") or item.get("file_name") or item.get("n") or "").strip()
+    return str(getattr(item, "name", "") or getattr(item, "file_name", "") or "").strip()
+
+
+def file_item_path(item: Any) -> str:
+    if not item:
+        return ""
+    if isinstance(item, dict):
+        return str(item.get("path") or item.get("file_path") or "").strip()
+    return str(getattr(item, "path", "") or getattr(item, "file_path", "") or "").strip()
+
+
 def pickcode_from_play_url(url: str) -> str:
     text = str(url or "").strip()
     if "/play/" not in text:
@@ -589,22 +635,46 @@ def ensure_episode_url_map_from_u115(book_dir: Path, remote_root: str, public_ba
 def find_existing_u115_pickcodes(book_dir: Path, remote_root: str, filenames: list[str]) -> dict[str, str]:
     try:
         from app.modules.filemanager.storages.u115 import U115Pan
+        from app.chain.storage import StorageChain
     except Exception as exc:
         raise TingBookSyncError(f"无法导入 MoviePilot u115 存储模块：{exc}") from exc
     u115 = U115Pan()
+    storage_chain = StorageChain()
     base_remote_root = normalize_remote_root(remote_root)
     candidates = [join_remote_root(base_remote_root, book_dir.name), base_remote_root]
     result: dict[str, str] = {}
+    pending = set(filenames)
     for filename in filenames:
         for directory in candidates:
             try:
                 item = u115.get_item(Path(join_remote_root(directory, Path(filename).name)))
             except Exception:
                 item = None
-            pickcode = str(getattr(item, "pickcode", "") or "") if item else ""
+            pickcode = file_item_pickcode(item)
             if pickcode:
                 result[filename] = pickcode
+                pending.discard(filename)
                 break
+    if not pending:
+        return result
+    for directory in candidates:
+        try:
+            folder = u115.get_folder(Path(directory))
+            raw_items = storage_chain.list_files(folder, recursion=False) if folder else []
+        except Exception:
+            raw_items = []
+        for item in raw_items or []:
+            pickcode = file_item_pickcode(item)
+            if not pickcode:
+                continue
+            name = file_item_name(item) or Path(file_item_path(item)).name
+            for filename in list(pending):
+                if episode_filename_matches(filename, name):
+                    result[filename] = pickcode
+                    pending.discard(filename)
+                    break
+        if not pending:
+            break
     return result
 
 
@@ -1109,7 +1179,7 @@ def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult
             if existing_status == "strm_generated" and sync_strm_output_missing(existing_sync):
                 status = "scanning"
                 message = "strm output missing, reprocess"
-            elif existing_status in {"uploaded", "strm_generated", "ads_exists"}:
+            elif existing_status in {"uploaded", "strm_generated", "ads_exists", "uploading", "resolving_pickcode", "strm_generating"}:
                 status = existing_status
                 message = str(existing_sync.get("message") or f"already {existing_status}")
             else:
