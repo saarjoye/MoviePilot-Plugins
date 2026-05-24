@@ -11,7 +11,7 @@ import re
 import shutil
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import uuid
@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.22"
+PLUGIN_VERSION = "0.1.24"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -111,7 +111,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.22"
+    plugin_version = "0.1.24"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -141,7 +141,8 @@ class TingBookSync(_PluginBase):
             {"path": "/records", "endpoint": self.api_records, "methods": ["GET"], "summary": "读取整理记录", "auth": "bear"},
             {"path": "/records/reset", "endpoint": self.api_reset_record, "methods": ["POST"], "summary": "重置单本整理记录", "auth": "bear"},
             {"path": "/sync/reset", "endpoint": self.api_reset_sync, "methods": ["POST"], "summary": "重置已完成同步状态", "auth": "bear"},
-            {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
+            {"path": "/play", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
+            {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "兼容旧 STRM token 302 跳转", "allow_anonymous": True},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
         ]
@@ -290,10 +291,19 @@ class TingBookSync(_PluginBase):
         self._add_log("info", f"已重置完成态同步任务：{count} 个", "sync")
         return {"success": True, "message": f"已重置 {count} 个完成态任务，下次扫描会重新上传和生成 STRM。", "count": count}
 
-    def api_play(self, token: str):
+    def api_play(self, token: str = "", pickcode: str = ""):
         try:
-            payload = verify_play_token(token, str(self._config.get("play_token_secret") or ""))
-            location = resolve_u115_download_url(str(payload["pickcode"]))
+            resolved_pickcode = str(pickcode or "").strip()
+            if not resolved_pickcode:
+                try:
+                    payload = verify_play_token(token, str(self._config.get("play_token_secret") or ""))
+                except Exception as exc:
+                    payload = parse_unsigned_play_token(token)
+                    if not payload.get("pickcode"):
+                        raise exc
+                    self._add_log("warning", "播放 token 使用旧签名，已按 pickcode 兼容跳转；建议重新生成 STRM", "play")
+                resolved_pickcode = str(payload["pickcode"])
+            location = resolve_u115_download_url(resolved_pickcode)
             try:
                 from starlette.responses import RedirectResponse
 
@@ -490,8 +500,19 @@ def verify_play_token(token: str, secret: str) -> dict[str, Any]:
     return payload
 
 
-def public_play_url(base_url: str, token: str) -> str:
-    path = f"/api/v1/plugin/TingBookSync/play/{quote(token, safe='')}"
+def parse_unsigned_play_token(token: str) -> dict[str, Any]:
+    try:
+        body = str(token or "").split(".", 1)[0]
+        payload = json.loads(b64url_decode(body).decode("utf-8"))
+    except Exception:
+        return {}
+    if not payload.get("pickcode"):
+        return {}
+    return {"pickcode": str(payload["pickcode"])}
+
+
+def public_play_url(base_url: str, pickcode: str) -> str:
+    path = f"/api/v1/plugin/TingBookSync/play?pickcode={quote(str(pickcode), safe='')}"
     return f"{base_url}{path}" if base_url else path
 
 
@@ -512,14 +533,15 @@ def read_episode_url_map(book_dir: Path, public_base_url: str = "", secret: str 
         if isinstance(value, dict):
             pickcode = str(value.get("pickcode") or "").strip()
             url = str(value.get("url") or "").strip()
-            if pickcode and secret:
-                result[str(filename)] = public_play_url(public_base_url, make_play_token(pickcode, secret))
+            if pickcode:
+                result[str(filename)] = public_play_url(public_base_url, pickcode)
             elif url:
-                result[str(filename)] = url
+                old_pickcode = pickcode_from_play_url(url)
+                result[str(filename)] = public_play_url(public_base_url, old_pickcode) if old_pickcode else url
             continue
         pickcode = pickcode_from_play_url(text)
-        if pickcode and secret:
-            result[str(filename)] = public_play_url(public_base_url, make_play_token(pickcode, secret))
+        if pickcode:
+            result[str(filename)] = public_play_url(public_base_url, pickcode)
             data[filename] = {"pickcode": pickcode, "url": result[str(filename)]}
             changed = True
         else:
@@ -596,6 +618,13 @@ def file_item_path(item: Any) -> str:
 
 def pickcode_from_play_url(url: str) -> str:
     text = str(url or "").strip()
+    try:
+        parsed = urlsplit(text)
+        direct_pickcode = (parse_qs(parsed.query).get("pickcode") or [""])[0]
+        if direct_pickcode:
+            return str(direct_pickcode).strip()
+    except Exception:
+        pass
     if "/play/" not in text:
         return ""
     token = text.rsplit("/play/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
@@ -611,7 +640,7 @@ def write_episode_pickcodes(book_dir: Path, pickcodes: dict[str, str], public_ba
     payload: dict[str, dict[str, str]] = {}
     urls: dict[str, str] = {}
     for filename, pickcode in pickcodes.items():
-        token_url = public_play_url(public_base_url, make_play_token(str(pickcode), secret))
+        token_url = public_play_url(public_base_url, str(pickcode))
         payload[str(filename)] = {"pickcode": str(pickcode), "url": token_url}
         urls[str(filename)] = token_url
     write_json(book_dir / EPISODE_URLS_FILENAME, payload)

@@ -11,7 +11,7 @@ MoviePilot 听书同步插件。
 - 扫描下载监听目录下的 `.tingbook.ready`，兼容 `staging` 和分类子目录。
 - 校验 `metadata.json` 和分集文件。
 - 调用 MoviePilot `StorageChain().upload_file()` 真实上传到 `u115`，每个分集都拿到 `pickcode` 并写入播放地址后才生成 STRM。
-- STRM 写入本插件 `/api/v1/plugin/TingBookSync/play/{token}` 播放地址，播放时换取 115 临时下载 URL 并返回 302。
+- STRM 写入本插件 `/api/v1/plugin/TingBookSync/play?pickcode=...` 播放地址，播放时换取 115 临时下载 URL 并返回 302；旧版 `/play/{token}` 仍保留兼容。
 - 写回 `.tingbook.sync.json`。
 - 可选生成 STRM 文件，并按下载监听目录下的分类子目录自动新建 STRM 分类文件夹。
 
