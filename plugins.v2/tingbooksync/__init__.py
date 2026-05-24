@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.16"
+PLUGIN_VERSION = "0.1.17"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -106,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.16"
+    plugin_version = "0.1.17"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -131,6 +131,7 @@ class TingBookSync(_PluginBase):
             {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
             {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"], "summary": "读取运行日志", "auth": "bear"},
             {"path": "/logs/clear", "endpoint": self.api_clear_logs, "methods": ["POST"], "summary": "清空运行日志", "auth": "bear"},
+            {"path": "/sync/reset", "endpoint": self.api_reset_sync, "methods": ["POST"], "summary": "重置已完成同步状态", "auth": "bear"},
             {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
@@ -191,6 +192,19 @@ class TingBookSync(_PluginBase):
         self._logs = []
         self._add_log("info", "运行日志已清空", "logs")
         return {"success": True, "message": "运行日志已清空"}
+
+    def api_reset_sync(self) -> dict[str, Any]:
+        config = normalize_config(getattr(self, "_config", {}))
+        watch_dir = str(config["watch_dir"]).strip()
+        if not watch_dir:
+            return {"success": False, "message": "下载监听目录为空，无法重置同步状态"}
+        try:
+            count = reset_completed_sync_state(Path(watch_dir))
+        except Exception as exc:
+            self._add_log("error", f"重置同步状态失败：{exc}", "sync")
+            return {"success": False, "message": str(exc)}
+        self._add_log("info", f"已重置完成态同步任务：{count} 个", "sync")
+        return {"success": True, "message": f"已重置 {count} 个完成态任务，下次扫描会重新上传和生成 STRM。", "count": count}
 
     def api_play(self, token: str):
         try:
@@ -875,7 +889,10 @@ def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult
             validate_metadata(metadata, book_dir)
             existing_sync = read_sync_status(book_dir)
             existing_status = str(existing_sync.get("status") or "")
-            if existing_status in {"uploaded", "strm_generated"}:
+            if existing_status == "strm_generated" and sync_strm_output_missing(existing_sync):
+                status = "scanning"
+                message = "strm output missing, reprocess"
+            elif existing_status in {"uploaded", "strm_generated"}:
                 status = existing_status
                 message = str(existing_sync.get("message") or f"already {existing_status}")
             else:
@@ -900,6 +917,32 @@ def read_sync_status(book_dir: Path) -> dict:
         return json.loads(sync_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise TingBookSyncError(f".tingbook.sync.json 解析失败: {exc.msg}") from exc
+
+
+def sync_strm_output_missing(sync: dict) -> bool:
+    strm_path = str(sync.get("strmPath") or "").strip()
+    if not strm_path:
+        return False
+    output_dir = Path(strm_path)
+    return not output_dir.exists() or not any(output_dir.rglob("*.strm"))
+
+
+def reset_completed_sync_state(library: Path) -> int:
+    staging = library / "staging"
+    scan_root = staging if staging.exists() else library
+    if not scan_root.exists():
+        raise TingBookSyncError(f"监听目录不存在: {scan_root}")
+    count = 0
+    for ready_file in sorted(scan_root.rglob(READY_FILENAME), key=lambda item: str(item.parent).lower()):
+        book_dir = ready_file.parent
+        sync = read_sync_status(book_dir)
+        if str(sync.get("status") or "") not in {"uploaded", "strm_generated"}:
+            continue
+        for path in (book_dir / SYNC_FILENAME, book_dir / EPISODE_URLS_FILENAME):
+            if path.exists():
+                path.unlink()
+        count += 1
+    return count
 
 
 def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:
