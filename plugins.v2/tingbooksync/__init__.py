@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
+import shutil
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+import uuid
 
 try:
     from app.plugins import _PluginBase
@@ -14,13 +19,15 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.8"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
 METADATA_FILENAME = "metadata.json"
 CN_TZ = timezone(timedelta(hours=8))
 LOG_LIMIT = 200
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".wav", ".ogg", ".opus"}
+INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 class TingBookSyncError(Exception):
@@ -53,6 +60,28 @@ class StrmResult:
     skipped: int
 
 
+@dataclass(frozen=True)
+class AdoptResult:
+    source_path: Path
+    book_dir: Path | None
+    status: str
+    message: str
+    title: str
+    source_name: str
+
+
+@dataclass(frozen=True)
+class MetadataCandidate:
+    title: str
+    author: str
+    narrator: str
+    category: str
+    source_name: str
+    source_url: str
+    cover: str = ""
+    score: float = 0.0
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
     "watch_dir": "",
@@ -62,15 +91,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "move_completed": True,
     "overwrite_strm": False,
     "min_file_count": 1,
+    "auto_adopt_loose_audio": True,
+    "scrape_metadata": False,
     "dry_run": True,
 }
 
 
 class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
-    plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
+    plugin_desc = "扫描听书系统下载监听目录，接管散音频，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -193,6 +224,10 @@ class TingBookSync(_PluginBase):
             self._add_log("error", "下载监听目录为空，无法扫描", "scan")
             raise TingBookSyncError("watch_dir 不能为空")
         self._add_log("info", f"开始扫描下载监听目录：{watch_dir}", "scan")
+        if config["auto_adopt_loose_audio"]:
+            adopted = adopt_loose_audio_in_library(Path(watch_dir), scrape_metadata=bool(config["scrape_metadata"]))
+            for item in adopted:
+                self._add_log("info", f"{item.message}，来源={item.source_name}", "adopt")
         results = scan_ready_books(Path(watch_dir), write_sync=True)
         payload = []
         strm_output_dir = str(config["strm_output_dir"]).strip()
@@ -246,6 +281,8 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["enabled"] = bool(normalized.get("enabled"))
     normalized["move_completed"] = bool(normalized.get("move_completed"))
     normalized["overwrite_strm"] = bool(normalized.get("overwrite_strm"))
+    normalized["auto_adopt_loose_audio"] = bool(normalized.get("auto_adopt_loose_audio", True))
+    normalized["scrape_metadata"] = bool(normalized.get("scrape_metadata", False))
     normalized["dry_run"] = bool(normalized.get("dry_run", True))
     normalized["scan_interval"] = max(60, int(normalized.get("scan_interval") or 300))
     normalized["min_file_count"] = max(1, int(normalized.get("min_file_count") or 1))
@@ -299,6 +336,8 @@ def build_form_schema() -> list[dict[str, Any]]:
                 {"component": "VTextField", "props": {"model": "min_file_count", "label": "最少音频数", "type": "number"}},
                 {"component": "VSwitch", "props": {"model": "move_completed", "label": "完成后移动目录"}},
                 {"component": "VSwitch", "props": {"model": "overwrite_strm", "label": "覆盖已有 STRM"}},
+                {"component": "VSwitch", "props": {"model": "auto_adopt_loose_audio", "label": "自动接管散音频"}},
+                {"component": "VSwitch", "props": {"model": "scrape_metadata", "label": "联网刮削补全书籍信息"}},
                 {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，模拟上传并生成 STRM"}},
             ],
         }
@@ -454,12 +493,237 @@ def browse_local_path(path: str = "/", storage: str = "local") -> list[dict[str,
     return items
 
 
+def make_task_id() -> str:
+    stamp = datetime.now(CN_TZ).strftime("%Y%m%d")
+    return f"tb_{stamp}_{uuid.uuid4().hex[:8]}"
+
+
 def now_iso() -> str:
     return datetime.now(CN_TZ).isoformat(timespec="seconds")
 
 
+def sanitize_filename(value: str, default: str = "未命名") -> str:
+    cleaned = INVALID_FILENAME_CHARS.sub("_", value).strip().strip(".")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or default
+
+
+def clean_book_query(value: str) -> str:
+    text = Path(value).stem if Path(value).suffix else value
+    text = re.sub(r"(?i)\b(mp3|m4a|m4b|aac|flac|wav|ogg|opus|有声书|全集|完结|完整版)\b", " ", text)
+    text = re.sub(r"(?i)\b\d{2,4}\s*(kbps|k|hz|m)\b", " ", text)
+    text = re.sub(r"第?\s*\d+\s*[集章节回部期]?", " ", text)
+    text = re.sub(r"^\s*\d+[\s._-]*", " ", text)
+    text = re.sub(r"[\[\]【】()（）《》<>_]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -.")
+    return text or sanitize_filename(value, "未命名")
+
+
+def best_effort_book_title(source: Path) -> str:
+    return clean_book_query(source.name if source.is_dir() else source.stem)
+
+
+def book_dir_name(title: str, author: str) -> str:
+    title_part = sanitize_filename(title, "未命名")
+    author_part = sanitize_filename(author, "")
+    return f"{title_part} - {author_part}" if author_part else title_part
+
+
+def ensure_library_dirs(library: Path) -> None:
+    for name in ("staging", "syncing", "completed", "failed"):
+        (library / name).mkdir(parents=True, exist_ok=True)
+
+
+def find_audio_files(source: Path) -> list[Path]:
+    if source.is_file():
+        return [source] if source.suffix.lower() in AUDIO_EXTENSIONS else []
+    return sorted([path for path in source.iterdir() if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS], key=lambda item: item.name.lower())
+
+
+def episode_title_from_file(path: Path, index: int) -> str:
+    title = path.stem.strip()
+    title = re.sub(r"^\s*\d+[\s._-]*", "", title).strip()
+    return title or f"第{index}章"
+
+
+def numbered_episode_filename(index: int, source_file: Path) -> str:
+    title = sanitize_filename(episode_title_from_file(source_file, index), f"第{index}章")
+    return f"{index:03d} - {title}{source_file.suffix.lower()}"
+
+
+def unique_destination(base: Path) -> Path:
+    if not base.exists():
+        return base
+    for index in range(2, 1000):
+        candidate = base.with_name(f"{base.name} ({index})")
+        if not candidate.exists():
+            return candidate
+    raise TingBookSyncError(f"无法创建唯一目录: {base}")
+
+
 def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def import_local_book(
+    source: Path,
+    library: Path,
+    title: str,
+    author: str = "",
+    narrator: str = "",
+    category: str = "有声书",
+    source_name: str = "manual-import",
+    source_url: str = "",
+    copy_files: bool = True,
+) -> Path:
+    if not source.exists() or not source.is_dir():
+        raise TingBookSyncError(f"导入源目录不存在: {source}")
+    audio_files = find_audio_files(source)
+    if not audio_files:
+        raise TingBookSyncError(f"导入源目录未找到音频文件: {source}")
+    ensure_library_dirs(library)
+    final_dir = unique_destination(library / "staging" / book_dir_name(title, author))
+    tmp_dir = final_dir.with_name(f"{final_dir.name}.tmp")
+    tmp_dir.mkdir(parents=True)
+    episodes = []
+    try:
+        for index, audio_file in enumerate(audio_files, start=1):
+            filename = numbered_episode_filename(index, audio_file)
+            destination = tmp_dir / filename
+            if copy_files:
+                shutil.copy2(audio_file, destination)
+            else:
+                shutil.move(str(audio_file), destination)
+            episodes.append({"index": index, "title": episode_title_from_file(audio_file, index), "filename": filename, "duration": 0, "size": destination.stat().st_size})
+        metadata = {
+            "schemaVersion": SCHEMA_VERSION,
+            "taskId": make_task_id(),
+            "title": title.strip(),
+            "author": author.strip(),
+            "narrator": narrator.strip(),
+            "category": category.strip() or "有声书",
+            "source": {"name": source_name.strip() or "manual-import", "url": source_url.strip()},
+            "episodes": episodes,
+            "cover": "",
+            "createdAt": now_iso(),
+        }
+        validate_metadata(metadata, tmp_dir)
+        write_json(tmp_dir / METADATA_FILENAME, metadata)
+        tmp_dir.rename(final_dir)
+        (final_dir / READY_FILENAME).write_text(now_iso() + "\n", encoding="utf-8")
+        return final_dir
+    except Exception:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        raise
+
+
+def fetch_json_url(url: str) -> dict[str, Any]:
+    request = Request(url, headers={"User-Agent": "TingBookSync/0.1 metadata lookup"})
+    with urlopen(request, timeout=8) as response:
+        payload = response.read(1024 * 1024)
+    return json.loads(payload.decode("utf-8"))
+
+
+def metadata_from_query(query: str, enable_network: bool = True) -> MetadataCandidate | None:
+    cleaned = clean_book_query(query)
+    if not cleaned or not enable_network:
+        return None
+    for provider in (search_google_books, search_open_library):
+        try:
+            candidate = provider(cleaned)
+        except Exception:
+            candidate = None
+        if candidate:
+            return candidate
+    return None
+
+
+def search_google_books(query: str) -> MetadataCandidate | None:
+    payload = fetch_json_url("https://www.googleapis.com/books/v1/volumes?" + urlencode({"q": query, "maxResults": 5, "printType": "books"}))
+    for item in payload.get("items") or []:
+        info = item.get("volumeInfo") or {}
+        title = str(info.get("title") or "").strip()
+        if not title:
+            continue
+        authors = info.get("authors") or []
+        author = "、".join(str(author).strip() for author in authors if str(author).strip())
+        categories = info.get("categories") or []
+        links = info.get("imageLinks") or {}
+        return MetadataCandidate(title, author, "", str(categories[0]).strip() if categories else "有声书", "google-books", str(info.get("infoLink") or item.get("selfLink") or ""), str(links.get("thumbnail") or links.get("smallThumbnail") or ""), 0.85)
+    return None
+
+
+def search_open_library(query: str) -> MetadataCandidate | None:
+    payload = fetch_json_url("https://openlibrary.org/search.json?" + urlencode({"q": query, "limit": 5}))
+    for item in payload.get("docs") or []:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        authors = item.get("author_name") or []
+        author = "、".join(str(author).strip() for author in authors[:3] if str(author).strip())
+        key = str(item.get("key") or "").strip()
+        cover = f"https://covers.openlibrary.org/b/id/{item['cover_i']}-L.jpg" if item.get("cover_i") else ""
+        return MetadataCandidate(title, author, "", "有声书", "open-library", f"https://openlibrary.org{key}" if key else "", cover, 0.75)
+    return None
+
+
+def adopt_loose_audio(source: Path, library: Path, scrape_metadata: bool = False, copy_files: bool = False) -> AdoptResult:
+    if not source.exists():
+        raise TingBookSyncError(f"接管源不存在: {source}")
+    if source.name in {"staging", "syncing", "completed", "failed"}:
+        return AdoptResult(source, None, "ignored", "系统目录跳过", "", "")
+    if source.is_dir() and ((source / READY_FILENAME).exists() or source.name.endswith(".tmp")):
+        return AdoptResult(source, None, "ignored", "ready 或临时目录跳过", "", "")
+    if not find_audio_files(source):
+        return AdoptResult(source, None, "ignored", "未找到散音频", "", "")
+    fallback_title = best_effort_book_title(source)
+    candidate = metadata_from_query(fallback_title, enable_network=scrape_metadata) if scrape_metadata else None
+    title = candidate.title if candidate and candidate.title else fallback_title
+    author = candidate.author if candidate else ""
+    narrator = candidate.narrator if candidate else ""
+    category = candidate.category if candidate and candidate.category else "有声书"
+    source_name = candidate.source_name if candidate else "loose-audio"
+    source_url = candidate.source_url if candidate else ""
+    import_source = source
+    temp_source: Path | None = None
+    if source.is_file():
+        temp_source = unique_destination(source.with_name(f"{source.stem}.adopt.tmp"))
+        temp_source.mkdir()
+        if copy_files:
+            shutil.copy2(source, temp_source / source.name)
+        else:
+            shutil.move(str(source), temp_source / source.name)
+        import_source = temp_source
+    try:
+        book_dir = import_local_book(import_source, library, title, author, narrator, category, source_name, source_url, copy_files=copy_files)
+    finally:
+        if temp_source and temp_source.exists():
+            shutil.rmtree(temp_source)
+    if candidate and candidate.cover:
+        metadata_path = book_dir / METADATA_FILENAME
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["cover"] = candidate.cover
+        write_json(metadata_path, metadata)
+    return AdoptResult(source, book_dir, "adopted", f"散音频已接管：{title}", title, source_name)
+
+
+def adopt_loose_audio_in_library(library: Path, scrape_metadata: bool = False) -> list[AdoptResult]:
+    if not library.exists():
+        raise TingBookSyncError(f"监听目录不存在: {library}")
+    ensure_library_dirs(library)
+    results = []
+    for child in sorted(library.iterdir(), key=lambda item: item.name.lower()):
+        if child.name in {"staging", "syncing", "completed", "failed"} or child.name.endswith(".tmp"):
+            continue
+        if child.is_dir() and (child / READY_FILENAME).exists():
+            continue
+        if child.is_file() and child.suffix.lower() not in AUDIO_EXTENSIONS:
+            continue
+        result = adopt_loose_audio(child, library, scrape_metadata=scrape_metadata, copy_files=False)
+        if result.status == "adopted":
+            results.append(result)
+    return results
 
 
 def load_metadata(book_dir: Path) -> dict:

@@ -114,9 +114,9 @@
   },
   "TingBookSync": {
     "name": "听书同步",
-    "description": "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。",
+    "description": "扫描听书系统下载监听目录，接管散音频，dry-run 上传并按分类生成 STRM。",
     "labels": "听书,工具",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
@@ -127,7 +127,8 @@
       "v0.1.4": "TingBookSync 0.1.4 使用资源存储和资源目录方式选择文件夹",
       "v0.1.5": "TingBookSync 0.1.5 115 目标目录固定使用 u115 资源存储",
       "v0.1.6": "TingBookSync 0.1.6 强制 115 目录选择使用 u115 存储",
-      "v0.1.7": "TingBookSync 0.1.7 增加运行日志查看和清空功能"
+      "v0.1.7": "TingBookSync 0.1.7 增加运行日志查看和清空功能",
+      "v0.1.8": "TingBookSync 0.1.8 增加散音频接管和可选元数据刮削"
     },
     "v2": true
   }

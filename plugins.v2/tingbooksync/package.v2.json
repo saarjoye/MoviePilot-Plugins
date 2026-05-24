@@ -1,8 +1,8 @@
-{
+﻿{
   "id": "tingbooksync",
   "name": "听书同步",
-  "version": "0.1.7",
-  "description": "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。",
+  "version": "0.1.8",
+  "description": "扫描听书系统下载监听目录，接管散音频，dry-run 上传并按分类生成 STRM。",
   "author": "wYw",
   "plugin": "TingBookSync",
   "icon": "tingbooksync.png",
