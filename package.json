@@ -111,5 +111,18 @@
       "v0.1.4": "u115风控参数 0.1.4 发布，修正 render_mode 为 vuetify，兼容 MP 配置页渲染"
     },
     "v2": true
+  },
+  "TingBookSync": {
+    "name": "听书同步",
+    "description": "扫描听书系统输出目录，dry-run 上传并生成 STRM。",
+    "labels": "听书,工具",
+    "version": "0.1.1",
+    "icon": "tingbooksync.png",
+    "author": "saarjoye",
+    "level": 1,
+    "history": {
+      "v0.1.1": "TingBookSync 0.1.1 dry-run publish"
+    },
+    "v2": true
   }
 }
