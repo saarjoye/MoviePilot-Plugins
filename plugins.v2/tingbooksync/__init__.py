@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
 import shutil
 from typing import Any
+from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import uuid
@@ -19,13 +23,14 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.8"
+PLUGIN_VERSION = "0.1.9"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
 METADATA_FILENAME = "metadata.json"
 CN_TZ = timezone(timedelta(hours=8))
 LOG_LIMIT = 200
+EPISODE_URLS_FILENAME = ".tingbook.episode_urls.json"
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".wav", ".ogg", ".opus"}
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -93,15 +98,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_file_count": 1,
     "auto_adopt_loose_audio": True,
     "scrape_metadata": False,
+    "public_base_url": "",
     "dry_run": True,
 }
 
 
 class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
-    plugin_desc = "扫描听书系统下载监听目录，接管散音频，dry-run 上传并按分类生成 STRM。"
+    plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.1.9"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -126,6 +132,7 @@ class TingBookSync(_PluginBase):
             {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
             {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"], "summary": "读取运行日志", "auth": "bear"},
             {"path": "/logs/clear", "endpoint": self.api_clear_logs, "methods": ["POST"], "summary": "清空运行日志", "auth": "bear"},
+            {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
         ]
@@ -186,6 +193,25 @@ class TingBookSync(_PluginBase):
         self._add_log("info", "运行日志已清空", "logs")
         return {"success": True, "message": "运行日志已清空"}
 
+    def api_play(self, token: str):
+        try:
+            payload = verify_play_token(token, str(self._config.get("play_token_secret") or ""))
+            location = resolve_u115_download_url(str(payload["pickcode"]))
+            try:
+                from starlette.responses import RedirectResponse
+
+                return RedirectResponse(url=location, status_code=302)
+            except Exception:
+                return {"success": True, "location": location}
+        except Exception as exc:
+            self._add_log("error", f"302 播放地址生成失败：{exc}", "play")
+            try:
+                from starlette.responses import PlainTextResponse
+
+                return PlainTextResponse(str(exc), status_code=404)
+            except Exception:
+                return {"success": False, "message": str(exc)}
+
     def api_browse(self, path: str = "/", storage: str = "local", dirs_only: bool | str = False) -> dict[str, Any]:
         try:
             items = browse_storage_path(path=path or "/", storage=storage or "local", dirs_only=parse_bool(dirs_only))
@@ -216,9 +242,6 @@ class TingBookSync(_PluginBase):
             self._last_results = []
             self._add_log("info", "插件未启用，跳过扫描", "scan")
             return []
-        if not config["dry_run"]:
-            self._add_log("error", "阻止非 dry-run 执行", "scan")
-            raise TingBookSyncError("当前插件版本只允许 dry_run=true")
         watch_dir = str(config["watch_dir"]).strip()
         if not watch_dir:
             self._add_log("error", "下载监听目录为空，无法扫描", "scan")
@@ -239,18 +262,20 @@ class TingBookSync(_PluginBase):
                 "message": result.message,
             }
             if result.status == "scanning":
-                upload_result = dry_run_upload_book(result.book_dir, str(config["target_115_dir"]))
+                upload_result = dry_run_upload_book(result.book_dir, str(config["target_115_dir"])) if config["dry_run"] else upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                 item["status"] = upload_result.status
                 item["message"] = upload_result.message
                 item["remotePath"] = upload_result.remote_path
-                self._add_log("info", f"上传 dry-run 完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
+                self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
             if item["status"] == "uploaded" and strm_output_dir:
+                episode_url_map = read_episode_url_map(result.book_dir)
                 strm_result = generate_strm_files(
                     book_dir=result.book_dir,
                     output_root=Path(strm_output_dir),
                     remote_root=str(config["target_115_dir"]),
                     overwrite=bool(config["overwrite_strm"]),
                     download_root=Path(watch_dir),
+                    episode_url_map=episode_url_map,
                 )
                 item["status"] = "strm_generated"
                 item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
@@ -284,6 +309,8 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["auto_adopt_loose_audio"] = bool(normalized.get("auto_adopt_loose_audio", True))
     normalized["scrape_metadata"] = bool(normalized.get("scrape_metadata", False))
     normalized["dry_run"] = bool(normalized.get("dry_run", True))
+    normalized["public_base_url"] = str(normalized.get("public_base_url") or "").strip().rstrip("/")
+    normalized["play_token_secret"] = str(normalized.get("play_token_secret") or "").strip() or make_secret()
     normalized["scan_interval"] = max(60, int(normalized.get("scan_interval") or 300))
     normalized["min_file_count"] = max(1, int(normalized.get("min_file_count") or 1))
     return normalized
@@ -293,6 +320,56 @@ def parse_bool(value: bool | str) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def make_secret() -> str:
+    return hashlib.sha256(f"{datetime.now(CN_TZ).isoformat()}:{id(object())}".encode("utf-8")).hexdigest()
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode((value + "=" * (-len(value) % 4)).encode("ascii"))
+
+
+def make_play_token(pickcode: str, secret: str) -> str:
+    body = b64url_encode(json.dumps({"pickcode": pickcode}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{b64url_encode(signature)}"
+
+
+def verify_play_token(token: str, secret: str) -> dict[str, Any]:
+    if not secret:
+        raise TingBookSyncError("播放密钥未初始化")
+    try:
+        body, signature = str(token or "").split(".", 1)
+    except ValueError as exc:
+        raise TingBookSyncError("播放 token 无效") from exc
+    expected = b64url_encode(hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(signature, expected):
+        raise TingBookSyncError("播放 token 校验失败")
+    payload = json.loads(b64url_decode(body).decode("utf-8"))
+    if not payload.get("pickcode"):
+        raise TingBookSyncError("播放 token 缺少 pickcode")
+    return payload
+
+
+def public_play_url(base_url: str, token: str) -> str:
+    path = f"/api/v1/plugin/TingBookSync/play/{quote(token, safe='')}"
+    return f"{base_url}{path}" if base_url else path
+
+
+def read_episode_url_map(book_dir: Path) -> dict[str, str]:
+    path = book_dir / EPISODE_URLS_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def build_form_schema() -> list[dict[str, Any]]:
@@ -338,7 +415,8 @@ def build_form_schema() -> list[dict[str, Any]]:
                 {"component": "VSwitch", "props": {"model": "overwrite_strm", "label": "覆盖已有 STRM"}},
                 {"component": "VSwitch", "props": {"model": "auto_adopt_loose_audio", "label": "自动接管散音频"}},
                 {"component": "VSwitch", "props": {"model": "scrape_metadata", "label": "联网刮削补全书籍信息"}},
-                {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，模拟上传并生成 STRM"}},
+                {"component": "VTextField", "props": {"model": "public_base_url", "label": "MP 外部访问地址", "clearable": True, "hint": "用于写入 302 STRM，例如 http://192.168.1.10:3000；留空则写相对地址。", "persistent-hint": True}},
+                {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，模拟上传；关闭后真实上传 115"}},
             ],
         }
     ]
@@ -823,6 +901,51 @@ def dry_run_upload_book(book_dir: Path, remote_root: str, provider: str = "115",
     return UploadResult(book_dir, task_id, "uploaded", remote_path, "upload dry-run completed", True)
 
 
+def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:
+    try:
+        from app.chain.storage import StorageChain
+    except Exception as exc:
+        raise TingBookSyncError(f"无法导入 MoviePilot 存储链：{exc}") from exc
+    metadata = load_metadata(book_dir)
+    task_id = str(metadata["taskId"])
+    target_dir = StorageChain().get_folder("u115", Path(remote_root) / book_dir.name)
+    if not target_dir:
+        raise TingBookSyncError(f"无法创建或获取 115 目标目录: {remote_root}/{book_dir.name}")
+    remote_path = f"{remote_root.rstrip('/')}/{book_dir.name}"
+    write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", "115 上传开始", "115", remote_path))
+    episode_urls: dict[str, str] = {}
+    for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
+        filename = str(episode["filename"])
+        uploaded = StorageChain().upload_file(target_dir, book_dir / filename, new_name=Path(filename).name)
+        if not uploaded:
+            raise TingBookSyncError(f"115 上传失败: {filename}")
+        pickcode = str(getattr(uploaded, "pickcode", "") or "")
+        if not pickcode:
+            detail = StorageChain().get_file_item("u115", Path(str(getattr(uploaded, "path", "") or Path(target_dir.path) / Path(filename).name)))
+            pickcode = str(getattr(detail, "pickcode", "") or "")
+        if not pickcode:
+            raise TingBookSyncError(f"115 上传成功但未返回 pickcode: {filename}")
+        episode_urls[filename] = public_play_url(public_base_url, make_play_token(pickcode, secret))
+    write_json(book_dir / EPISODE_URLS_FILENAME, episode_urls)
+    write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploaded", "uploaded", "115 上传完成", "115", remote_path))
+    return UploadResult(book_dir, task_id, "uploaded", remote_path, "115 upload completed", True)
+
+
+def resolve_u115_download_url(pickcode: str) -> str:
+    try:
+        from app.modules.filemanager.storages.u115 import U115Pan
+    except Exception as exc:
+        raise TingBookSyncError(f"无法导入 u115 存储模块：{exc}") from exc
+    client = U115Pan()
+    download_info = client._request_api("POST", "/open/ufile/downurl", "data", data={"pick_code": pickcode})
+    if not download_info:
+        raise TingBookSyncError("115 下载链接获取失败")
+    location = list(download_info.values())[0].get("url", {}).get("url")
+    if not location:
+        raise TingBookSyncError("115 下载链接为空")
+    return str(location)
+
+
 def strm_filename(filename: str) -> str:
     source = Path(filename)
     if source.is_absolute() or ".." in source.parts:
@@ -870,7 +993,7 @@ def relative_category_dir(book_dir: Path, download_root: Path) -> Path:
     return relative_parent
 
 
-def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115", download_root: Path | None = None) -> StrmResult:
+def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115", download_root: Path | None = None, episode_url_map: dict[str, str] | None = None) -> StrmResult:
     metadata = load_metadata(book_dir)
     validate_metadata(metadata, book_dir)
     category_dir = relative_category_dir(book_dir, download_root) if download_root else Path()
@@ -884,7 +1007,8 @@ def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, ove
         if target.exists() and not overwrite:
             skipped += 1
             continue
-        target.write_text(join_remote_path(remote_category_root, book_dir.name, str(episode["filename"])) + "\n", encoding="utf-8")
+        filename = str(episode["filename"])
+        target.write_text(((episode_url_map or {}).get(filename) or join_remote_path(remote_category_root, book_dir.name, filename)) + "\n", encoding="utf-8")
         created += 1
     message = f"strm dry-run generated: created={created}, skipped={skipped}"
     remote_book_path = join_remote_root(remote_category_root, book_dir.name)
