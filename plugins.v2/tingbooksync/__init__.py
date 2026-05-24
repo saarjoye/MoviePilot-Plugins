@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -69,7 +69,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -352,7 +352,7 @@ def browse_storage_path(path: str = "/", storage: str = "local", dirs_only: bool
 
 
 def get_storage_options() -> list[dict[str, str]]:
-    options: dict[str, str] = {"local": "本地"}
+    options: dict[str, str] = {"local": "本地", "u115": "115 网盘"}
     try:
         from app.helper.directory import DirectoryHelper
 
