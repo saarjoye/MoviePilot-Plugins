@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -69,7 +69,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -88,6 +88,7 @@ class TingBookSync(_PluginBase):
     def get_api(self) -> list[dict[str, Any]]:
         return [
             {"path": "/state", "endpoint": self.api_state, "methods": ["GET"], "summary": "读取听书同步配置", "auth": "bear"},
+            {"path": "/storages", "endpoint": self.api_storages, "methods": ["GET"], "summary": "读取可用资源存储", "auth": "bear"},
             {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
@@ -110,8 +111,16 @@ class TingBookSync(_PluginBase):
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return build_form_schema(), dict(self._config)
 
-    def get_page(self) -> list[dict[str, Any]]:
-        return build_page_schema(self)
+    @classmethod
+    def _frontend_dist_path(cls) -> str:
+        return f"dist/v{cls.plugin_version.replace('.', '_')}"
+
+    @staticmethod
+    def get_render_mode() -> tuple[str, str]:
+        return "vue", TingBookSync._frontend_dist_path()
+
+    def get_page(self) -> list[dict[str, Any]] | None:
+        return None
 
     def stop_service(self) -> None:
         self._last_results = []
@@ -123,6 +132,9 @@ class TingBookSync(_PluginBase):
             "last_results": list(getattr(self, "_last_results", [])),
             "dry_run_only": True,
         }
+
+    def api_storages(self) -> dict[str, Any]:
+        return {"success": True, "items": get_storage_options()}
 
     def api_browse(self, path: str = "/", storage: str = "local", dirs_only: bool | str = False) -> dict[str, Any]:
         try:
@@ -218,7 +230,7 @@ def build_form_schema() -> list[dict[str, Any]]:
                         "label": "下载监听目录",
                         "clearable": True,
                         "prepend-inner-icon": "mdi-folder-search-outline",
-                        "hint": "可在插件详情页使用 MP 资源目录浏览选择；当前字段保存最终路径。",
+                        "hint": "请在插件详情页使用“资源存储 + 资源目录”方式选择，避免手动填写路径。",
                         "persistent-hint": True,
                     },
                 },
@@ -229,7 +241,7 @@ def build_form_schema() -> list[dict[str, Any]]:
                         "label": "STRM 生成目录",
                         "clearable": True,
                         "prepend-inner-icon": "mdi-folder-open-outline",
-                        "hint": "STRM 将按下载监听目录下的分类子目录自动新建分类文件夹。",
+                        "hint": "请在插件详情页选择；STRM 会按下载监听目录下的分类子目录自动新建分类文件夹。",
                         "persistent-hint": True,
                     },
                 },
@@ -337,6 +349,32 @@ def browse_storage_path(path: str = "/", storage: str = "local", dirs_only: bool
     if dirs_only:
         items = [item for item in items if item.get("type") == "dir"]
     return sorted(items, key=lambda item: (item.get("type") != "dir", str(item.get("name") or "").lower()))
+
+
+def get_storage_options() -> list[dict[str, str]]:
+    options: dict[str, str] = {"local": "本地"}
+    try:
+        from app.helper.directory import DirectoryHelper
+
+        for directory in DirectoryHelper().get_dirs():
+            for attr in ("storage", "library_storage"):
+                value = str(getattr(directory, attr, "") or "").strip()
+                if value:
+                    options.setdefault(value, storage_title(value))
+    except Exception:
+        pass
+    return [{"title": title, "value": value} for value, title in options.items()]
+
+
+def storage_title(value: str) -> str:
+    return {
+        "local": "本地",
+        "u115": "115 网盘",
+        "alist": "Alist",
+        "rclone": "Rclone",
+        "smb": "SMB",
+        "alipan": "阿里云盘",
+    }.get(value, value)
 
 
 def storage_item_to_dict(item: Any) -> dict[str, Any]:
