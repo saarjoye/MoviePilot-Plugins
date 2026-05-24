@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.10"
+PLUGIN_VERSION = "0.1.11"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -99,7 +99,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_adopt_loose_audio": True,
     "scrape_metadata": False,
     "public_base_url": "",
-    "dry_run": True,
 }
 
 
@@ -107,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.11"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -174,7 +173,7 @@ class TingBookSync(_PluginBase):
             "config": normalize_config(getattr(self, "_config", {})),
             "last_results": list(getattr(self, "_last_results", [])),
             "logs": list(getattr(self, "_logs", []))[-50:],
-            "dry_run_only": True,
+            "real_upload_only": True,
         }
 
     def api_storages(self) -> dict[str, Any]:
@@ -262,12 +261,12 @@ class TingBookSync(_PluginBase):
                 "message": result.message,
             }
             if result.status == "scanning":
-                upload_result = dry_run_upload_book(result.book_dir, str(config["target_115_dir"])) if config["dry_run"] else upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+                upload_result = upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                 item["status"] = upload_result.status
                 item["message"] = upload_result.message
                 item["remotePath"] = upload_result.remote_path
                 self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
-            if item["status"] == "uploaded" and strm_output_dir and not config["dry_run"]:
+            if item["status"] == "uploaded" and strm_output_dir:
                 episode_url_map = read_episode_url_map(result.book_dir)
                 strm_result = generate_strm_files(
                     book_dir=result.book_dir,
@@ -282,9 +281,6 @@ class TingBookSync(_PluginBase):
                 item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
                 item["strmPath"] = str(strm_result.output_dir)
                 self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
-            elif item["status"] == "uploaded" and strm_output_dir and config["dry_run"]:
-                item["message"] = f"{item['message']}; dry-run 不生成 STRM"
-                self._add_log("info", f"Dry-run 模拟上传完成，不生成 STRM: {result.book_dir.name}", "strm")
             if item["status"] == "failed":
                 self._add_log("error", f"扫描失败：{result.book_dir.name}，{result.message}", "scan")
             payload.append(item)
@@ -312,7 +308,6 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["overwrite_strm"] = bool(normalized.get("overwrite_strm"))
     normalized["auto_adopt_loose_audio"] = bool(normalized.get("auto_adopt_loose_audio", True))
     normalized["scrape_metadata"] = bool(normalized.get("scrape_metadata", False))
-    normalized["dry_run"] = bool(normalized.get("dry_run", True))
     normalized["public_base_url"] = str(normalized.get("public_base_url") or "").strip().rstrip("/")
     normalized["play_token_secret"] = str(normalized.get("play_token_secret") or "").strip() or make_secret()
     normalized["scan_interval"] = max(60, int(normalized.get("scan_interval") or 300))
@@ -420,7 +415,6 @@ def build_form_schema() -> list[dict[str, Any]]:
                 {"component": "VSwitch", "props": {"model": "auto_adopt_loose_audio", "label": "自动接管散音频"}},
                 {"component": "VSwitch", "props": {"model": "scrape_metadata", "label": "联网刮削补全书籍信息"}},
                 {"component": "VTextField", "props": {"model": "public_base_url", "label": "MP 外部访问地址", "clearable": True, "hint": "用于写入 302 STRM，例如 http://192.168.1.10:3000；留空则写相对地址。", "persistent-hint": True}},
-                {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，模拟上传；关闭后真实上传 115"}},
             ],
         }
     ]
@@ -441,7 +435,7 @@ def build_page_schema(plugin: TingBookSync) -> list[dict[str, Any]]:
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "text": "当前版本仅 dry-run：扫描、模拟上传、生成 STRM，不访问 115。下方目录浏览器使用 MP 资源目录能力，可从 / 展开选择真实目录。",
+                "text": "当前版本固定真实上传 115：上传成功并拿到 pickcode 后才生成 302 STRM。下方目录浏览器使用 MP 资源目录能力，可从 / 展开选择真实目录。",
             },
         },
         {
@@ -872,7 +866,7 @@ def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult
             status = "scanning"
             message = "ready directory is valid"
             if write_sync:
-                write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, status, "dry_run", message))
+                write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, status, "scanning", message))
         except TingBookSyncError as exc:
             status = "failed"
             message = str(exc)
@@ -890,19 +884,6 @@ def read_sync_status(book_dir: Path) -> dict:
         return json.loads(sync_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise TingBookSyncError(f".tingbook.sync.json 解析失败: {exc.msg}") from exc
-
-
-def dry_run_upload_book(book_dir: Path, remote_root: str, provider: str = "115", force: bool = False) -> UploadResult:
-    metadata = load_metadata(book_dir)
-    validate_metadata(metadata, book_dir)
-    task_id = str(metadata["taskId"])
-    sync_status = str(read_sync_status(book_dir).get("status", ""))
-    remote_path = f"{remote_root.rstrip('/')}/{book_dir.name}"
-    if not force and sync_status in {"uploaded", "strm_generated"}:
-        return UploadResult(book_dir, task_id, sync_status, remote_path, f"upload dry-run skipped: existing status={sync_status}", False)
-    write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", "upload dry-run started", provider, remote_path))
-    write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploaded", "uploaded", "upload dry-run completed", provider, remote_path))
-    return UploadResult(book_dir, task_id, "uploaded", remote_path, "upload dry-run completed", True)
 
 
 def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:

@@ -17,7 +17,9 @@ const DEFAULT_CONFIG = {
   move_completed: true,
   overwrite_strm: false,
   min_file_count: 1,
-  dry_run: true,
+  auto_adopt_loose_audio: true,
+  scrape_metadata: false,
+  public_base_url: "",
 };
 
 function buildQuery(params = {}) {
@@ -209,7 +211,7 @@ export default defineComponent({
           h("div", { class: "text-body-2 text-medium-emphasis" }, message.value),
         ]),
         h("div", { class: "d-flex ga-2 flex-wrap" }, [
-          h(c("VChip"), { color: "primary", variant: "tonal" }, () => "dry-run"),
+          h(c("VChip"), { color: "success", variant: "tonal" }, () => "真实上传"),
           h(c("VBtn"), { color: "primary", loading: saving.value, disabled: saving.value, onClick: saveConfig }, () => "保存配置"),
         ]),
       ]),
@@ -224,8 +226,21 @@ export default defineComponent({
           h(c("VRow"), null, () => [
             h(c("VCol"), { cols: "12", md: "4" }, () => h(c("VSwitch"), { modelValue: config.move_completed, "onUpdate:modelValue": (value) => { config.move_completed = value; }, label: "完成后移动目录", hideDetails: true })),
             h(c("VCol"), { cols: "12", md: "4" }, () => h(c("VSwitch"), { modelValue: config.overwrite_strm, "onUpdate:modelValue": (value) => { config.overwrite_strm = value; }, label: "覆盖已有 STRM", hideDetails: true })),
-            h(c("VCol"), { cols: "12", md: "4" }, () => h(c("VSwitch"), { modelValue: config.dry_run, "onUpdate:modelValue": (value) => { config.dry_run = value; }, label: "Dry-run", color: "warning", hideDetails: true })),
           ]),
+          h(c("VRow"), null, () => [
+            h(c("VCol"), { cols: "12", md: "6" }, () => h(c("VSwitch"), { modelValue: config.auto_adopt_loose_audio, "onUpdate:modelValue": (value) => { config.auto_adopt_loose_audio = value; }, label: "自动接管散音频", color: "primary", hideDetails: true })),
+            h(c("VCol"), { cols: "12", md: "6" }, () => h(c("VSwitch"), { modelValue: config.scrape_metadata, "onUpdate:modelValue": (value) => { config.scrape_metadata = value; }, label: "联网刮削补全书籍信息", color: "warning", hideDetails: true })),
+          ]),
+          h(c("VTextField"), {
+            modelValue: config.public_base_url,
+            "onUpdate:modelValue": (value) => { config.public_base_url = value || ""; },
+            label: "MP 外部访问地址",
+            hint: "用于写入 302 STRM，例如 http://192.168.1.10:3000；留空则写相对地址。",
+            persistentHint: true,
+            prependInnerIcon: "mdi-web",
+          }),
+          config.scrape_metadata ? h(c("VAlert"), { type: "warning", variant: "tonal", density: "compact", text: "联网刮削会把清洗后的书名关键词发送到 Google Books / Open Library，不发送本地完整路径、115 目录或凭证。" }) : null,
+          h(c("VAlert"), { type: "info", variant: "tonal", density: "compact", text: "插件会真实上传音频到 115；STRM 会写入本插件 302 播放地址，播放时再换取 115 临时下载链接。" }),
           h(c("VDivider")),
           ...FIELD_DEFS.map((field) => h(c("VTextField"), {
             modelValue: config[field.key],
