@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.14"
+PLUGIN_VERSION = "0.1.15"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -106,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.14"
+    plugin_version = "0.1.15"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -896,21 +896,13 @@ def read_sync_status(book_dir: Path) -> dict:
 
 def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> UploadResult:
     try:
-        from app.chain.storage import StorageChain
+        from app.modules.filemanager.storages.u115 import U115Pan
     except Exception as exc:
-        raise TingBookSyncError(f"无法导入 MoviePilot 存储链：{exc}") from exc
+        raise TingBookSyncError(f"无法导入 MoviePilot u115 存储模块：{exc}") from exc
     metadata = load_metadata(book_dir)
     task_id = str(metadata["taskId"])
-    storage_chain = StorageChain()
-    base_remote_root = normalize_remote_root(remote_root)
-    remote_path = join_remote_root(base_remote_root, book_dir.name)
-    target_dir = storage_chain.get_folder("u115", Path(remote_path))
-    if not target_dir:
-        fallback_dir = storage_chain.get_folder("u115", Path(base_remote_root))
-        if not fallback_dir:
-            raise TingBookSyncError(f"无法创建或获取 115 目标目录: {remote_path}")
-        target_dir = fallback_dir
-        remote_path = base_remote_root
+    u115 = U115Pan()
+    target_dir, remote_path = resolve_u115_target_dir(u115, remote_root, book_dir.name)
     write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", "115 上传开始", "115", remote_path))
     episode_urls: dict[str, str] = {}
     for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
@@ -920,14 +912,14 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
             raise TingBookSyncError(f"115 上传前本地文件不存在: {filename}")
         write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", f"115 上传中: {filename}", "115", remote_path))
         try:
-            uploaded = storage_chain.upload_file(target_dir, local_file, new_name=Path(filename).name)
+            uploaded = u115.upload(target_dir, local_file, new_name=Path(filename).name)
         except Exception as exc:
             raise TingBookSyncError(f"115 上传异常: {filename}: {exc}") from exc
         if not uploaded:
             raise TingBookSyncError(f"115 上传失败，MoviePilot 未返回文件项: {filename}")
         pickcode = str(getattr(uploaded, "pickcode", "") or "")
         if not pickcode:
-            detail = storage_chain.get_file_item("u115", Path(str(getattr(uploaded, "path", "") or Path(str(getattr(target_dir, "path", remote_path))) / Path(filename).name)))
+            detail = u115.get_item(Path(str(getattr(uploaded, "path", "") or Path(str(getattr(target_dir, "path", remote_path))) / Path(filename).name)))
             pickcode = str(getattr(detail, "pickcode", "") or "")
         if not pickcode:
             raise TingBookSyncError(f"115 上传成功但未返回 pickcode: {filename}")
@@ -935,6 +927,24 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
     write_json(book_dir / EPISODE_URLS_FILENAME, episode_urls)
     write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploaded", "uploaded", "115 上传完成", "115", remote_path))
     return UploadResult(book_dir, task_id, "uploaded", remote_path, "115 upload completed", True)
+
+
+def resolve_u115_target_dir(u115: Any, remote_root: str, book_name: str) -> tuple[Any, str]:
+    base_remote_root = normalize_remote_root(remote_root)
+    remote_path = join_remote_root(base_remote_root, book_name)
+    try:
+        root_dir = u115.get_folder(Path(base_remote_root))
+    except Exception as exc:
+        raise TingBookSyncError(f"无法创建或获取 115 根目录: {base_remote_root}，请确认 115 已登录且目录可访问。原始错误: {exc}") from exc
+    if not root_dir:
+        raise TingBookSyncError(f"无法创建或获取 115 根目录: {base_remote_root}，请确认 115 已登录、115 OpenAPI 可用，并且该目录存在或允许创建。")
+    try:
+        target_dir = u115.get_folder(Path(remote_path))
+    except Exception:
+        target_dir = None
+    if target_dir:
+        return target_dir, remote_path
+    return root_dir, base_remote_root
 
 
 def resolve_u115_download_url(pickcode: str) -> str:

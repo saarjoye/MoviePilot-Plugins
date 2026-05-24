@@ -1,7 +1,7 @@
 ﻿{
   "id": "tingbooksync",
   "name": "听书同步",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。",
   "author": "wYw",
   "level": 1,
