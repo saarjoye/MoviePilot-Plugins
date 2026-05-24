@@ -114,14 +114,15 @@
   },
   "TingBookSync": {
     "name": "听书同步",
-    "description": "扫描听书系统输出目录，dry-run 上传并生成 STRM。",
+    "description": "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。",
     "labels": "听书,工具",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v0.1.1": "TingBookSync 0.1.1 author changed to wYw"
+      "v0.1.1": "TingBookSync 0.1.1 author changed to wYw",
+      "v0.1.2": "TingBookSync 0.1.2 使用目录选择配置并按下载分类生成 STRM"
     },
     "v2": true
   }

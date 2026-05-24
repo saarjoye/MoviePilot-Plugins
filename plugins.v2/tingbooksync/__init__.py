@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -67,9 +67,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
-    plugin_desc = "扫描听书系统输出目录，dry-run 上传并生成 STRM。"
+    plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -151,6 +151,7 @@ class TingBookSync(_PluginBase):
                     output_root=Path(strm_output_dir),
                     remote_root=str(config["target_115_dir"]),
                     overwrite=bool(config["overwrite_strm"]),
+                    download_root=Path(watch_dir),
                 )
                 item["status"] = "strm_generated"
                 item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
@@ -173,22 +174,73 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_form_schema() -> list[dict[str, Any]]:
+    directory_items = get_directory_options()
+    remote_items = get_remote_directory_options()
     return [
         {
             "component": "VForm",
             "content": [
                 {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-                {"component": "VTextField", "props": {"model": "watch_dir", "label": "听书输出目录"}},
-                {"component": "VTextField", "props": {"model": "strm_output_dir", "label": "STRM 输出目录"}},
-                {"component": "VTextField", "props": {"model": "target_115_dir", "label": "115 目标目录"}},
+                {
+                    "component": "VSelect",
+                    "props": {
+                        "model": "watch_dir",
+                        "label": "下载监听目录",
+                        "items": directory_items,
+                        "placeholder": "选择听书系统下载完成后的监听根目录",
+                        "clearable": True,
+                    },
+                },
+                {
+                    "component": "VSelect",
+                    "props": {
+                        "model": "strm_output_dir",
+                        "label": "STRM 生成目录",
+                        "items": directory_items,
+                        "placeholder": "选择 STRM 根目录，将自动按下载目录分类建文件夹",
+                        "clearable": True,
+                    },
+                },
+                {
+                    "component": "VSelect",
+                    "props": {
+                        "model": "target_115_dir",
+                        "label": "115 目标目录",
+                        "items": remote_items,
+                        "placeholder": "选择或保留 /Audiobooks",
+                        "clearable": True,
+                    },
+                },
                 {"component": "VTextField", "props": {"model": "scan_interval", "label": "扫描间隔（秒）", "type": "number"}},
                 {"component": "VTextField", "props": {"model": "min_file_count", "label": "最少音频数", "type": "number"}},
                 {"component": "VSwitch", "props": {"model": "move_completed", "label": "完成后移动目录"}},
                 {"component": "VSwitch", "props": {"model": "overwrite_strm", "label": "覆盖已有 STRM"}},
-                {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，仅扫描不上传"}},
+                {"component": "VSwitch", "props": {"model": "dry_run", "label": "Dry-run，模拟上传并生成 STRM"}},
             ],
         }
     ]
+
+
+def get_directory_options() -> list[str]:
+    options: list[str] = []
+    try:
+        from app.helper.directory import DirectoryHelper
+        for directory in DirectoryHelper().get_dirs():
+            for attr in ("download_path", "library_path", "target_path"):
+                value = str(getattr(directory, attr, "") or "").strip()
+                if value and value not in options:
+                    options.append(value)
+    except Exception:
+        pass
+    return options
+
+
+def get_remote_directory_options() -> list[str]:
+    options = ["/Audiobooks"]
+    for value in get_directory_options():
+        if value.startswith("/") and value not in options:
+            options.append(value)
+    return options
 
 
 def now_iso() -> str:
@@ -245,11 +297,15 @@ def sync_payload(task_id: str, status: str, stage: str, message: str = "", provi
 
 def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult]:
     staging = library / "staging"
-    if not staging.exists():
-        raise TingBookSyncError(f"staging 目录不存在: {staging}")
+    scan_root = staging if staging.exists() else library
+    if not scan_root.exists():
+        raise TingBookSyncError(f"监听目录不存在: {scan_root}")
     results: list[ScanResult] = []
-    for book_dir in sorted([path for path in staging.iterdir() if path.is_dir()], key=lambda item: item.name.lower()):
-        if book_dir.name.endswith(".tmp") or not (book_dir / READY_FILENAME).exists():
+    for ready_file in sorted(scan_root.rglob(READY_FILENAME), key=lambda item: str(item.parent).lower()):
+        book_dir = ready_file.parent
+        if book_dir.name.endswith(".tmp"):
+            continue
+        if any(part.endswith(".tmp") for part in book_dir.relative_to(scan_root).parts):
             continue
         task_id = ""
         try:
@@ -301,6 +357,8 @@ def strm_filename(filename: str) -> str:
 
 def join_remote_path(remote_root: str, book_name: str, filename: str) -> str:
     root = remote_root.strip().replace("\\", "/").rstrip("/")
+    if not root:
+        root = "/"
     if not root.startswith("/"):
         root = "/" + root
     path = Path(filename)
@@ -309,11 +367,41 @@ def join_remote_path(remote_root: str, book_name: str, filename: str) -> str:
     return f"{root}/{book_name}/{'/'.join(path.parts)}"
 
 
-def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115") -> StrmResult:
+def join_remote_root(remote_root: str, *parts: str) -> str:
+    root = remote_root.strip().replace("\\", "/").rstrip("/")
+    if not root:
+        root = "/"
+    if not root.startswith("/"):
+        root = "/" + root
+    safe_parts = []
+    for part in parts:
+        path = Path(str(part))
+        if path.is_absolute() or ".." in path.parts:
+            raise TingBookSyncError(f"路径必须是安全相对路径: {part}")
+        value = "/".join(path.parts).strip("/")
+        if value:
+            safe_parts.append(value)
+    return "/".join([root.rstrip("/"), *safe_parts]) or "/"
+
+
+def relative_category_dir(book_dir: Path, download_root: Path) -> Path:
+    scan_root = download_root / "staging" if (download_root / "staging").exists() else download_root
+    try:
+        relative_parent = book_dir.parent.relative_to(scan_root)
+    except ValueError:
+        return Path()
+    if str(relative_parent) in {"", "."}:
+        return Path()
+    return relative_parent
+
+
+def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115", download_root: Path | None = None) -> StrmResult:
     metadata = load_metadata(book_dir)
     validate_metadata(metadata, book_dir)
-    output_dir = output_root / book_dir.name
+    category_dir = relative_category_dir(book_dir, download_root) if download_root else Path()
+    output_dir = output_root / category_dir / book_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
+    remote_category_root = join_remote_root(remote_root, *category_dir.parts)
     created = 0
     skipped = 0
     for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
@@ -321,11 +409,12 @@ def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, ove
         if target.exists() and not overwrite:
             skipped += 1
             continue
-        target.write_text(join_remote_path(remote_root, book_dir.name, str(episode["filename"])) + "\n", encoding="utf-8")
+        target.write_text(join_remote_path(remote_category_root, book_dir.name, str(episode["filename"])) + "\n", encoding="utf-8")
         created += 1
     message = f"strm dry-run generated: created={created}, skipped={skipped}"
+    remote_book_path = join_remote_root(remote_category_root, book_dir.name)
     write_json(
         book_dir / SYNC_FILENAME,
-        sync_payload(str(metadata["taskId"]), "strm_generated", "strm_generated", message, provider, f"{remote_root.rstrip('/')}/{book_dir.name}", str(output_dir)),
+        sync_payload(str(metadata["taskId"]), "strm_generated", "strm_generated", message, provider, remote_book_path, str(output_dir)),
     )
     return StrmResult(book_dir, output_dir, created, skipped)
