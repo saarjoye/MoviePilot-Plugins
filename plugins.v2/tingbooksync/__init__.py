@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.24"
+PLUGIN_VERSION = "0.1.25"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -111,7 +111,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.24"
+    plugin_version = "0.1.25"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -141,8 +141,8 @@ class TingBookSync(_PluginBase):
             {"path": "/records", "endpoint": self.api_records, "methods": ["GET"], "summary": "读取整理记录", "auth": "bear"},
             {"path": "/records/reset", "endpoint": self.api_reset_record, "methods": ["POST"], "summary": "重置单本整理记录", "auth": "bear"},
             {"path": "/sync/reset", "endpoint": self.api_reset_sync, "methods": ["POST"], "summary": "重置已完成同步状态", "auth": "bear"},
-            {"path": "/play", "endpoint": self.api_play, "methods": ["GET"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
-            {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET"], "summary": "兼容旧 STRM token 302 跳转", "allow_anonymous": True},
+            {"path": "/play", "endpoint": self.api_play, "methods": ["GET", "HEAD"], "summary": "302 跳转到 115 临时下载地址", "allow_anonymous": True},
+            {"path": "/play/{token}", "endpoint": self.api_play, "methods": ["GET", "HEAD"], "summary": "兼容旧 STRM token 302 跳转", "allow_anonymous": True},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
         ]
@@ -291,7 +291,7 @@ class TingBookSync(_PluginBase):
         self._add_log("info", f"已重置完成态同步任务：{count} 个", "sync")
         return {"success": True, "message": f"已重置 {count} 个完成态任务，下次扫描会重新上传和生成 STRM。", "count": count}
 
-    def api_play(self, token: str = "", pickcode: str = ""):
+    def api_play(self, token: str = "", pickcode: str = "", request: Any = None):
         try:
             resolved_pickcode = str(pickcode or "").strip()
             if not resolved_pickcode:
@@ -303,7 +303,7 @@ class TingBookSync(_PluginBase):
                         raise exc
                     self._add_log("warning", "播放 token 使用旧签名，已按 pickcode 兼容跳转；建议重新生成 STRM", "play")
                 resolved_pickcode = str(payload["pickcode"])
-            location = resolve_u115_download_url(resolved_pickcode)
+            location = resolve_u115_download_url(resolved_pickcode, request_user_agent(request))
             try:
                 from starlette.responses import RedirectResponse
 
@@ -313,9 +313,9 @@ class TingBookSync(_PluginBase):
         except Exception as exc:
             self._add_log("error", f"302 播放地址生成失败：{exc}", "play")
             try:
-                from starlette.responses import PlainTextResponse
+                from starlette.responses import JSONResponse
 
-                return PlainTextResponse(str(exc), status_code=404)
+                return JSONResponse({"success": False, "message": str(exc)}, status_code=500)
             except Exception:
                 return {"success": False, "message": str(exc)}
 
@@ -634,6 +634,18 @@ def pickcode_from_play_url(url: str) -> str:
     except Exception:
         return ""
     return str(payload.get("pickcode") or "").strip()
+
+
+def request_user_agent(request: Any = None) -> str:
+    if not request:
+        return ""
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return ""
+    try:
+        return str(headers.get("User-Agent") or headers.get("user-agent") or "").strip()
+    except Exception:
+        return ""
 
 
 def write_episode_pickcodes(book_dir: Path, pickcodes: dict[str, str], public_base_url: str, secret: str) -> dict[str, str]:
@@ -1575,16 +1587,27 @@ def resolve_u115_target_dir(u115: Any, remote_root: str, book_name: str) -> tupl
     return root_dir, base_remote_root
 
 
-def resolve_u115_download_url(pickcode: str) -> str:
+def resolve_u115_download_url(pickcode: str, user_agent: str = "") -> str:
+    normalized_pickcode = str(pickcode or "").strip().lower()
+    if not normalized_pickcode:
+        raise TingBookSyncError("缺少 pickcode")
+    if len(normalized_pickcode) != 17 or not normalized_pickcode.isalnum():
+        raise TingBookSyncError(f"pickcode 格式无效: {pickcode}")
     try:
         from app.modules.filemanager.storages.u115 import U115Pan
     except Exception as exc:
         raise TingBookSyncError(f"无法导入 u115 存储模块：{exc}") from exc
     client = U115Pan()
-    download_info = client._request_api("POST", "/open/ufile/downurl", "data", data={"pick_code": pickcode})
+    kwargs: dict[str, Any] = {"data": {"pick_code": normalized_pickcode}}
+    if user_agent:
+        kwargs["headers"] = {"User-Agent": user_agent}
+    download_info = client._request_api("POST", "/open/ufile/downurl", "data", **kwargs)
     if not download_info:
         raise TingBookSyncError("115 下载链接获取失败")
-    location = list(download_info.values())[0].get("url", {}).get("url")
+    try:
+        location = list(download_info.values())[0].get("url", {}).get("url")
+    except Exception as exc:
+        raise TingBookSyncError("115 下载链接响应格式异常") from exc
     if not location:
         raise TingBookSyncError("115 下载链接为空")
     return str(location)
