@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.20"
+PLUGIN_VERSION = "0.1.21"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -111,7 +111,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.20"
+    plugin_version = "0.1.21"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -232,12 +232,15 @@ class TingBookSync(_PluginBase):
             records = [item for item in records if str(item.get("status") or "") == status_filter]
         return {"success": True, "items": records[:size], "total": len(records)}
 
-    def api_reset_record(self, bookDir: str = "", book_dir: str = "") -> dict[str, Any]:
+    def api_reset_record(self, bookDir: str = "", book_dir: str = "", mode: str = "strm") -> dict[str, Any]:
         config = normalize_config(getattr(self, "_config", {}))
         watch_dir = str(config["watch_dir"]).strip()
+        strm_output_dir = str(config["strm_output_dir"]).strip()
         raw_book_dir = str(bookDir or book_dir or "").strip()
         if not watch_dir:
             return {"success": False, "message": "下载监听目录为空，无法重置整理记录"}
+        if not strm_output_dir:
+            return {"success": False, "message": "STRM 生成目录为空，无法重新生成 STRM"}
         if not raw_book_dir:
             return {"success": False, "message": "缺少 bookDir"}
         target = Path(raw_book_dir)
@@ -245,14 +248,25 @@ class TingBookSync(_PluginBase):
         scan_root = watch_root / "staging" if (watch_root / "staging").exists() else watch_root
         if not path_is_under(target, scan_root):
             return {"success": False, "message": "只能处理下载监听目录下的听书记录"}
+        action = str(mode or "strm").strip().lower()
         try:
-            strm_root = Path(str(config["strm_output_dir"])) if str(config["strm_output_dir"]).strip() else None
-            count = reset_book_sync_state(target, strm_root)
+            if action == "reupload":
+                strm_root = Path(strm_output_dir)
+                reset_book_sync_state(target, strm_root)
+                upload_result = upload_book_to_u115(target, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+                episode_url_map = read_episode_url_map(target, str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+                strm_result = generate_strm_files(target, strm_root, str(config["target_115_dir"]), overwrite=True, download_root=Path(watch_dir), episode_url_map=episode_url_map, require_episode_urls=True)
+                self._add_log("info", f"已重新上传并生成 STRM：{target.name} created={strm_result.created}, skipped={strm_result.skipped}", "records")
+                return {"success": True, "message": "已重新上传到 115 并生成 STRM", "status": "strm_generated", "remotePath": upload_result.remote_path, "strmPath": str(strm_result.output_dir)}
+            if action != "strm":
+                return {"success": False, "message": "不支持的整理模式"}
+            episode_url_map = ensure_episode_url_map_from_u115(target, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+            strm_result = generate_strm_files(target, Path(strm_output_dir), str(config["target_115_dir"]), overwrite=True, download_root=Path(watch_dir), episode_url_map=episode_url_map, require_episode_urls=True)
         except Exception as exc:
             self._add_log("error", f"单本重新处理失败：{target.name}，{exc}", "records")
             return {"success": False, "message": str(exc)}
-        self._add_log("info", f"已重置单本整理记录：{target.name}，删除状态文件 {count} 个；下次扫描会重新上传并生成 STRM", "records")
-        return {"success": True, "message": "已重置该书整理记录，下次扫描会重新上传并生成 STRM", "count": count}
+        self._add_log("info", f"已重新生成 STRM：{target.name} created={strm_result.created}, skipped={strm_result.skipped}", "records")
+        return {"success": True, "message": "已使用现有 115 文件重新生成 STRM", "status": "strm_generated", "strmPath": str(strm_result.output_dir)}
 
     def api_reset_sync(self) -> dict[str, Any]:
         config = normalize_config(getattr(self, "_config", {}))
@@ -367,7 +381,7 @@ class TingBookSync(_PluginBase):
                         item["message"] = f"{item['message']}; {refresh_message}"
                         self._add_log("info", f"{refresh_message}：{result.book_dir.name}", "ads")
                 if item["status"] == "uploaded" and strm_output_dir:
-                    episode_url_map = read_episode_url_map(result.book_dir)
+                    episode_url_map = read_episode_url_map(result.book_dir, str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
                     strm_result = generate_strm_files(
                         book_dir=result.book_dir,
                         output_root=Path(strm_output_dir),
@@ -473,7 +487,7 @@ def public_play_url(base_url: str, token: str) -> str:
     return f"{base_url}{path}" if base_url else path
 
 
-def read_episode_url_map(book_dir: Path) -> dict[str, str]:
+def read_episode_url_map(book_dir: Path, public_base_url: str = "", secret: str = "") -> dict[str, str]:
     path = book_dir / EPISODE_URLS_FILENAME
     if not path.exists():
         return {}
@@ -481,7 +495,111 @@ def read_episode_url_map(book_dir: Path) -> dict[str, str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    changed = False
+    for filename, value in data.items():
+        text = str(value or "")
+        if isinstance(value, dict):
+            pickcode = str(value.get("pickcode") or "").strip()
+            url = str(value.get("url") or "").strip()
+            if pickcode and secret:
+                result[str(filename)] = public_play_url(public_base_url, make_play_token(pickcode, secret))
+            elif url:
+                result[str(filename)] = url
+            continue
+        pickcode = pickcode_from_play_url(text)
+        if pickcode and secret:
+            result[str(filename)] = public_play_url(public_base_url, make_play_token(pickcode, secret))
+            data[filename] = {"pickcode": pickcode, "url": result[str(filename)]}
+            changed = True
+        else:
+            result[str(filename)] = text
+    if changed:
+        write_json(path, data)
+    return result
+
+
+def read_episode_pickcodes(book_dir: Path) -> dict[str, str]:
+    path = book_dir / EPISODE_URLS_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for filename, value in data.items():
+        pickcode = ""
+        if isinstance(value, dict):
+            pickcode = str(value.get("pickcode") or "").strip()
+        else:
+            pickcode = pickcode_from_play_url(str(value or ""))
+        if pickcode:
+            result[str(filename)] = pickcode
+    return result
+
+
+def pickcode_from_play_url(url: str) -> str:
+    text = str(url or "").strip()
+    if "/play/" not in text:
+        return ""
+    token = text.rsplit("/play/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    try:
+        body = token.split(".", 1)[0]
+        payload = json.loads(b64url_decode(body).decode("utf-8"))
+    except Exception:
+        return ""
+    return str(payload.get("pickcode") or "").strip()
+
+
+def write_episode_pickcodes(book_dir: Path, pickcodes: dict[str, str], public_base_url: str, secret: str) -> dict[str, str]:
+    payload: dict[str, dict[str, str]] = {}
+    urls: dict[str, str] = {}
+    for filename, pickcode in pickcodes.items():
+        token_url = public_play_url(public_base_url, make_play_token(str(pickcode), secret))
+        payload[str(filename)] = {"pickcode": str(pickcode), "url": token_url}
+        urls[str(filename)] = token_url
+    write_json(book_dir / EPISODE_URLS_FILENAME, payload)
+    return urls
+
+
+def ensure_episode_url_map_from_u115(book_dir: Path, remote_root: str, public_base_url: str, secret: str) -> dict[str, str]:
+    metadata = load_metadata(book_dir)
+    existing = read_episode_pickcodes(book_dir)
+    missing = [str(item["filename"]) for item in metadata["episodes"] if not existing.get(str(item["filename"]))]
+    if missing:
+        found = find_existing_u115_pickcodes(book_dir, remote_root, missing)
+        existing.update(found)
+    still_missing = [str(item["filename"]) for item in metadata["episodes"] if not existing.get(str(item["filename"]))]
+    if still_missing:
+        raise TingBookSyncError("无法从本地记录或 115 已有文件获取 pickcode，请使用“重新上传并生成 STRM”： " + ", ".join(still_missing[:5]))
+    return write_episode_pickcodes(book_dir, existing, public_base_url, secret)
+
+
+def find_existing_u115_pickcodes(book_dir: Path, remote_root: str, filenames: list[str]) -> dict[str, str]:
+    try:
+        from app.modules.filemanager.storages.u115 import U115Pan
+    except Exception as exc:
+        raise TingBookSyncError(f"无法导入 MoviePilot u115 存储模块：{exc}") from exc
+    u115 = U115Pan()
+    base_remote_root = normalize_remote_root(remote_root)
+    candidates = [join_remote_root(base_remote_root, book_dir.name), base_remote_root]
+    result: dict[str, str] = {}
+    for filename in filenames:
+        for directory in candidates:
+            try:
+                item = u115.get_item(Path(join_remote_root(directory, Path(filename).name)))
+            except Exception:
+                item = None
+            pickcode = str(getattr(item, "pickcode", "") or "") if item else ""
+            if pickcode:
+                result[filename] = pickcode
+                break
+    return result
 
 
 def build_form_schema() -> list[dict[str, Any]]:
@@ -1309,7 +1427,7 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
     u115 = U115Pan()
     target_dir, remote_path = resolve_u115_target_dir(u115, remote_root, book_dir.name)
     write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", "115 上传开始", "115", remote_path))
-    episode_urls: dict[str, str] = {}
+    episode_pickcodes: dict[str, str] = {}
     for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
         filename = str(episode["filename"])
         local_file = book_dir / filename
@@ -1328,8 +1446,8 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
             pickcode = str(getattr(detail, "pickcode", "") or "")
         if not pickcode:
             raise TingBookSyncError(f"115 上传成功但未返回 pickcode: {filename}")
-        episode_urls[filename] = public_play_url(public_base_url, make_play_token(pickcode, secret))
-    write_json(book_dir / EPISODE_URLS_FILENAME, episode_urls)
+        episode_pickcodes[filename] = pickcode
+    write_episode_pickcodes(book_dir, episode_pickcodes, public_base_url, secret)
     write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploaded", "uploaded", "115 上传完成", "115", remote_path))
     return UploadResult(book_dir, task_id, "uploaded", remote_path, "115 upload completed", True)
 
