@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.11"
+PLUGIN_VERSION = "0.1.12"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -106,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.11"
+    plugin_version = "0.1.12"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -251,6 +251,7 @@ class TingBookSync(_PluginBase):
             for item in adopted:
                 self._add_log("info", f"{item.message}，来源={item.source_name}", "adopt")
         results = scan_ready_books(Path(watch_dir), write_sync=True)
+        self._add_log("info", f"发现可处理任务：{len(results)} 个", "scan")
         payload = []
         strm_output_dir = str(config["strm_output_dir"]).strip()
         for result in results:
@@ -260,27 +261,33 @@ class TingBookSync(_PluginBase):
                 "status": result.status,
                 "message": result.message,
             }
-            if result.status == "scanning":
-                upload_result = upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
-                item["status"] = upload_result.status
-                item["message"] = upload_result.message
-                item["remotePath"] = upload_result.remote_path
-                self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
-            if item["status"] == "uploaded" and strm_output_dir:
-                episode_url_map = read_episode_url_map(result.book_dir)
-                strm_result = generate_strm_files(
-                    book_dir=result.book_dir,
-                    output_root=Path(strm_output_dir),
-                    remote_root=str(config["target_115_dir"]),
-                    overwrite=bool(config["overwrite_strm"]),
-                    download_root=Path(watch_dir),
-                    episode_url_map=episode_url_map,
-                    require_episode_urls=True,
-                )
-                item["status"] = "strm_generated"
-                item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
-                item["strmPath"] = str(strm_result.output_dir)
-                self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
+            try:
+                if result.status == "scanning":
+                    upload_result = upload_book_to_u115(result.book_dir, str(config["target_115_dir"]), str(config.get("public_base_url") or ""), str(config["play_token_secret"]))
+                    item["status"] = upload_result.status
+                    item["message"] = upload_result.message
+                    item["remotePath"] = upload_result.remote_path
+                    self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
+                if item["status"] == "uploaded" and strm_output_dir:
+                    episode_url_map = read_episode_url_map(result.book_dir)
+                    strm_result = generate_strm_files(
+                        book_dir=result.book_dir,
+                        output_root=Path(strm_output_dir),
+                        remote_root=str(config["target_115_dir"]),
+                        overwrite=bool(config["overwrite_strm"]),
+                        download_root=Path(watch_dir),
+                        episode_url_map=episode_url_map,
+                        require_episode_urls=True,
+                    )
+                    item["status"] = "strm_generated"
+                    item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
+                    item["strmPath"] = str(strm_result.output_dir)
+                    self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
+            except Exception as exc:
+                item["status"] = "failed"
+                item["message"] = str(exc)
+                write_json(result.book_dir / SYNC_FILENAME, sync_payload(result.task_id, "failed", "failed", str(exc), "115", str(item.get("remotePath", ""))))
+                self._add_log("error", f"处理失败：{result.book_dir.name}，{exc}", "scan")
             if item["status"] == "failed":
                 self._add_log("error", f"扫描失败：{result.book_dir.name}，{result.message}", "scan")
             payload.append(item)
@@ -893,20 +900,26 @@ def upload_book_to_u115(book_dir: Path, remote_root: str, public_base_url: str, 
         raise TingBookSyncError(f"无法导入 MoviePilot 存储链：{exc}") from exc
     metadata = load_metadata(book_dir)
     task_id = str(metadata["taskId"])
-    target_dir = StorageChain().get_folder("u115", Path(remote_root) / book_dir.name)
+    storage_chain = StorageChain()
+    base_remote_root = normalize_remote_root(remote_root)
+    remote_path = join_remote_root(base_remote_root, book_dir.name)
+    target_dir = storage_chain.get_folder("u115", Path(remote_path))
     if not target_dir:
-        raise TingBookSyncError(f"无法创建或获取 115 目标目录: {remote_root}/{book_dir.name}")
-    remote_path = f"{remote_root.rstrip('/')}/{book_dir.name}"
+        fallback_dir = storage_chain.get_folder("u115", Path(base_remote_root))
+        if not fallback_dir:
+            raise TingBookSyncError(f"无法创建或获取 115 目标目录: {remote_path}")
+        target_dir = fallback_dir
+        remote_path = base_remote_root
     write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, "uploading", "uploading", "115 上传开始", "115", remote_path))
     episode_urls: dict[str, str] = {}
     for episode in sorted(metadata["episodes"], key=lambda item: int(item["index"])):
         filename = str(episode["filename"])
-        uploaded = StorageChain().upload_file(target_dir, book_dir / filename, new_name=Path(filename).name)
+        uploaded = storage_chain.upload_file(target_dir, book_dir / filename, new_name=Path(filename).name)
         if not uploaded:
             raise TingBookSyncError(f"115 上传失败: {filename}")
         pickcode = str(getattr(uploaded, "pickcode", "") or "")
         if not pickcode:
-            detail = StorageChain().get_file_item("u115", Path(str(getattr(uploaded, "path", "") or Path(target_dir.path) / Path(filename).name)))
+            detail = storage_chain.get_file_item("u115", Path(str(getattr(uploaded, "path", "") or Path(str(getattr(target_dir, "path", remote_path))) / Path(filename).name)))
             pickcode = str(getattr(detail, "pickcode", "") or "")
         if not pickcode:
             raise TingBookSyncError(f"115 上传成功但未返回 pickcode: {filename}")
@@ -939,11 +952,7 @@ def strm_filename(filename: str) -> str:
 
 
 def join_remote_path(remote_root: str, book_name: str, filename: str) -> str:
-    root = remote_root.strip().replace("\\", "/").rstrip("/")
-    if not root:
-        root = "/"
-    if not root.startswith("/"):
-        root = "/" + root
+    root = normalize_remote_root(remote_root)
     path = Path(filename)
     if path.is_absolute() or ".." in path.parts:
         raise TingBookSyncError(f"路径必须是安全相对路径: {filename}")
@@ -951,11 +960,7 @@ def join_remote_path(remote_root: str, book_name: str, filename: str) -> str:
 
 
 def join_remote_root(remote_root: str, *parts: str) -> str:
-    root = remote_root.strip().replace("\\", "/").rstrip("/")
-    if not root:
-        root = "/"
-    if not root.startswith("/"):
-        root = "/" + root
+    root = normalize_remote_root(remote_root)
     safe_parts = []
     for part in parts:
         path = Path(str(part))
@@ -965,6 +970,15 @@ def join_remote_root(remote_root: str, *parts: str) -> str:
         if value:
             safe_parts.append(value)
     return "/".join([root.rstrip("/"), *safe_parts]) or "/"
+
+
+def normalize_remote_root(remote_root: str) -> str:
+    root = re.sub(r"/+", "/", str(remote_root or "").strip().replace("\\", "/")).rstrip("/")
+    if not root:
+        root = "/"
+    if not root.startswith("/"):
+        root = "/" + root
+    return root
 
 
 def relative_category_dir(book_dir: Path, download_root: Path) -> Path:
