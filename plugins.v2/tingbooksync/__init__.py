@@ -14,12 +14,13 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.6"
+PLUGIN_VERSION = "0.1.7"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
 METADATA_FILENAME = "metadata.json"
 CN_TZ = timezone(timedelta(hours=8))
+LOG_LIMIT = 200
 
 
 class TingBookSyncError(Exception):
@@ -69,7 +70,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，dry-run 上传并按分类生成 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -78,6 +79,8 @@ class TingBookSync(_PluginBase):
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         self._config = normalize_config(config or {})
         self._last_results: list[dict[str, str]] = []
+        self._logs: list[dict[str, str]] = []
+        self._add_log("info", "插件已初始化", "init")
 
     def get_state(self) -> bool:
         return bool(self._config.get("enabled"))
@@ -90,6 +93,8 @@ class TingBookSync(_PluginBase):
             {"path": "/state", "endpoint": self.api_state, "methods": ["GET"], "summary": "读取听书同步配置", "auth": "bear"},
             {"path": "/storages", "endpoint": self.api_storages, "methods": ["GET"], "summary": "读取可用资源存储", "auth": "bear"},
             {"path": "/browse", "endpoint": self.api_browse, "methods": ["GET"], "summary": "浏览 MP 资源目录", "auth": "bear"},
+            {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"], "summary": "读取运行日志", "auth": "bear"},
+            {"path": "/logs/clear", "endpoint": self.api_clear_logs, "methods": ["POST"], "summary": "清空运行日志", "auth": "bear"},
             {"path": "/page_browse", "endpoint": self.page_browse, "methods": ["GET"], "summary": "切换资源目录浏览位置", "auth": "bear"},
             {"path": "/page_select", "endpoint": self.page_select, "methods": ["GET"], "summary": "选择资源目录到插件配置", "auth": "bear"},
         ]
@@ -130,17 +135,32 @@ class TingBookSync(_PluginBase):
             "success": True,
             "config": normalize_config(getattr(self, "_config", {})),
             "last_results": list(getattr(self, "_last_results", [])),
+            "logs": list(getattr(self, "_logs", []))[-50:],
             "dry_run_only": True,
         }
 
     def api_storages(self) -> dict[str, Any]:
         return {"success": True, "items": get_storage_options()}
 
+    def api_logs(self, limit: int | str = 100) -> dict[str, Any]:
+        try:
+            size = max(1, min(200, int(limit)))
+        except Exception:
+            size = 100
+        items = list(getattr(self, "_logs", []))[-size:]
+        return {"success": True, "items": items}
+
+    def api_clear_logs(self) -> dict[str, Any]:
+        self._logs = []
+        self._add_log("info", "运行日志已清空", "logs")
+        return {"success": True, "message": "运行日志已清空"}
+
     def api_browse(self, path: str = "/", storage: str = "local", dirs_only: bool | str = False) -> dict[str, Any]:
         try:
             items = browse_storage_path(path=path or "/", storage=storage or "local", dirs_only=parse_bool(dirs_only))
             return {"success": True, "storage": storage or "local", "path": path or "/", "items": items}
         except Exception as exc:
+            self._add_log("error", f"目录读取失败：{storage or 'local'}:{path or '/'}，{exc}", "browse")
             return {"success": False, "storage": storage or "local", "path": path or "/", "items": [], "message": str(exc)}
 
     def page_browse(self, path: str = "/", storage: str = "local") -> dict[str, Any]:
@@ -156,18 +176,23 @@ class TingBookSync(_PluginBase):
         self._config = config
         if hasattr(self, "update_config"):
             self.update_config(config)
+        self._add_log("info", f"已选择 {field}: {path or ''}", "config")
         return {"success": True, "message": "ok"}
 
     def scan_once(self) -> list[dict[str, str]]:
         config = normalize_config(getattr(self, "_config", {}))
         if not config["enabled"]:
             self._last_results = []
+            self._add_log("info", "插件未启用，跳过扫描", "scan")
             return []
         if not config["dry_run"]:
+            self._add_log("error", "阻止非 dry-run 执行", "scan")
             raise TingBookSyncError("当前插件版本只允许 dry_run=true")
         watch_dir = str(config["watch_dir"]).strip()
         if not watch_dir:
+            self._add_log("error", "下载监听目录为空，无法扫描", "scan")
             raise TingBookSyncError("watch_dir 不能为空")
+        self._add_log("info", f"开始扫描下载监听目录：{watch_dir}", "scan")
         results = scan_ready_books(Path(watch_dir), write_sync=True)
         payload = []
         strm_output_dir = str(config["strm_output_dir"]).strip()
@@ -183,6 +208,7 @@ class TingBookSync(_PluginBase):
                 item["status"] = upload_result.status
                 item["message"] = upload_result.message
                 item["remotePath"] = upload_result.remote_path
+                self._add_log("info", f"上传 dry-run 完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
             if item["status"] == "uploaded" and strm_output_dir:
                 strm_result = generate_strm_files(
                     book_dir=result.book_dir,
@@ -194,9 +220,24 @@ class TingBookSync(_PluginBase):
                 item["status"] = "strm_generated"
                 item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
                 item["strmPath"] = str(strm_result.output_dir)
+                self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
+            if item["status"] == "failed":
+                self._add_log("error", f"扫描失败：{result.book_dir.name}，{result.message}", "scan")
             payload.append(item)
         self._last_results = payload
+        self._add_log("info", f"扫描完成：共 {len(payload)} 个结果", "scan")
         return payload
+
+    def _add_log(self, level: str, message: str, stage: str = "runtime") -> None:
+        entry = {
+            "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
+            "level": str(level or "info"),
+            "stage": str(stage or "runtime"),
+            "message": str(message or "")[:500],
+        }
+        logs = list(getattr(self, "_logs", []))
+        logs.append(entry)
+        self._logs = logs[-LOG_LIMIT:]
 
 
 def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
