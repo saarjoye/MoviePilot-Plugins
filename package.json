@@ -116,7 +116,7 @@
     "name": "听书同步",
     "description": "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。",
     "labels": "听书,工具",
-    "version": "0.1.12",
+    "version": "0.1.13",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
@@ -132,7 +132,8 @@
       "v0.1.9": "TingBookSync 0.1.9 真实上传 115 后生成 302 STRM",
       "v0.1.10": "TingBookSync 0.1.10 修复未真实上传 115 时生成 STRM 的假成功",
       "v0.1.11": "TingBookSync 0.1.11 移除模拟上传并固定真实上传 115",
-      "v0.1.12": "TingBookSync 0.1.12 修复 115 子目录创建失败刷屏并降级上传"
+      "v0.1.12": "TingBookSync 0.1.12 修复 115 子目录创建失败刷屏并降级上传",
+      "v0.1.13": "TingBookSync 0.1.13 重做插件详情页 UI 和目录选择弹窗"
     },
     "v2": true
   }
