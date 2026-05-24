@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.15"
+PLUGIN_VERSION = "0.1.16"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -106,7 +106,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.15"
+    plugin_version = "0.1.16"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -269,6 +269,8 @@ class TingBookSync(_PluginBase):
                     item["message"] = upload_result.message
                     item["remotePath"] = upload_result.remote_path
                     self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
+                elif result.status == "strm_generated":
+                    self._add_log("info", f"已完成，跳过上传：{result.book_dir.name}", "scan")
                 if item["status"] == "uploaded" and strm_output_dir:
                     episode_url_map = read_episode_url_map(result.book_dir)
                     strm_result = generate_strm_files(
@@ -871,9 +873,15 @@ def scan_ready_books(library: Path, write_sync: bool = False) -> list[ScanResult
             metadata = load_metadata(book_dir)
             task_id = str(metadata.get("taskId", ""))
             validate_metadata(metadata, book_dir)
-            status = "scanning"
-            message = "ready directory is valid"
-            if write_sync:
+            existing_sync = read_sync_status(book_dir)
+            existing_status = str(existing_sync.get("status") or "")
+            if existing_status in {"uploaded", "strm_generated"}:
+                status = existing_status
+                message = str(existing_sync.get("message") or f"already {existing_status}")
+            else:
+                status = "scanning"
+                message = "ready directory is valid"
+            if write_sync and status == "scanning":
                 write_json(book_dir / SYNC_FILENAME, sync_payload(task_id, status, "scanning", message))
         except TingBookSyncError as exc:
             status = "failed"
