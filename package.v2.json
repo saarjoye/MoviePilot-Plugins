@@ -112,10 +112,10 @@
     "labels": "听书,工具",
     "version": "0.1.1",
     "icon": "tingbooksync.png",
-    "author": "saarjoye",
+    "author": "wYw",
     "level": 1,
     "history": {
-      "v0.1.1": "TingBookSync 0.1.1 dry-run publish"
+      "v0.1.1": "TingBookSync 0.1.1 author changed to wYw"
     }
   }
 }

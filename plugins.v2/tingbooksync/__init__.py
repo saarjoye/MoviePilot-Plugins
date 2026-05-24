@@ -70,7 +70,7 @@ class TingBookSync(_PluginBase):
     plugin_desc = "扫描听书系统输出目录，dry-run 上传并生成 STRM。"
     plugin_icon = "tingbooksync.png"
     plugin_version = "0.1.1"
-    plugin_author = "saarjoye"
+    plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
     auth_level = 1

@@ -3,7 +3,7 @@
   "name": "听书同步",
   "version": "0.1.1",
   "description": "扫描听书系统输出目录，dry-run 上传并生成 STRM。",
-  "author": "saarjoye",
+  "author": "wYw",
   "level": 1,
   "icon": "tingbooksync.png",
   "v2": true
