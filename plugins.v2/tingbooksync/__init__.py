@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - local import fallback
             self._config: dict[str, Any] = {}
 
 
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.1.10"
 SCHEMA_VERSION = 1
 READY_FILENAME = ".tingbook.ready"
 SYNC_FILENAME = ".tingbook.sync.json"
@@ -107,7 +107,7 @@ class TingBookSync(_PluginBase):
     plugin_name = "听书同步"
     plugin_desc = "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。"
     plugin_icon = "tingbooksync.png"
-    plugin_version = "0.1.9"
+    plugin_version = "0.1.10"
     plugin_author = "wYw"
     plugin_config_prefix = "tingbooksync_"
     plugin_order = 100
@@ -267,7 +267,7 @@ class TingBookSync(_PluginBase):
                 item["message"] = upload_result.message
                 item["remotePath"] = upload_result.remote_path
                 self._add_log("info", f"上传完成：{result.book_dir.name} -> {upload_result.remote_path}", "upload")
-            if item["status"] == "uploaded" and strm_output_dir:
+            if item["status"] == "uploaded" and strm_output_dir and not config["dry_run"]:
                 episode_url_map = read_episode_url_map(result.book_dir)
                 strm_result = generate_strm_files(
                     book_dir=result.book_dir,
@@ -276,11 +276,15 @@ class TingBookSync(_PluginBase):
                     overwrite=bool(config["overwrite_strm"]),
                     download_root=Path(watch_dir),
                     episode_url_map=episode_url_map,
+                    require_episode_urls=True,
                 )
                 item["status"] = "strm_generated"
                 item["message"] = f"strm created={strm_result.created}, skipped={strm_result.skipped}"
                 item["strmPath"] = str(strm_result.output_dir)
                 self._add_log("info", f"STRM 生成完成：{result.book_dir.name} created={strm_result.created}, skipped={strm_result.skipped}", "strm")
+            elif item["status"] == "uploaded" and strm_output_dir and config["dry_run"]:
+                item["message"] = f"{item['message']}; dry-run 不生成 STRM"
+                self._add_log("info", f"Dry-run 模拟上传完成，不生成 STRM: {result.book_dir.name}", "strm")
             if item["status"] == "failed":
                 self._add_log("error", f"扫描失败：{result.book_dir.name}，{result.message}", "scan")
             payload.append(item)
@@ -993,7 +997,7 @@ def relative_category_dir(book_dir: Path, download_root: Path) -> Path:
     return relative_parent
 
 
-def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115", download_root: Path | None = None, episode_url_map: dict[str, str] | None = None) -> StrmResult:
+def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, overwrite: bool = False, provider: str = "115", download_root: Path | None = None, episode_url_map: dict[str, str] | None = None, require_episode_urls: bool = False) -> StrmResult:
     metadata = load_metadata(book_dir)
     validate_metadata(metadata, book_dir)
     category_dir = relative_category_dir(book_dir, download_root) if download_root else Path()
@@ -1008,9 +1012,12 @@ def generate_strm_files(book_dir: Path, output_root: Path, remote_root: str, ove
             skipped += 1
             continue
         filename = str(episode["filename"])
-        target.write_text(((episode_url_map or {}).get(filename) or join_remote_path(remote_category_root, book_dir.name, filename)) + "\n", encoding="utf-8")
+        remote_uri = (episode_url_map or {}).get(filename)
+        if require_episode_urls and not remote_uri:
+            raise TingBookSyncError(f"STRM 缺少真实上传后的播放地址: {filename}")
+        target.write_text((remote_uri or join_remote_path(remote_category_root, book_dir.name, filename)) + "\n", encoding="utf-8")
         created += 1
-    message = f"strm dry-run generated: created={created}, skipped={skipped}"
+    message = f"strm generated: created={created}, skipped={skipped}"
     remote_book_path = join_remote_root(remote_category_root, book_dir.name)
     write_json(
         book_dir / SYNC_FILENAME,
