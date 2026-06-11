@@ -153,12 +153,13 @@
     "name": "DC助手多源版",
     "description": "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份",
     "labels": "Docker,工具",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/DockerCopilotHelperMulti.png",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v1.0.0": "DC助手多源版 1.0.0：新增多 DockerCopilot 源配置、跨源容器选择、更新通知、自动更新和自动备份"
+      "v1.0.0": "DC助手多源版 1.0.0：新增多 DockerCopilot 源配置、跨源容器选择、更新通知、自动更新和自动备份",
+      "v1.0.1": "DC助手多源版 1.0.1：按设计稿重构多源配置交互和详情页"
     },
     "v2": true
   }
