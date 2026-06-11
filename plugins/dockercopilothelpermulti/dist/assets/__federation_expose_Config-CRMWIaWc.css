@@ -1,0 +1,19 @@
+
+.dc-config[data-v-6d2d907e] {
+  max-height: 82vh;
+}
+.section-title[data-v-6d2d907e] {
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+.gap-2[data-v-6d2d907e] {
+  gap: 8px;
+}
+.source-card[data-v-6d2d907e] {
+  border-radius: 14px;
+}
+code[data-v-6d2d907e] {
+  background: rgba(var(--v-theme-primary), 0.08);
+  border-radius: 6px;
+  padding: 2px 6px;
+}

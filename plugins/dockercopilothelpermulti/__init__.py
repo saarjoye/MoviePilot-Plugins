@@ -22,7 +22,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     plugin_name = "DC助手多源版"
     plugin_desc = "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份"
     plugin_icon = "Docker_Copilot.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "dockercopilothelpermulti_"
@@ -46,9 +46,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     _interval = 10
     _sources: List[Dict[str, Any]] = []
     _sources_text = ""
-    _source_slots: Dict[str, Any] = {}
     _scheduler: Optional[BackgroundScheduler] = None
-    _source_slot_count = 5
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -71,15 +69,12 @@ class DockerCopilotHelperMulti(_PluginBase):
         self._intervallimit = config.get("intervallimit") or 6
         self._interval = config.get("interval") or 10
         self._sources = self._load_sources(config)
-        self._source_slots = self._build_source_slot_config(config, self._sources)
         self._sources_text = json.dumps(self._sources, ensure_ascii=False, indent=2) if self._sources else ""
+        self.__update_config()
 
         if not self._sources:
             logger.error("DC助手多源版服务结束：未配置可用 DockerCopilot 源")
             return False
-
-        if not self._has_source_slot_config(config):
-            self.__update_config()
 
         if self._enabled or self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -96,6 +91,10 @@ class DockerCopilotHelperMulti(_PluginBase):
 
     def get_state(self) -> bool:
         return self._enabled
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, Optional[str]]:
+        return "vue", "dist/assets"
 
     def __update_config(self):
         config = {
@@ -117,7 +116,6 @@ class DockerCopilotHelperMulti(_PluginBase):
             "intervallimit": self._intervallimit,
             "interval": self._interval
         }
-        config.update(self._source_slots)
         self.update_config(config)
 
     def _add_once_jobs(self):
@@ -175,7 +173,6 @@ class DockerCopilotHelperMulti(_PluginBase):
         self._intervallimit = config.get("intervallimit") or 6
         self._interval = config.get("interval") or 10
         self._sources = self._load_sources(config) if config else []
-        self._source_slots = self._build_source_slot_config(config, self._sources)
         self._sources_text = json.dumps(self._sources, ensure_ascii=False, indent=2) if self._sources else ""
 
     def _load_sources(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -214,7 +211,7 @@ class DockerCopilotHelperMulti(_PluginBase):
 
     def _parse_source_slots(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
         sources = []
-        for index in range(1, self._source_slot_count + 1):
+        for index in range(1, 101):
             prefix = f"source{index}"
             host = str(config.get(f"{prefix}_host") or "").strip().rstrip("/")
             secret_key = str(config.get(f"{prefix}_secretKey") or "").strip()
@@ -230,27 +227,6 @@ class DockerCopilotHelperMulti(_PluginBase):
                 "enabled": config.get(f"{prefix}_enabled", True) is not False
             })
         return sources
-
-    def _build_source_slot_config(self, config: Dict[str, Any], sources: List[Dict[str, Any]]) -> Dict[str, Any]:
-        slot_config = {}
-        for index in range(1, self._source_slot_count + 1):
-            prefix = f"source{index}"
-            source = sources[index - 1] if len(sources) >= index else {}
-            slot_config[f"{prefix}_enabled"] = config.get(
-                f"{prefix}_enabled",
-                source.get("enabled", True) if source else False
-            )
-            slot_config[f"{prefix}_id"] = config.get(f"{prefix}_id") or source.get("id") or f"pve_lxc_{index:02d}"
-            slot_config[f"{prefix}_name"] = config.get(f"{prefix}_name") or source.get("name") or f"PVE-LXC-{index:02d}"
-            slot_config[f"{prefix}_host"] = config.get(f"{prefix}_host") or source.get("host") or ""
-            slot_config[f"{prefix}_secretKey"] = config.get(f"{prefix}_secretKey") or source.get("secretKey") or ""
-        return slot_config
-
-    def _has_source_slot_config(self, config: Dict[str, Any]) -> bool:
-        return any(
-            f"source{index}_host" in config or f"source{index}_secretKey" in config
-            for index in range(1, self._source_slot_count + 1)
-        )
 
     @staticmethod
     def _parse_sources(value: Any) -> List[Dict[str, Any]]:
@@ -522,17 +498,15 @@ class DockerCopilotHelperMulti(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         pass
 
-    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        if not self._source_slots:
-            config = self.get_config() or {}
-            self._apply_config_snapshot(config)
+    def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
+        config = self.get_config() or {}
+        self._apply_config_snapshot(config)
+        if self.get_render_mode()[0] == "vue":
+            return None, self._build_form_defaults()
         container_items = self._build_container_items()
         source_items = self._build_source_items()
         source_summary = self._build_source_summary()
         form_defaults = self._build_form_defaults()
-        source_cards = []
-        for index in range(1, self._source_slot_count + 1):
-            source_cards.append(self._source_slot_card(index))
 
         return [
             {
@@ -545,6 +519,15 @@ class DockerCopilotHelperMulti(_PluginBase):
                             "type": "warning",
                             "variant": "tonal",
                             "text": "多源配置包含 DC 地址与 secretKey：secretKey 仅保存在 MP 插件配置中，日志与通知不输出明文。"
+                        }
+                    },
+                    self._section_title("DockerCopilot 源", "当前启用 Vue 配置页：点击“新增源”会在页面中新增 1 个 DC 源设置卡片。"),
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "info",
+                            "variant": "tonal",
+                            "text": "如你看到此后备页面，说明当前 MP 未加载插件远程组件。请确认 dist/assets/remoteEntry.js 已随插件安装。"
                         }
                     },
                     self._section_title("基础开关", "对应设计稿左侧基础开关区；保存后定时任务立即按新配置生效。"),
@@ -581,11 +564,6 @@ class DockerCopilotHelperMulti(_PluginBase):
                             self._select_col("backup_sources", "自动备份源范围", source_items,
                                              "留空表示备份全部启用源；选择后只备份指定 DC 源。", 8)
                         ]
-                    },
-                    self._section_title("新增/编辑 DC 源", "固定 5 个源槽位，替代上一版 JSON 文本框；保存后刷新页面即可获取容器列表与连接状态。"),
-                    {
-                        "component": "VRow",
-                        "content": source_cards
                     },
                     self._section_title("容器选择", "跨源选择更新通知、自动更新与备份范围；保存复合值 source_id::container_name，避免同名容器误更新。"),
                     self._selection_tabs(container_items)
@@ -626,57 +604,6 @@ class DockerCopilotHelperMulti(_PluginBase):
             "component": "VCard",
             "props": {"variant": "text", "class": "mt-4"},
             "content": content
-        }
-
-    def _source_slot_card(self, index: int) -> Dict[str, Any]:
-        prefix = f"source{index}"
-        title = f"DC 源 {index}"
-        source = self._source_slots or {}
-        display_name = source.get(f"{prefix}_name") or title
-        return {
-            "component": "VCol",
-            "props": {"cols": 12, "md": 6},
-            "content": [
-                {
-                    "component": "VCard",
-                    "props": {"variant": "outlined"},
-                    "content": [
-                        {
-                            "component": "VCardTitle",
-                            "text": f"{title} · {display_name}"
-                        },
-                        {
-                            "component": "VCardSubtitle",
-                            "text": "填写源ID、显示名称、服务地址和 secretKey；测试连接请保存后查看详情页源状态。"
-                        },
-                        {
-                            "component": "VCardText",
-                            "content": [
-                                {
-                                    "component": "VRow",
-                                    "content": [
-                                        self._switch_col(f"{prefix}_enabled", "启用", 4),
-                                        self._text_col(f"{prefix}_id", "源ID", 4, placeholder=f"pve_lxc_{index:02d}",
-                                                       hint="仅建议使用英文、数字、下划线"),
-                                        self._text_col(f"{prefix}_name", "显示名称", 4, placeholder=f"PVE-LXC-{index:02d}")
-                                    ]
-                                },
-                                {
-                                    "component": "VRow",
-                                    "content": [
-                                        self._text_col(f"{prefix}_host", "服务地址", 6,
-                                                       placeholder=f"http://dc-lxc-{index:02d}:12712",
-                                                       hint="DockerCopilot 服务地址，末尾不需要 /"),
-                                        self._text_col(f"{prefix}_secretKey", "secretKey", 6,
-                                                       hint="不会在详情页、通知、日志中明文展示",
-                                                       password=True)
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
         }
 
     def _selection_tabs(self, container_items: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -764,7 +691,9 @@ class DockerCopilotHelperMulti(_PluginBase):
             "_tabs": "notify",
             "backup_sources": self._backup_sources or []
         }
-        defaults.update(self._source_slots or self._build_source_slot_config({}, []))
+        defaults["sources"] = self._sources or []
+        defaults["sources_text"] = self._sources_text
+        defaults["container_items"] = self._build_container_items()
         return defaults
 
     def _build_source_summary(self) -> str:
@@ -852,10 +781,11 @@ class DockerCopilotHelperMulti(_PluginBase):
             }]
         }
 
-    def get_page(self) -> List[dict]:
-        if not self._source_slots:
-            config = self.get_config() or {}
-            self._apply_config_snapshot(config)
+    def get_page(self) -> Optional[List[dict]]:
+        config = self.get_config() or {}
+        self._apply_config_snapshot(config)
+        if self.get_render_mode()[0] == "vue":
+            return None
         source_states, containers = self._collect_page_state()
         updatable_count = len([item for item in containers if item.get("haveUpdate")])
         auto_count = len(self._auto_update_list or [])
@@ -1133,3 +1063,5 @@ class DockerCopilotHelperMulti(_PluginBase):
             if raise_exception:
                 raise
             return None
+
+
