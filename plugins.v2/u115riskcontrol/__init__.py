@@ -1,4 +1,5 @@
 import gc
+import inspect
 import threading
 import time
 from collections import deque
@@ -20,7 +21,13 @@ DEFAULT_CONFIG = {
     "max_event_log_count": 50,
     "startup_log": True,
     "strict_mode": True,
+    "retry_failed_after_cooldown": True,
+    "retry_failed_delay_seconds": 60,
+    "retry_failed_max_count": 5,
 }
+
+RETRY_DATA_KEY = "failed_transfer_retry"
+RETRY_DATA_VERSION = 1
 
 MP_DEFAULTS = {
     "api_qps": 3,
@@ -31,13 +38,17 @@ MP_DEFAULTS = {
 EVENT_TYPE_PATCH_ACTIVE = "patch_active"
 EVENT_TYPE_SOFT_LIMIT = "soft_limit_triggered"
 EVENT_TYPE_HARD_LIMIT = "115_limit_triggered"
+EVENT_TYPE_RETRY_SCHEDULED = "failed_transfer_retry_scheduled"
+EVENT_TYPE_RETRY_STARTED = "failed_transfer_retry_started"
+EVENT_TYPE_RETRY_FINISHED = "failed_transfer_retry_finished"
+EVENT_TYPE_RETRY_SKIPPED = "failed_transfer_retry_skipped"
 
 
 class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
-    plugin_desc = "为 MoviePilot 的 u115 存储提供低风控默认参数、运行态状态页和风控触发事件日志。"
+    plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -60,6 +71,9 @@ class U115RiskControl(_PluginBase):
         self._max_event_log_count = DEFAULT_CONFIG["max_event_log_count"]
         self._startup_log = DEFAULT_CONFIG["startup_log"]
         self._strict_mode = DEFAULT_CONFIG["strict_mode"]
+        self._retry_failed_after_cooldown = DEFAULT_CONFIG["retry_failed_after_cooldown"]
+        self._retry_failed_delay_seconds = DEFAULT_CONFIG["retry_failed_delay_seconds"]
+        self._retry_failed_max_count = DEFAULT_CONFIG["retry_failed_max_count"]
 
         self._last_status = "未初始化"
         self._last_error = ""
@@ -70,6 +84,17 @@ class U115RiskControl(_PluginBase):
         self._current_cooldown_remaining = 0
         self._last_event_source = "无"
         self._last_event_type = "无"
+        self._retry_lock = threading.Lock()
+        self._retry_threads: List[threading.Thread] = []
+        self._retry_in_progress = False
+        self._retry_scheduled_until = 0.0
+        self._retry_scheduled_reason = "无"
+        self._last_retry_status = "未执行"
+        self._last_retry_time = "无"
+        self._last_retry_total = 0
+        self._last_retry_success = 0
+        self._last_retry_failed = 0
+        self._last_retry_skipped = 0
         self._event_logs: List[Dict[str, Any]] = []
 
     def init_plugin(self, config: dict = None):
@@ -84,6 +109,9 @@ class U115RiskControl(_PluginBase):
         self._max_event_log_count = cfg["max_event_log_count"]
         self._startup_log = cfg["startup_log"]
         self._strict_mode = cfg["strict_mode"]
+        self._retry_failed_after_cooldown = cfg["retry_failed_after_cooldown"]
+        self._retry_failed_delay_seconds = cfg["retry_failed_delay_seconds"]
+        self._retry_failed_max_count = cfg["retry_failed_max_count"]
 
         if not self._enabled:
             self._last_status = "插件已禁用，未应用补丁"
@@ -91,6 +119,7 @@ class U115RiskControl(_PluginBase):
             self._restore_patch()
             return
 
+        self._restore_retry_state()
         self._apply_patch()
 
     def get_state(self) -> bool:
@@ -147,6 +176,10 @@ class U115RiskControl(_PluginBase):
         low_risk_note = (
             "当前默认值已经按低风控思路设置：普通接口 QPS=1、下载接口 QPS=1、"
             "115 返回访问上限后的冷却=3600 秒、小时软阈值=60、主动冷却=1200 秒。"
+        )
+        retry_note = (
+            "启用后，当插件主动冷却或 115 硬风控冷却结束，会自动查找 MP 媒体整理中状态为失败的历史记录，"
+            "并对尚未由本插件重试过的记录后台重新整理一次。"
         )
         mp_default_note = (
             "按当前 MoviePilot 的 u115 默认实现，普通接口 QPS=3，下载接口 QPS=1，"
@@ -327,6 +360,48 @@ class U115RiskControl(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "title": "失败整理重试",
+                                            "text": retry_note,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._build_switch_col("retry_failed_after_cooldown", "冷却后重试失败整理", sm=4),
+                            self._build_text_col(
+                                "retry_failed_delay_seconds",
+                                "冷却结束后等待秒数",
+                                "风控冷却结束后再额外等待多久开始查找失败整理，避免刚恢复就立即请求。默认 60 秒。",
+                                0,
+                                86400,
+                            ),
+                            self._build_text_col(
+                                "retry_failed_max_count",
+                                "单次最多重试条数",
+                                "每次冷却结束后最多重试多少条 MP 失败整理历史。默认 5，设为 0 表示不限制。",
+                                0,
+                                100,
+                            ),
+                        ],
+                    },
+                    {"component": "VDivider", "props": {"class": "my-4"}},
+                    {
+                        "component": "VRow",
+                        "content": [
                             self._build_switch_col("enable_event_log", "记录风控事件日志", sm=4),
                             {
                                 "component": "VCol",
@@ -433,7 +508,8 @@ class U115RiskControl(_PluginBase):
                                         f"插件软阈值命中：{self._soft_limit_hits}\n"
                                         f"115 硬风控命中：{self._hard_limit_hits}\n"
                                         f"当前冷却状态：{self._current_cooldown_reason}\n"
-                                        f"当前剩余冷却：{self._current_cooldown_remaining} 秒"
+                                        f"当前剩余冷却：{self._current_cooldown_remaining} 秒\n"
+                                        f"冷却后重试：{'已开启' if self._retry_failed_after_cooldown else '已关闭'}"
                                     ),
                                 },
                             }
@@ -454,7 +530,8 @@ class U115RiskControl(_PluginBase):
                                         f"下载接口 QPS：{self._download_qps}\n"
                                         f"115 硬风控冷却：{self._limit_sleep_seconds} 秒\n"
                                         f"小时软阈值：{self._hourly_soft_limit}\n"
-                                        f"主动冷却：{self._hourly_soft_cooldown} 秒"
+                                        f"主动冷却：{self._hourly_soft_cooldown} 秒\n"
+                                        f"单次重试失败整理：{self._retry_failed_max_count if self._retry_failed_max_count else '不限'} 条"
                                     ),
                                 },
                             }
@@ -488,7 +565,7 @@ class U115RiskControl(_PluginBase):
                 "content": [
                     {
                         "component": "VCol",
-                        "props": {"cols": 12},
+                        "props": {"cols": 12, "sm": 6},
                         "content": [
                             {
                                 "component": "VAlert",
@@ -501,7 +578,29 @@ class U115RiskControl(_PluginBase):
                                 },
                             }
                         ],
-                    }
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "sm": 6},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "success",
+                                    "variant": "tonal",
+                                    "density": "compact",
+                                    "title": "失败整理重试",
+                                    "text": (
+                                        f"最近重试状态：{self._last_retry_status}\n"
+                                        f"最近重试时间：{self._last_retry_time}\n"
+                                        f"最近处理：总数 {self._last_retry_total} / 成功 {self._last_retry_success} / "
+                                        f"失败 {self._last_retry_failed} / 跳过 {self._last_retry_skipped}\n"
+                                        f"已计划冷却原因：{self._retry_scheduled_reason}"
+                                    ),
+                                },
+                            }
+                        ],
+                    },
                 ],
             },
             {
@@ -530,6 +629,8 @@ class U115RiskControl(_PluginBase):
 
     def stop_service(self):
         self._restore_patch()
+        self._retry_scheduled_until = 0.0
+        self._retry_in_progress = False
 
     @staticmethod
     def get_render_mode() -> Tuple[str, Optional[str]]:
@@ -765,6 +866,7 @@ class U115RiskControl(_PluginBase):
                     f"endpoint={endpoint}, remaining={remaining}s"
                 )
                 time.sleep(remaining)
+                self._schedule_failed_transfer_retry("插件主动冷却结束")
                 now = time.time()
 
         while timestamps and now - timestamps[0] >= 3600:
@@ -791,6 +893,7 @@ class U115RiskControl(_PluginBase):
                     f"endpoint={endpoint}, limit={hourly_soft_limit}, cooldown={hourly_soft_cooldown}s"
                 )
                 time.sleep(hourly_soft_cooldown)
+                self._schedule_failed_transfer_retry("插件软阈值冷却结束")
                 now = time.time()
                 while timestamps and now - timestamps[0] >= 3600:
                     timestamps.popleft()
@@ -810,6 +913,7 @@ class U115RiskControl(_PluginBase):
         self._last_event_type = EVENT_TYPE_HARD_LIMIT
         self._current_cooldown_reason = "115 硬风控"
         self._current_cooldown_remaining = self._limit_sleep_seconds
+        self._schedule_failed_transfer_retry("115 硬风控冷却结束", delay_seconds=self._limit_sleep_seconds)
         self._record_event(
             event_type=EVENT_TYPE_HARD_LIMIT,
             source="MoviePilot / 内置 u115",
@@ -818,6 +922,320 @@ class U115RiskControl(_PluginBase):
             detail="115 返回“已达到当前访问上限”，说明当前命中的是账号侧硬风控。",
             suggestion="优先降低每小时整理量，而不是只调整瞬时 QPS。",
         )
+
+    def _schedule_failed_transfer_retry(self, reason: str, delay_seconds: Optional[int] = None) -> None:
+        if not self._retry_failed_after_cooldown:
+            self._last_retry_status = "已关闭"
+            return
+
+        delay = max(int(delay_seconds if delay_seconds is not None else 0), 0)
+        delay += max(int(self._retry_failed_delay_seconds), 0)
+        scheduled_until = time.time() + delay
+
+        with self._retry_lock:
+            if self._retry_in_progress:
+                self._record_event(
+                    event_type=EVENT_TYPE_RETRY_SKIPPED,
+                    source="U115RiskControl / failed transfer retry",
+                    endpoint="TransferHistory",
+                    threshold="retry_in_progress=True",
+                    detail="已有失败整理重试任务正在执行，本次不重复启动。",
+                    suggestion="等待当前后台重试完成后再观察状态页。",
+                )
+                return
+            if self._retry_scheduled_until and self._retry_scheduled_until >= scheduled_until:
+                return
+            self._retry_scheduled_until = scheduled_until
+            self._retry_scheduled_reason = reason
+            thread = threading.Thread(
+                target=self._run_failed_transfer_retry_after_delay,
+                args=(scheduled_until, reason),
+                name="U115RiskControlFailedTransferRetry",
+                daemon=True,
+            )
+            self._retry_threads.append(thread)
+            thread.start()
+
+        self._record_event(
+            event_type=EVENT_TYPE_RETRY_SCHEDULED,
+            source="U115RiskControl / failed transfer retry",
+            endpoint="TransferHistory",
+            threshold=f"delay={delay}s, max_count={self._retry_failed_max_count}",
+            detail=f"已计划在风控期后重试 MP 失败整理任务，原因：{reason}。",
+            suggestion="如果失败任务很多，建议保持较小的单次重试条数，避免恢复后立即再次触发风控。",
+        )
+
+    def _run_failed_transfer_retry_after_delay(self, scheduled_until: float, reason: str) -> None:
+        wait_seconds = max(int(scheduled_until - time.time()), 0)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+        with self._retry_lock:
+            if not self._enabled or not self._retry_failed_after_cooldown:
+                self._last_retry_status = "已取消"
+                return
+            if scheduled_until < self._retry_scheduled_until:
+                return
+            self._retry_scheduled_until = 0.0
+            self._retry_in_progress = True
+
+        try:
+            self._retry_failed_transfer_histories(reason)
+        except Exception as exc:
+            self._last_retry_status = f"执行异常：{exc}"
+            self._last_retry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.exception("[U115RiskControl] failed transfer retry crashed")
+            self._record_event(
+                event_type=EVENT_TYPE_RETRY_FINISHED,
+                source="U115RiskControl / failed transfer retry",
+                endpoint="TransferHistory",
+                threshold="exception",
+                detail=f"失败整理重试异常：{exc}",
+                suggestion="请检查 MoviePilot 日志中的具体整理失败原因。",
+            )
+        finally:
+            with self._retry_lock:
+                self._retry_in_progress = False
+                self._retry_threads = [thread for thread in self._retry_threads if thread.is_alive()]
+
+    def _retry_failed_transfer_histories(self, reason: str) -> None:
+        self._last_retry_status = "执行中"
+        self._last_retry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._record_event(
+            event_type=EVENT_TYPE_RETRY_STARTED,
+            source="U115RiskControl / failed transfer retry",
+            endpoint="TransferHistory",
+            threshold=f"max_count={self._retry_failed_max_count}",
+            detail=f"开始重试 MP 失败整理任务，触发原因：{reason}。",
+            suggestion="重试期间请关注是否再次出现 115 风控事件。",
+        )
+
+        try:
+            from app.chain.transfer import TransferChain
+            from app.db.transferhistory_oper import TransferHistoryOper
+            from app.db.models.transferhistory import TransferHistory
+            from app.schemas import FileItem, MediaType
+            from app.schemas.transfer import EpisodeFormat
+        except Exception as exc:
+            self._last_retry_status = "MP 接口不可用"
+            self._last_retry_failed = 1
+            self._record_event(
+                event_type=EVENT_TYPE_RETRY_FINISHED,
+                source="U115RiskControl / failed transfer retry",
+                endpoint="import",
+                threshold="mp_import_failed",
+                detail=f"无法导入 MoviePilot 整理相关模块：{exc}",
+                suggestion="确认当前运行环境为 MoviePilot V2，且整理模块路径未变更。",
+            )
+            return
+
+        retry_state = self._load_retry_state()
+        retried_ids = set(str(item) for item in retry_state.get("retried_ids", []))
+        histories = self._list_failed_transfer_histories(TransferHistoryOper, TransferHistory)
+        candidates = []
+        for history in histories:
+            history_id = str(getattr(history, "id", ""))
+            if not history_id or history_id in retried_ids:
+                continue
+            candidates.append(history)
+            if self._retry_failed_max_count and len(candidates) >= self._retry_failed_max_count:
+                break
+
+        total = len(candidates)
+        success_count = 0
+        failed_count = 0
+        skipped_count = max(len(histories) - total, 0)
+        failure_details: List[str] = []
+
+        for history in candidates:
+            history_id = str(getattr(history, "id", ""))
+            try:
+                state, message = self._retry_one_transfer_history(
+                    history=history,
+                    TransferChain=TransferChain,
+                    FileItem=FileItem,
+                    MediaType=MediaType,
+                    EpisodeFormat=EpisodeFormat,
+                )
+            except Exception as exc:
+                state = False
+                message = str(exc)
+                logger.exception(f"[U115RiskControl] retry transfer history failed: id={history_id}")
+
+            retried_ids.add(history_id)
+            retry_state.setdefault("records", {})[history_id] = {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "success": bool(state),
+                "message": self._short_text(message),
+                "title": self._short_text(getattr(history, "title", "") or getattr(history, "src", "")),
+            }
+            if state:
+                success_count += 1
+            else:
+                failed_count += 1
+                failure_details.append(f"#{history_id}: {self._short_text(message)}")
+
+        retry_state["version"] = RETRY_DATA_VERSION
+        retry_state["retried_ids"] = sorted(retried_ids, key=lambda item: int(item) if item.isdigit() else item)[-500:]
+        retry_state["last_run"] = {
+            "time": self._last_retry_time,
+            "reason": reason,
+            "total": total,
+            "success": success_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+        }
+        self._save_retry_state(retry_state)
+
+        self._last_retry_total = total
+        self._last_retry_success = success_count
+        self._last_retry_failed = failed_count
+        self._last_retry_skipped = skipped_count
+        if total == 0:
+            self._last_retry_status = "无可重试任务"
+        elif failed_count:
+            self._last_retry_status = "部分失败"
+        else:
+            self._last_retry_status = "已完成"
+
+        detail = f"本次候选 {total} 条，成功 {success_count} 条，失败 {failed_count} 条，跳过 {skipped_count} 条。"
+        if failure_details:
+            detail = f"{detail} 失败摘要：{'；'.join(failure_details[:3])}"
+        self._record_event(
+            event_type=EVENT_TYPE_RETRY_FINISHED,
+            source="U115RiskControl / failed transfer retry",
+            endpoint="TransferHistory",
+            threshold=f"max_count={self._retry_failed_max_count}",
+            detail=detail,
+            suggestion="若重试仍失败，请在 MP 整理历史中查看具体失败原因；插件不会对同一失败历史反复重试。",
+        )
+
+    def _list_failed_transfer_histories(self, TransferHistoryOper, TransferHistory) -> List[Any]:
+        transfer_history = TransferHistoryOper()
+        for kwargs in (
+            {"page": 1, "count": -1, "status": False},
+            {"page": 1, "count": 200, "status": False},
+        ):
+            try:
+                histories = TransferHistory.list_by_page(transfer_history._db, **kwargs)
+                return list(histories or [])
+            except TypeError:
+                continue
+        histories = TransferHistory.list_by_page(transfer_history._db, 1, 200, False)
+        return list(histories or [])
+
+    def _retry_one_transfer_history(self, *, history, TransferChain, FileItem, MediaType, EpisodeFormat) -> Tuple[bool, str]:
+        src_payload = getattr(history, "src_fileitem", None)
+        if not src_payload:
+            return False, "历史记录缺少源文件项"
+
+        fileitem = FileItem(**src_payload)
+        type_name = str(getattr(history, "type", "") or "").strip()
+        media_type = None
+        if type_name:
+            try:
+                media_type = MediaType(type_name)
+            except Exception:
+                media_type = None
+
+        season = self._parse_season(getattr(history, "seasons", None))
+        episode_format = self._build_episode_format(history=history, EpisodeFormat=EpisodeFormat)
+        target_path = getattr(history, "dest", None)
+        target_path_obj = None
+        if target_path:
+            try:
+                from pathlib import Path
+                target_path_obj = Path(target_path).parent
+            except Exception:
+                target_path_obj = None
+
+        chain = TransferChain()
+        kwargs = {
+            "fileitem": fileitem,
+            "target_storage": getattr(history, "dest_storage", None),
+            "target_path": target_path_obj,
+            "tmdbid": getattr(history, "tmdbid", None),
+            "doubanid": getattr(history, "doubanid", None),
+            "mtype": media_type,
+            "season": season,
+            "episode_group": getattr(history, "episode_group", None),
+            "transfer_type": getattr(history, "mode", None),
+            "epformat": episode_format,
+            "force": True,
+            "background": True,
+            "downloader": getattr(history, "downloader", None),
+            "download_hash": getattr(history, "download_hash", None),
+        }
+        signature = inspect.signature(chain.manual_transfer)
+        kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        state, message = chain.manual_transfer(**kwargs)
+        return bool(state), self._short_text(message)
+
+    def _build_episode_format(self, *, history, EpisodeFormat):
+        episodes = getattr(history, "episodes", None)
+        if not episodes:
+            return None
+        episode_detail = str(episodes).replace("E", "")
+        if "-" in str(episodes):
+            try:
+                episode_start, episode_end = str(episodes).split("-", 1)
+                episode_detail = ",".join(
+                    str(index)
+                    for index in range(int(episode_start.replace("E", "")), int(episode_end.replace("E", "")) + 1)
+                )
+            except Exception:
+                episode_detail = str(episodes)
+        try:
+            return EpisodeFormat(detail=episode_detail)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_season(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(str(value).replace("S", ""))
+        except ValueError:
+            return None
+
+    def _restore_retry_state(self) -> None:
+        retry_state = self._load_retry_state()
+        last_run = retry_state.get("last_run") if isinstance(retry_state, dict) else None
+        if not isinstance(last_run, dict):
+            return
+        self._last_retry_time = str(last_run.get("time") or "无")
+        self._last_retry_total = self._to_int(last_run.get("total"), 0, minimum=0, maximum=100000)
+        self._last_retry_success = self._to_int(last_run.get("success"), 0, minimum=0, maximum=100000)
+        self._last_retry_failed = self._to_int(last_run.get("failed"), 0, minimum=0, maximum=100000)
+        self._last_retry_skipped = self._to_int(last_run.get("skipped"), 0, minimum=0, maximum=100000)
+        self._last_retry_status = "已恢复上次记录"
+
+    def _load_retry_state(self) -> Dict[str, Any]:
+        try:
+            data = self.get_data(RETRY_DATA_KEY) or {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("version", RETRY_DATA_VERSION)
+        data.setdefault("retried_ids", [])
+        data.setdefault("records", {})
+        return data
+
+    def _save_retry_state(self, data: Dict[str, Any]) -> None:
+        try:
+            self.save_data(RETRY_DATA_KEY, data)
+        except Exception as exc:
+            logger.warning(f"[U115RiskControl] save retry state failed: {exc}")
+
+    @staticmethod
+    def _short_text(value: Any, limit: int = 160) -> str:
+        text = str(value or "")
+        text = " ".join(text.split())
+        if len(text) > limit:
+            return f"{text[:limit]}..."
+        return text
 
     def _extract_message(self, result: Any) -> str:
         if isinstance(result, dict):
@@ -953,6 +1371,22 @@ class U115RiskControl(_PluginBase):
             ),
             "startup_log": self._to_bool(merged.get("startup_log"), DEFAULT_CONFIG["startup_log"]),
             "strict_mode": self._to_bool(merged.get("strict_mode"), DEFAULT_CONFIG["strict_mode"]),
+            "retry_failed_after_cooldown": self._to_bool(
+                merged.get("retry_failed_after_cooldown"),
+                DEFAULT_CONFIG["retry_failed_after_cooldown"],
+            ),
+            "retry_failed_delay_seconds": self._to_int(
+                merged.get("retry_failed_delay_seconds"),
+                DEFAULT_CONFIG["retry_failed_delay_seconds"],
+                minimum=0,
+                maximum=86400,
+            ),
+            "retry_failed_max_count": self._to_int(
+                merged.get("retry_failed_max_count"),
+                DEFAULT_CONFIG["retry_failed_max_count"],
+                minimum=0,
+                maximum=100,
+            ),
         }
 
     @staticmethod
