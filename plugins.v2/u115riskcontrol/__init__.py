@@ -48,7 +48,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -95,6 +95,7 @@ class U115RiskControl(_PluginBase):
         self._last_retry_success = 0
         self._last_retry_failed = 0
         self._last_retry_skipped = 0
+        self._last_native_limit_until = 0.0
         self._event_logs: List[Dict[str, Any]] = []
 
     def init_plugin(self, config: dict = None):
@@ -463,6 +464,14 @@ class U115RiskControl(_PluginBase):
         lines = [self._format_event_line(event) for event in reversed(logs)]
         event_text = "\n\n".join(lines) if lines else "暂无风控事件。当前还没有命中 115 硬风控，也没有触发插件侧主动冷却。"
 
+        scheduled_text = "无"
+        if self._retry_in_progress:
+            scheduled_text = "正在执行"
+        elif self._retry_scheduled_until > time.time():
+            remaining = int(self._retry_scheduled_until - time.time())
+            scheduled_time = datetime.fromtimestamp(self._retry_scheduled_until).strftime("%Y-%m-%d %H:%M:%S")
+            scheduled_text = f"{scheduled_time}，约 {remaining} 秒后"
+
         return [
             {
                 "component": "VRow",
@@ -595,7 +604,8 @@ class U115RiskControl(_PluginBase):
                                         f"最近重试时间：{self._last_retry_time}\n"
                                         f"最近处理：总数 {self._last_retry_total} / 成功 {self._last_retry_success} / "
                                         f"失败 {self._last_retry_failed} / 跳过 {self._last_retry_skipped}\n"
-                                        f"已计划冷却原因：{self._retry_scheduled_reason}"
+                                        f"已计划冷却原因：{self._retry_scheduled_reason}\n"
+                                        f"已计划重试时间：{scheduled_text}"
                                     ),
                                 },
                             }
@@ -700,17 +710,38 @@ class U115RiskControl(_PluginBase):
                     endpoint = args[1]
                 elif "endpoint" in kwargs:
                     endpoint = kwargs.get("endpoint")
+                endpoint_text = str(endpoint or "")
+                request_started_at = time.time()
+                before_limit_until = self._get_native_limit_until(instance)
+
+                self._inspect_native_limit_window(
+                    instance=instance,
+                    endpoint=endpoint_text,
+                    before_limit_until=0.0,
+                    after_limit_until=before_limit_until,
+                    request_started_at=request_started_at,
+                    phase="before_request",
+                )
 
                 self._maybe_soft_cooldown(
                     instance=instance,
-                    endpoint=str(endpoint or ""),
+                    endpoint=endpoint_text,
                     hourly_soft_limit=hourly_soft_limit,
                     hourly_soft_cooldown=hourly_soft_cooldown,
                 )
 
                 result = original_request_api(instance, *args, **kwargs)
+                after_limit_until = self._get_native_limit_until(instance)
+                self._inspect_native_limit_window(
+                    instance=instance,
+                    endpoint=endpoint_text,
+                    before_limit_until=before_limit_until,
+                    after_limit_until=after_limit_until,
+                    request_started_at=request_started_at,
+                    phase="after_request",
+                )
                 self._inspect_hard_limit_response(
-                    endpoint=str(endpoint or ""),
+                    endpoint=endpoint_text,
                     result=result,
                 )
                 return result
@@ -921,6 +952,60 @@ class U115RiskControl(_PluginBase):
             threshold=f"limit_sleep_seconds={self._limit_sleep_seconds}",
             detail="115 返回“已达到当前访问上限”，说明当前命中的是账号侧硬风控。",
             suggestion="优先降低每小时整理量，而不是只调整瞬时 QPS。",
+        )
+
+    @staticmethod
+    def _get_native_limit_until(instance) -> float:
+        try:
+            return float(getattr(instance, "_limit_until", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _inspect_native_limit_window(
+        self,
+        *,
+        instance,
+        endpoint: str,
+        before_limit_until: float,
+        after_limit_until: float,
+        request_started_at: float,
+        phase: str,
+    ) -> None:
+        if after_limit_until <= 0:
+            return
+
+        now = time.time()
+        detected_existing_cooldown = phase == "before_request" and after_limit_until > now
+        detected_new_cooldown = (
+            phase == "after_request"
+            and after_limit_until > request_started_at
+            and after_limit_until > before_limit_until + 1
+        )
+        if not detected_existing_cooldown and not detected_new_cooldown:
+            return
+        if abs(after_limit_until - self._last_native_limit_until) < 1:
+            return
+        self._last_native_limit_until = after_limit_until
+
+        remaining = max(int(after_limit_until - now), 0)
+        self._hard_limit_hits += 1
+        self._last_event_source = "MoviePilot / 内置 u115"
+        self._last_event_type = EVENT_TYPE_HARD_LIMIT
+        self._current_cooldown_reason = "115 硬风控"
+        self._current_cooldown_remaining = remaining
+
+        reason = "115 硬风控冷却结束"
+        self._schedule_failed_transfer_retry(reason, delay_seconds=remaining)
+        self._record_event(
+            event_type=EVENT_TYPE_HARD_LIMIT,
+            source="MoviePilot / 内置 u115",
+            endpoint=endpoint,
+            threshold=f"_limit_until={datetime.fromtimestamp(after_limit_until).strftime('%Y-%m-%d %H:%M:%S')}",
+            detail=(
+                "检测到 MoviePilot 内置 u115 已进入风控冷却窗口。"
+                f"阶段：{phase}，剩余约 {remaining} 秒。"
+            ),
+            suggestion="插件已按 MP 内置冷却结束时间安排失败整理重试；如仍无候选任务，请检查整理历史是否缺少可复用的源文件项。",
         )
 
     def _schedule_failed_transfer_retry(self, reason: str, delay_seconds: Optional[int] = None) -> None:
