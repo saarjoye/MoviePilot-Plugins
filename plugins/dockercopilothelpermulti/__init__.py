@@ -22,7 +22,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     plugin_name = "DC助手多源版"
     plugin_desc = "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份"
     plugin_icon = "Docker_Copilot.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "dockercopilothelpermulti_"
@@ -374,7 +374,7 @@ class DockerCopilotHelperMulti(_PluginBase):
         prefix = f"{source_id}::"
         return any(str(item).startswith(prefix) for item in selected)
 
-    def _update_container(self, source: Dict[str, Any], container: Dict[str, Any]):
+    def _update_container(self, source: Dict[str, Any], container: Dict[str, Any]) -> bool:
         name = container.get("name")
         path = f"/api/container/{container.get('id')}/update"
         payload = {
@@ -393,10 +393,33 @@ class DockerCopilotHelperMulti(_PluginBase):
                     )
                 if self._schedule_report and task_id:
                     self._report_progress(source, name, task_id)
+                return True
             else:
+                message = self._format_dc_error(data)
                 logger.error(f"DC助手多源版[{source['name']}] 创建更新任务失败：{data}")
+                self._notify_auto_update_failed(source, container, f"创建更新任务失败：{message}")
         except Exception as err:
             logger.error(f"DC助手多源版[{source['name']}] 自动更新网络异常：{err}")
+            self._notify_auto_update_failed(source, container, f"请求 DockerCopilot 更新接口异常：{err}")
+        return False
+
+    @staticmethod
+    def _format_dc_error(data: Optional[Dict[str, Any]]) -> str:
+        if isinstance(data, dict):
+            return str(data.get("msg") or data.get("message") or data.get("detail") or data)
+        return "无响应"
+
+    def _notify_auto_update_failed(self, source: Dict[str, Any], container: Dict[str, Any], reason: str):
+        if not self._auto_update_notify:
+            return
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title="【DC助手多源版-自动更新失败】",
+            text=f"[{source['name']}] {container.get('name')}\n"
+                 f"{reason}\n"
+                 f"当前镜像：{container.get('usingImage') or '-'}\n"
+                 f"状态：{container.get('status') or '-'} {container.get('runningTime') or '-'}"
+        )
 
     def _report_progress(self, source: Dict[str, Any], name: str, task_id: str):
         for iteration in range(int(self._intervallimit)):
@@ -441,7 +464,8 @@ class DockerCopilotHelperMulti(_PluginBase):
                     text=f"[{source['name']}] {name} 可以更新\n"
                          f"当前镜像：{container.get('usingImage')}\n"
                          f"状态：{container.get('status')} {container.get('runningTime')}\n"
-                         f"构建时间：{container.get('createTime')}"
+                         f"构建时间：{container.get('createTime')}\n"
+                         f"提示：这是更新通知任务，只负责提醒；如需自动更新，请同时在“自动更新容器”中选择该容器并配置自动更新 Cron。"
                 )
             else:
                 self._notify_tag_error(source, container, "更新通知")

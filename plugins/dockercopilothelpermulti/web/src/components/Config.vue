@@ -181,7 +181,7 @@
             multiple
             variant="outlined"
             density="comfortable"
-            hint="选项保存为 source_id::container_name"
+            hint="只发送可更新提醒，不会执行更新"
             persistent-hint
           />
         </v-col>
@@ -194,7 +194,7 @@
             multiple
             variant="outlined"
             density="comfortable"
-            hint="只自动更新选中的容器"
+            hint="自动更新 Cron 触发时才会执行更新"
             persistent-hint
           />
         </v-col>
