@@ -273,7 +273,7 @@ return (_ctx, _cache) => {
         ]),
         _: 1
       }),
-      _createVNode(_component_v_card_text, { class: "overflow-y-auto" }, {
+      _createVNode(_component_v_card_text, { class: "config-body" }, {
         default: _withCtx(() => [
           _createVNode(_component_v_alert, {
             type: "warning",
@@ -775,7 +775,7 @@ return (_ctx, _cache) => {
         ]),
         _: 1
       }),
-      _createVNode(_component_v_card_actions, null, {
+      _createVNode(_component_v_card_actions, { class: "config-actions" }, {
         default: _withCtx(() => [
           _createVNode(_component_v_btn, {
             variant: "text",
