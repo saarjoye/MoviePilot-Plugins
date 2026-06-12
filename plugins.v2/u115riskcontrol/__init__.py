@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "startup_log": True,
     "strict_mode": True,
     "retry_failed_after_cooldown": True,
+    "retry_failed_on_startup": True,
     "retry_failed_delay_seconds": 60,
     "retry_failed_max_count": 5,
 }
@@ -48,7 +49,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -72,6 +73,7 @@ class U115RiskControl(_PluginBase):
         self._startup_log = DEFAULT_CONFIG["startup_log"]
         self._strict_mode = DEFAULT_CONFIG["strict_mode"]
         self._retry_failed_after_cooldown = DEFAULT_CONFIG["retry_failed_after_cooldown"]
+        self._retry_failed_on_startup = DEFAULT_CONFIG["retry_failed_on_startup"]
         self._retry_failed_delay_seconds = DEFAULT_CONFIG["retry_failed_delay_seconds"]
         self._retry_failed_max_count = DEFAULT_CONFIG["retry_failed_max_count"]
 
@@ -111,6 +113,7 @@ class U115RiskControl(_PluginBase):
         self._startup_log = cfg["startup_log"]
         self._strict_mode = cfg["strict_mode"]
         self._retry_failed_after_cooldown = cfg["retry_failed_after_cooldown"]
+        self._retry_failed_on_startup = cfg["retry_failed_on_startup"]
         self._retry_failed_delay_seconds = cfg["retry_failed_delay_seconds"]
         self._retry_failed_max_count = cfg["retry_failed_max_count"]
 
@@ -122,6 +125,7 @@ class U115RiskControl(_PluginBase):
 
         self._restore_retry_state()
         self._apply_patch()
+        self._schedule_startup_failed_transfer_retry()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -181,6 +185,7 @@ class U115RiskControl(_PluginBase):
         retry_note = (
             "启用后，当插件主动冷却或 115 硬风控冷却结束，会自动查找 MP 媒体整理中状态为失败的历史记录，"
             "并对尚未由本插件重试过的记录后台重新整理一次。"
+            "如果插件启动时已经不在冷却期，也会延迟执行一次补偿扫描，避免安装新版本后错过上一轮冷却结束事件。"
         )
         mp_default_note = (
             "按当前 MoviePilot 的 u115 默认实现，普通接口 QPS=3，下载接口 QPS=1，"
@@ -383,6 +388,7 @@ class U115RiskControl(_PluginBase):
                         "component": "VRow",
                         "content": [
                             self._build_switch_col("retry_failed_after_cooldown", "冷却后重试失败整理", sm=4),
+                            self._build_switch_col("retry_failed_on_startup", "启动后补扫失败整理", sm=4),
                             self._build_text_col(
                                 "retry_failed_delay_seconds",
                                 "冷却结束后等待秒数",
@@ -1008,6 +1014,42 @@ class U115RiskControl(_PluginBase):
             suggestion="插件已按 MP 内置冷却结束时间安排失败整理重试；如仍无候选任务，请检查整理历史是否缺少可复用的源文件项。",
         )
 
+    def _schedule_startup_failed_transfer_retry(self) -> None:
+        if not self._enabled or not self._retry_failed_after_cooldown or not self._retry_failed_on_startup:
+            return
+
+        delay_seconds = 0
+        cooldown_count = 0
+        try:
+            from app.modules.filemanager.storages.u115 import U115Pan
+            for obj in gc.get_objects():
+                try:
+                    if isinstance(obj, U115Pan):
+                        limit_until = self._get_native_limit_until(obj)
+                        remaining = int(limit_until - time.time())
+                        if remaining > delay_seconds:
+                            delay_seconds = remaining
+                        if remaining > 0:
+                            cooldown_count += 1
+                except Exception:
+                    continue
+        except Exception:
+            delay_seconds = 0
+
+        if delay_seconds > 0:
+            reason = "插件启动补偿扫描：等待现有 115 冷却结束"
+        else:
+            reason = "插件启动补偿扫描：当前未检测到 115 冷却"
+        self._schedule_failed_transfer_retry(reason, delay_seconds=max(delay_seconds, 0))
+        self._record_event(
+            event_type=EVENT_TYPE_RETRY_SCHEDULED,
+            source="U115RiskControl / startup retry scan",
+            endpoint="TransferHistory",
+            threshold=f"native_cooldown_instances={cooldown_count}, delay={max(delay_seconds, 0)}s",
+            detail="插件启动后已安排一次失败整理补偿扫描，用于处理安装新版本前已结束的冷却期。",
+            suggestion="若失败整理历史仍未被处理，请查看状态页最近重试状态，确认是否为无候选任务、已重试过或 MP 接口不可用。",
+        )
+
     def _schedule_failed_transfer_retry(self, reason: str, delay_seconds: Optional[int] = None) -> None:
         if not self._retry_failed_after_cooldown:
             self._last_retry_status = "已关闭"
@@ -1459,6 +1501,10 @@ class U115RiskControl(_PluginBase):
             "retry_failed_after_cooldown": self._to_bool(
                 merged.get("retry_failed_after_cooldown"),
                 DEFAULT_CONFIG["retry_failed_after_cooldown"],
+            ),
+            "retry_failed_on_startup": self._to_bool(
+                merged.get("retry_failed_on_startup"),
+                DEFAULT_CONFIG["retry_failed_on_startup"],
             ),
             "retry_failed_delay_seconds": self._to_int(
                 merged.get("retry_failed_delay_seconds"),

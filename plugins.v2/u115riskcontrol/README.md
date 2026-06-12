@@ -2,7 +2,7 @@
 
 这是一个 MoviePilot 插件，用于在运行时为 `u115` 存储注入更保守的限流参数，避免每次升级 MP2 容器后又要手工修改 `u115.py`。
 
-当前版本：`0.1.6`
+当前版本：`0.1.7`
 
 ## 当前版本能力
 
@@ -13,6 +13,7 @@
 - 支持达到软阈值后主动冷却
 - 支持风控冷却结束后自动重试 MP 媒体整理失败历史
 - 支持识别 MoviePilot 内置 `U115Pan._limit_until` 冷却窗口，避免 MP 内部 sleep 后插件漏掉重试调度
+- 支持插件启动后执行一次失败整理补偿扫描，避免安装新版本时冷却已经结束而错过重试调度
 - 插件启用后自动为新建的 `U115Pan` 实例注入参数
 - 尝试为当前已存在的 `U115Pan` 实例热更新参数
 
@@ -24,6 +25,7 @@
 - `hourly_soft_limit = 60`
 - `hourly_soft_cooldown = 1200`
 - `retry_failed_after_cooldown = true`
+- `retry_failed_on_startup = true`
 - `retry_failed_delay_seconds = 60`
 - `retry_failed_max_count = 5`
 
@@ -35,6 +37,7 @@
 - `hourly_soft_limit`：插件侧自定义的 1 小时请求软阈值，设为 `0` 表示关闭
 - `hourly_soft_cooldown`：达到软阈值后的主动冷却秒数，设为 `0` 表示只记录不暂停
 - `retry_failed_after_cooldown`：风控冷却结束后是否自动查找 MP 媒体整理失败历史并重试
+- `retry_failed_on_startup`：插件启动后是否补偿扫描一次失败整理历史，适合处理安装新版本时冷却已经结束的场景
 - `retry_failed_delay_seconds`：冷却结束后额外等待秒数，避免刚恢复就立即重新请求
 - `retry_failed_max_count`：单次最多重试失败整理条数，设为 `0` 表示不限制
 
