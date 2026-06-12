@@ -19,6 +19,10 @@ const _sfc_main = {
     type: Object,
     default: () => ({}),
   },
+  api: {
+    type: Object,
+    default: null,
+  },
 },
   emits: ['save', 'close'],
   setup(__props, { emit: __emit }) {
@@ -50,6 +54,9 @@ const defaultConfig = {
 const config = reactive(cloneConfig(defaultConfig));
 const error = ref('');
 const saving = ref(false);
+const loadingContainers = ref(false);
+const containerMessage = ref('');
+const sourceErrors = ref([]);
 const visibleSecrets = reactive({});
 
 const enabledSourceCount = computed(() => config.sources.filter(item => item.enabled !== false).length);
@@ -118,6 +125,8 @@ function applyInitialConfig(initial) {
   config.backup_sources = Array.isArray(initial.backup_sources) ? initial.backup_sources : [];
   config.container_items = Array.isArray(initial.container_items) ? initial.container_items : [];
   error.value = '';
+  containerMessage.value = '';
+  sourceErrors.value = [];
 }
 
 function normalizeLegacySlots(initial) {
@@ -214,6 +223,36 @@ async function saveConfig() {
   }
 }
 
+async function loadContainerItems() {
+  error.value = '';
+  containerMessage.value = '';
+  sourceErrors.value = [];
+  if (!props.api?.get) {
+    containerMessage.value = '当前 MoviePilot 未注入插件 API，请保存后重新打开配置页。';
+    return
+  }
+  loadingContainers.value = true;
+  try {
+    const state = await props.api.get('plugin/DockerCopilotHelperMulti/state');
+    config.container_items = Array.isArray(state?.container_items) ? state.container_items : [];
+    if (Array.isArray(state?.updatablelist))
+      config.updatablelist = state.updatablelist;
+    if (Array.isArray(state?.autoupdatelist))
+      config.autoupdatelist = state.autoupdatelist;
+    sourceErrors.value = Array.isArray(state?.source_states)
+      ? state.source_states.filter(item => item.state === '异常' || (item.enabled !== false && !item.container_count))
+      : [];
+    if (!config.container_items.length)
+      containerMessage.value = state?.metrics?.sources
+        ? '没有获取到容器。请检查 DC 服务地址是否包含端口、服务是否可访问，以及 secretKey 是否正确。'
+        : '还没有保存可用 DC 源。请先保存配置，再刷新容器列表。';
+  } catch (err) {
+    error.value = `刷新容器列表失败：${err?.message || err}`;
+  } finally {
+    loadingContainers.value = false;
+  }
+}
+
 return (_ctx, _cache) => {
   const _component_v_card_title = _resolveComponent("v-card-title");
   const _component_v_card_subtitle = _resolveComponent("v-card-subtitle");
@@ -289,6 +328,41 @@ return (_ctx, _cache) => {
             _createElementVNode("div", { class: "text-h6 font-weight-bold" }, "基础开关"),
             _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "保存后定时任务按新配置生效")
           ], -1)),
+          _createElementVNode("div", { class: "d-flex flex-wrap align-center gap-2 mb-4" }, [
+            _createVNode(_component_v_btn, {
+              color: "primary",
+              variant: "tonal",
+              "prepend-icon": "mdi-refresh",
+              loading: loadingContainers.value,
+              onClick: loadContainerItems
+            }, {
+              default: _withCtx(() => [_createTextVNode("刷新容器列表")]),
+              _: 1
+            }, 8, ["loading"]),
+            _createElementVNode("span", { class: "text-body-2 text-medium-emphasis" }, "当前 " + _toDisplayString(containerItems.value.length) + " 个容器选项", 1)
+          ]),
+          containerMessage.value ? (_openBlock(), _createBlock(_component_v_alert, {
+            key: 3,
+            type: "info",
+            variant: "tonal",
+            class: "mb-4"
+          }, {
+            default: _withCtx(() => [_createTextVNode(_toDisplayString(containerMessage.value), 1)]),
+            _: 1
+          })) : _createCommentVNode("", true),
+          sourceErrors.value.length ? (_openBlock(), _createBlock(_component_v_alert, {
+            key: 4,
+            type: "warning",
+            variant: "tonal",
+            class: "mb-4"
+          }, {
+            default: _withCtx(() => [
+              (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sourceErrors.value, (item) => {
+                return (_openBlock(), _createElementBlock("div", { key: item.id || item.name }, _toDisplayString(item.name || item.id) + "：" + _toDisplayString(item.message), 1))
+              }), 128))
+            ]),
+            _: 1
+          })) : _createCommentVNode("", true),
           _createVNode(_component_v_row, null, {
             default: _withCtx(() => [
               _createVNode(_component_v_col, {

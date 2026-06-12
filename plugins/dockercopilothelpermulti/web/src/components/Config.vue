@@ -10,7 +10,7 @@
       </template>
     </v-card-item>
 
-    <v-card-text class="overflow-y-auto">
+    <v-card-text class="config-body">
       <v-alert type="warning" variant="tonal" class="mb-4">
         DC 地址与 secretKey 属于敏感配置；secretKey 仅保存到 MP 插件配置，页面摘要、通知和日志不显示明文。
       </v-alert>
@@ -149,8 +149,28 @@
 
       <div class="section-title">
         <div class="text-h6 font-weight-bold">任务范围</div>
-        <div class="text-body-2 text-medium-emphasis">保存后刷新页面，容器选项会按源名称 / 容器名加载</div>
+        <div class="text-body-2 text-medium-emphasis">保存源配置后点击刷新，容器选项会按源名称 / 容器名加载</div>
       </div>
+      <div class="d-flex flex-wrap align-center gap-2 mb-4">
+        <v-btn
+          color="primary"
+          variant="tonal"
+          prepend-icon="mdi-refresh"
+          :loading="loadingContainers"
+          @click="loadContainerItems"
+        >
+          刷新容器列表
+        </v-btn>
+        <span class="text-body-2 text-medium-emphasis">当前 {{ containerItems.length }} 个容器选项</span>
+      </div>
+      <v-alert v-if="containerMessage" type="info" variant="tonal" class="mb-4">
+        {{ containerMessage }}
+      </v-alert>
+      <v-alert v-if="sourceErrors.length" type="warning" variant="tonal" class="mb-4">
+        <div v-for="item in sourceErrors" :key="item.id || item.name">
+          {{ item.name || item.id }}：{{ item.message }}
+        </div>
+      </v-alert>
       <v-row>
         <v-col cols="12" md="6">
           <v-select
@@ -197,7 +217,7 @@
       </v-row>
     </v-card-text>
 
-    <v-card-actions>
+    <v-card-actions class="config-actions">
       <v-btn variant="text" color="secondary" @click="resetConfig">重置</v-btn>
       <v-spacer />
       <v-btn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存配置</v-btn>
@@ -212,6 +232,10 @@ const props = defineProps({
   initialConfig: {
     type: Object,
     default: () => ({}),
+  },
+  api: {
+    type: Object,
+    default: null,
   },
 })
 
@@ -240,6 +264,9 @@ const defaultConfig = {
 const config = reactive(cloneConfig(defaultConfig))
 const error = ref('')
 const saving = ref(false)
+const loadingContainers = ref(false)
+const containerMessage = ref('')
+const sourceErrors = ref([])
 const visibleSecrets = reactive({})
 
 const enabledSourceCount = computed(() => config.sources.filter(item => item.enabled !== false).length)
@@ -308,6 +335,8 @@ function applyInitialConfig(initial) {
   config.backup_sources = Array.isArray(initial.backup_sources) ? initial.backup_sources : []
   config.container_items = Array.isArray(initial.container_items) ? initial.container_items : []
   error.value = ''
+  containerMessage.value = ''
+  sourceErrors.value = []
 }
 
 function normalizeLegacySlots(initial) {
@@ -403,11 +432,60 @@ async function saveConfig() {
     saving.value = false
   }
 }
+
+async function loadContainerItems() {
+  error.value = ''
+  containerMessage.value = ''
+  sourceErrors.value = []
+  if (!props.api?.get) {
+    containerMessage.value = '当前 MoviePilot 未注入插件 API，请保存后重新打开配置页。'
+    return
+  }
+  loadingContainers.value = true
+  try {
+    const state = await props.api.get('plugin/DockerCopilotHelperMulti/state')
+    config.container_items = Array.isArray(state?.container_items) ? state.container_items : []
+    if (Array.isArray(state?.updatablelist))
+      config.updatablelist = state.updatablelist
+    if (Array.isArray(state?.autoupdatelist))
+      config.autoupdatelist = state.autoupdatelist
+    sourceErrors.value = Array.isArray(state?.source_states)
+      ? state.source_states.filter(item => item.state === '异常' || (item.enabled !== false && !item.container_count))
+      : []
+    if (!config.container_items.length)
+      containerMessage.value = state?.metrics?.sources
+        ? '没有获取到容器。请检查 DC 服务地址是否包含端口、服务是否可访问，以及 secretKey 是否正确。'
+        : '还没有保存可用 DC 源。请先保存配置，再刷新容器列表。'
+  } catch (err) {
+    error.value = `刷新容器列表失败：${err?.message || err}`
+  } finally {
+    loadingContainers.value = false
+  }
+}
 </script>
 
 <style scoped>
 .dc-config {
-  max-height: 82vh;
+  height: min(82vh, 760px);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.config-body {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding-bottom: 24px;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.config-actions {
+  flex: 0 0 auto;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgb(var(--v-theme-surface));
 }
 .section-title {
   margin-top: 20px;

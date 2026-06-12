@@ -22,7 +22,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     plugin_name = "DC助手多源版"
     plugin_desc = "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份"
     plugin_icon = "Docker_Copilot.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "dockercopilothelpermulti_"
@@ -496,7 +496,43 @@ class DockerCopilotHelperMulti(_PluginBase):
         pass
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return [
+            {
+                "path": "/state",
+                "endpoint": self.api_state,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取 DC 助手多源状态",
+                "description": "返回已脱敏的源状态、容器选项和任务选择摘要"
+            }
+        ]
+
+    def api_state(self) -> Dict[str, Any]:
+        config = self.get_config() or {}
+        self._apply_config_snapshot(config)
+        source_states, containers = self._collect_page_state()
+        container_items = self._container_items_from_containers(containers)
+        enabled_sources = [source for source in self._sources if source.get("enabled", True)]
+        return {
+            "enabled": self._enabled,
+            "sources": [self._public_source(source) for source in self._sources],
+            "source_states": source_states,
+            "containers": [self._public_container(container) for container in containers],
+            "container_items": container_items,
+            "source_items": self._build_source_items(),
+            "updatablelist": self._updatable_list or [],
+            "autoupdatelist": self._auto_update_list or [],
+            "backup_sources": self._backup_sources or [],
+            "metrics": {
+                "sources": len(self._sources),
+                "enabled_sources": len(enabled_sources),
+                "containers": len(containers),
+                "updatable": len([item for item in containers if item.get("haveUpdate")]),
+                "notify_selected": len(self._updatable_list or []),
+                "auto_selected": len(self._auto_update_list or []),
+                "failed_sources": len([item for item in source_states if item.get("state") == "异常"])
+            }
+        }
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         config = self.get_config() or {}
@@ -721,6 +757,42 @@ class DockerCopilotHelperMulti(_PluginBase):
         except Exception as err:
             logger.error(f"DC助手多源版生成容器选项失败：{err}")
         return items
+
+    @staticmethod
+    def _container_items_from_containers(containers: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        items = []
+        for container in containers:
+            source_name = container.get("_source_name")
+            name = container.get("name")
+            title = f"{source_name} / {name}"
+            if container.get("haveUpdate"):
+                title = f"{title}（可更新）"
+            items.append({"title": title, "value": container.get("_key")})
+        return items
+
+    @staticmethod
+    def _public_source(source: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": source.get("id"),
+            "name": source.get("name"),
+            "host": source.get("host"),
+            "enabled": source.get("enabled", True)
+        }
+
+    @staticmethod
+    def _public_container(container: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "key": container.get("_key"),
+            "source_id": container.get("_source_id"),
+            "source_name": container.get("_source_name"),
+            "name": container.get("name"),
+            "id": container.get("id"),
+            "usingImage": container.get("usingImage"),
+            "status": container.get("status"),
+            "runningTime": container.get("runningTime"),
+            "createTime": container.get("createTime"),
+            "haveUpdate": container.get("haveUpdate")
+        }
 
     def _build_source_items(self) -> List[Dict[str, str]]:
         return [
