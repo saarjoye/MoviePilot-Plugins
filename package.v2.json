@@ -1,4 +1,4 @@
-﻿{
+{
     "UpcomingReleases":  {
                              "name":  "待播影视日历",
                              "description":  "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。",
@@ -149,7 +149,7 @@
                                      "description":  "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份",
                                      "labels":  "Docker",
                                      "version":  "1.0.3",
-                                     "icon":  "Docker_Copilot.png",
+                                     "icon":  "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/DockerCopilotHelperMulti.png",
                                      "author":  "wYw",
                                      "level":  1,
                                      "history":  {

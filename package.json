@@ -1,4 +1,4 @@
-﻿{
+{
     "HRManager":  {
                       "name":  "HR管理-魔改版",
                       "description":  "自动管理下载种子的HR标签，监控种子的做种时间和分享率，满足条件后自动更改标签并通知用户",
@@ -156,7 +156,7 @@
                                      "description":  "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份",
                                      "labels":  "Docker",
                                      "version":  "1.0.3",
-                                     "icon":  "Docker_Copilot.png",
+                                     "icon":  "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/DockerCopilotHelperMulti.png",
                                      "author":  "wYw",
                                      "level":  1,
                                      "history":  {
