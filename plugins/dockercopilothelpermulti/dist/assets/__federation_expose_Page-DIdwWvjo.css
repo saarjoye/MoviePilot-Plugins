@@ -1,8 +1,53 @@
-
-.max-host[data-v-02029310] {
+.task-center-page {
+  background: transparent;
+}
+.task-center-page .gap-2 {
+  gap: 8px;
+}
+.task-center-page .metric-card,
+.task-center-page .log-metric {
+  height: 100%;
+}
+.task-center-page .section-label {
+  color: rgba(var(--v-theme-on-surface), 0.88);
+  font-size: 0.875rem;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.task-center-page .task-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  min-height: 32px;
+}
+.task-center-page .task-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-page .empty-line {
+  color: rgba(var(--v-theme-on-surface), 0.58);
+  font-size: 0.875rem;
+  padding: 8px 0;
+}
+.task-center-page .max-message {
   max-width: 360px;
 }
-code[data-v-02029310] {
+.task-center-page .max-image {
+  max-width: 420px;
+}
+.task-center-page .max-container {
+  max-width: 180px;
+}
+.task-center-page .log-time {
+  white-space: nowrap;
+}
+.task-center-page .dialog-line {
+  line-height: 1.9;
+}
+.task-center-page code {
   background: rgba(var(--v-theme-primary), 0.08);
   border-radius: 6px;
   padding: 2px 6px;

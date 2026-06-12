@@ -22,7 +22,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     plugin_name = "DC助手多源版"
     plugin_desc = "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份"
     plugin_icon = "Docker_Copilot.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "dockercopilothelpermulti_"
@@ -46,6 +46,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     _interval = 10
     _sources: List[Dict[str, Any]] = []
     _sources_text = ""
+    _task_logs: List[Dict[str, Any]] = []
     _scheduler: Optional[BackgroundScheduler] = None
 
     def init_plugin(self, config: dict = None):
@@ -303,9 +304,9 @@ class DockerCopilotHelperMulti(_PluginBase):
             data = self._get_json(source, "/api/containers")
             if self._is_success(data):
                 return data.get("data") or []
-            logger.error(f"DC助手多源版[{source['name']}] 获取容器列表异常：{data}")
+            logger.error(f"DC助手多源版[{source['name']}] 获取容器列表异常：{self._safe_reason(data)}")
         except Exception as err:
-            logger.error(f"DC助手多源版[{source['name']}] 请求容器列表网络异常：{err}")
+            logger.error(f"DC助手多源版[{source['name']}] 请求容器列表网络异常：{self._safe_reason(err)}")
         return []
 
     def get_all_docker_list(self) -> List[Dict[str, Any]]:
@@ -325,20 +326,38 @@ class DockerCopilotHelperMulti(_PluginBase):
             data = self._get_json(source, "/api/images")
             if self._is_success(data, accepted_codes=(200,)):
                 return data.get("data") or []
-            logger.error(f"DC助手多源版[{source['name']}] 获取镜像列表异常：{data}")
+            logger.error(f"DC助手多源版[{source['name']}] 获取镜像列表异常：{self._safe_reason(data)}")
         except Exception as err:
-            logger.error(f"DC助手多源版[{source['name']}] 请求镜像列表网络异常：{err}")
+            logger.error(f"DC助手多源版[{source['name']}] 请求镜像列表网络异常：{self._safe_reason(err)}")
         return []
 
-    def remove_image(self, source: Dict[str, Any], sha: str) -> bool:
+    def remove_image(self, source: Dict[str, Any], sha: str, image: str = None,
+                     container_name: str = "unknown", reason: str = "unused") -> bool:
+        image_name = image or sha or "unknown"
         try:
             data = self._delete_json(source, f"/api/image/{sha}?force=false")
             if self._is_success(data, accepted_codes=(200,)):
-                logger.info(f"DC助手多源版[{source['name']}] 清理镜像成功：{sha}")
+                message = "镜像清理成功"
+                logger.info(
+                    f"DC助手多源版 镜像清理成功 "
+                    f"source={source['name']} container={container_name} image={image_name} reason={reason}"
+                )
+                self._record_task_log("镜像清理", source, container_name, image_name, True, message)
                 return True
-            logger.error(f"DC助手多源版[{source['name']}] 清理镜像异常：{data}")
+            message = self._format_dc_error(data)
+            logger.error(
+                f"DC助手多源版 镜像清理失败 "
+                f"source={source['name']} container={container_name} image={image_name} reason={message}"
+            )
+            self._record_task_log("镜像清理", source, container_name, image_name, False, message)
         except Exception as err:
-            logger.error(f"DC助手多源版[{source['name']}] 清理镜像网络异常：{err}")
+            safe_reason = self._safe_reason(err)
+            message = f"网络异常：{safe_reason}"
+            logger.error(
+                f"DC助手多源版 镜像清理网络异常 "
+                f"source={source['name']} container={container_name} image={image_name} reason={safe_reason}"
+            )
+            self._record_task_log("镜像清理", source, container_name, image_name, False, message)
         return False
 
     def auto_update(self):
@@ -354,7 +373,13 @@ class DockerCopilotHelperMulti(_PluginBase):
             if self._delete_images:
                 for image in self.get_images_list(source):
                     if not image.get("inUsed") and image.get("tag"):
-                        self.remove_image(source, image.get("id"))
+                        self.remove_image(
+                            source,
+                            image.get("id"),
+                            image=image.get("tag") or image.get("id"),
+                            container_name="unknown",
+                            reason="unused"
+                        )
             containers = self.get_docker_list(source)
             for container in containers:
                 name = container.get("name")
@@ -366,48 +391,83 @@ class DockerCopilotHelperMulti(_PluginBase):
                     continue
                 if not container.get("usingImage") or str(container.get("usingImage")).startswith("sha256:"):
                     self._notify_tag_error(source, container, "自动更新")
+                    self._record_task_log(
+                        "自动更新",
+                        source,
+                        name,
+                        container.get("usingImage") or "unknown",
+                        False,
+                        "镜像 TAG 不正确，无法自动更新"
+                    )
                     continue
-                self._update_container(source, container)
+                self._update_container(source, container, scene="自动更新", notify=self._auto_update_notify)
 
     @staticmethod
     def _has_key_for_source(selected: set, source_id: str) -> bool:
         prefix = f"{source_id}::"
         return any(str(item).startswith(prefix) for item in selected)
 
-    def _update_container(self, source: Dict[str, Any], container: Dict[str, Any]) -> bool:
+    def _update_container(self, source: Dict[str, Any], container: Dict[str, Any],
+                          scene: str = "自动更新", notify: bool = False) -> Dict[str, Any]:
         name = container.get("name")
+        image = container.get("usingImage") or "unknown"
         path = f"/api/container/{container.get('id')}/update"
         payload = {
             "containerName": name,
-            "imageNameAndTag": container.get("usingImage")
+            "imageNameAndTag": image
         }
         try:
             data = self._post_json(source, path, payload)
             if self._is_success(data, accepted_codes=(200,)):
                 task_id = (data.get("data") or {}).get("taskID")
-                if self._auto_update_notify:
+                message = "容器更新任务创建成功"
+                logger.info(
+                    f"DC助手多源版 更新任务创建成功 "
+                    f"source={source['name']} container={name} image={image} reason={scene}"
+                )
+                self._record_task_log(scene, source, name, image, True, message)
+                if notify:
                     self.post_message(
                         mtype=NotificationType.Plugin,
-                        title="【DC助手多源版-自动更新】",
-                        text=f"[{source['name']}] {name}\n容器更新任务创建成功"
+                        title=f"【DC助手多源版-{scene}】",
+                        text=f"[{source['name']}] {name}\n{message}"
                     )
                 if self._schedule_report and task_id:
                     self._report_progress(source, name, task_id)
-                return True
+                return {"success": True, "message": message, "task_id": task_id}
             else:
                 message = self._format_dc_error(data)
-                logger.error(f"DC助手多源版[{source['name']}] 创建更新任务失败：{data}")
-                self._notify_auto_update_failed(source, container, f"创建更新任务失败：{message}")
+                logger.error(
+                    f"DC助手多源版 更新任务创建失败 "
+                    f"source={source['name']} container={name} image={image} reason={message}"
+                )
+                self._record_task_log(scene, source, name, image, False, message)
+                if notify:
+                    self._notify_auto_update_failed(source, container, f"创建更新任务失败：{message}")
         except Exception as err:
-            logger.error(f"DC助手多源版[{source['name']}] 自动更新网络异常：{err}")
-            self._notify_auto_update_failed(source, container, f"请求 DockerCopilot 更新接口异常：{err}")
-        return False
+            safe_reason = self._safe_reason(err)
+            message = f"请求 DockerCopilot 更新接口异常：{safe_reason}"
+            logger.error(
+                f"DC助手多源版 更新任务网络异常 "
+                f"source={source['name']} container={name} image={image} reason={safe_reason}"
+            )
+            self._record_task_log(scene, source, name, image, False, message)
+            if notify:
+                self._notify_auto_update_failed(source, container, message)
+        return {"success": False, "message": message}
 
     @staticmethod
     def _format_dc_error(data: Optional[Dict[str, Any]]) -> str:
         if isinstance(data, dict):
-            return str(data.get("msg") or data.get("message") or data.get("detail") or data)
+            return DockerCopilotHelperMulti._safe_reason(data.get("msg") or data.get("message") or data.get("detail") or data)
         return "无响应"
+
+    @staticmethod
+    def _safe_reason(value: Any) -> str:
+        text = str(value or "-")
+        text = re.sub(r"https?://[^\s，。；,;]+", "[redacted-url]", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?i)(secretKey|token|cookie|authorization)=([^\s，。；,;]+)", r"\1=[redacted]", text)
+        return text
 
     def _notify_auto_update_failed(self, source: Dict[str, Any], container: Dict[str, Any], reason: str):
         if not self._auto_update_notify:
@@ -467,8 +527,24 @@ class DockerCopilotHelperMulti(_PluginBase):
                          f"构建时间：{container.get('createTime')}\n"
                          f"提示：这是更新通知任务，只负责提醒；如需自动更新，请同时在“自动更新容器”中选择该容器并配置自动更新 Cron。"
                 )
+                self._record_task_log(
+                    "更新通知",
+                    source,
+                    name,
+                    container.get("usingImage") or "unknown",
+                    True,
+                    "更新通知已发送"
+                )
             else:
                 self._notify_tag_error(source, container, "更新通知")
+                self._record_task_log(
+                    "更新通知",
+                    source,
+                    name,
+                    container.get("usingImage") or "unknown",
+                    False,
+                    "镜像 TAG 不正确，无法发送有效更新通知"
+                )
 
     def _notify_tag_error(self, source: Dict[str, Any], container: Dict[str, Any], scene: str):
         self.post_message(
@@ -481,6 +557,34 @@ class DockerCopilotHelperMulti(_PluginBase):
                  f"该镜像无法通过 DC 自动更新，请修正 TAG"
         )
 
+    @staticmethod
+    def _now_text() -> str:
+        return datetime.now(pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _record_task_log(self, action: str, source: Dict[str, Any], container_name: str,
+                         image: str, success: bool, message: str):
+        log_item = {
+            "time": self._now_text(),
+            "type": action,
+            "source": source.get("name") or source.get("id") or "-",
+            "source_id": source.get("id"),
+            "container": container_name or "unknown",
+            "image": image or "unknown",
+            "success": bool(success),
+            "result": "成功" if success else "失败",
+            "message": message or "-"
+        }
+        logs = list(getattr(self, "_task_logs", []) or [])
+        logs.insert(0, log_item)
+        self._task_logs = logs[:100]
+
+    def _last_log_for_container(self, container_key: str) -> Optional[Dict[str, Any]]:
+        source_id, name = self._split_container_key(container_key or "")
+        for item in getattr(self, "_task_logs", []) or []:
+            if item.get("source_id") == source_id and item.get("container") == name:
+                return item
+        return None
+
     def backup(self):
         logger.info("DC助手多源版-备份-准备执行")
         results = []
@@ -492,12 +596,13 @@ class DockerCopilotHelperMulti(_PluginBase):
                     results.append(f"[{source['name']}] 成功")
                     logger.info(f"DC助手多源版[{source['name']}] 备份完成")
                 else:
-                    msg = data.get("msg") if isinstance(data, dict) else "无响应"
+                    msg = self._format_dc_error(data)
                     results.append(f"[{source['name']}] 失败：{msg}")
-                    logger.error(f"DC助手多源版[{source['name']}] 备份失败：{data}")
+                    logger.error(f"DC助手多源版[{source['name']}] 备份失败：{msg}")
             except Exception as err:
+                safe_reason = self._safe_reason(err)
                 results.append(f"[{source['name']}] 失败：网络异常")
-                logger.error(f"DC助手多源版[{source['name']}] 备份网络异常：{err}")
+                logger.error(f"DC助手多源版[{source['name']}] 备份网络异常：{safe_reason}")
         if self._backups_notify and results:
             self.post_message(
                 mtype=NotificationType.Plugin,
@@ -528,6 +633,14 @@ class DockerCopilotHelperMulti(_PluginBase):
                 "auth": "bear",
                 "summary": "获取 DC 助手多源状态",
                 "description": "返回已脱敏的源状态、容器选项和任务选择摘要"
+            },
+            {
+                "path": "/manual_update",
+                "endpoint": self.api_manual_update,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "手动升级指定容器",
+                "description": "按 source_id::container_name 调用对应 DockerCopilot 源的容器更新接口"
             }
         ]
 
@@ -537,6 +650,10 @@ class DockerCopilotHelperMulti(_PluginBase):
         source_states, containers = self._collect_page_state()
         container_items = self._container_items_from_containers(containers)
         enabled_sources = [source for source in self._sources if source.get("enabled", True)]
+        task_logs = list(getattr(self, "_task_logs", []) or [])
+        logs_success = len([item for item in task_logs if item.get("success")])
+        logs_failed = len([item for item in task_logs if not item.get("success")])
+        auto_updatable_count = len([item for item in containers if item.get("_selected_auto") and item.get("haveUpdate")])
         return {
             "enabled": self._enabled,
             "sources": [self._public_source(source) for source in self._sources],
@@ -547,6 +664,7 @@ class DockerCopilotHelperMulti(_PluginBase):
             "updatablelist": self._updatable_list or [],
             "autoupdatelist": self._auto_update_list or [],
             "backup_sources": self._backup_sources or [],
+            "logs": task_logs,
             "metrics": {
                 "sources": len(self._sources),
                 "enabled_sources": len(enabled_sources),
@@ -554,9 +672,48 @@ class DockerCopilotHelperMulti(_PluginBase):
                 "updatable": len([item for item in containers if item.get("haveUpdate")]),
                 "notify_selected": len(self._updatable_list or []),
                 "auto_selected": len(self._auto_update_list or []),
-                "failed_sources": len([item for item in source_states if item.get("state") == "异常"])
+                "auto_updatable": auto_updatable_count,
+                "failed_sources": len([item for item in source_states if item.get("state") == "异常"]),
+                "logs_total": len(task_logs),
+                "logs_success": logs_success,
+                "logs_failed": logs_failed
             }
         }
+
+    def api_manual_update(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        config = self.get_config() or {}
+        self._apply_config_snapshot(config)
+        container_key = str((data or {}).get("container_key") or "").strip()
+        if not container_key:
+            return {"success": False, "message": "缺少容器标识"}
+
+        source_id, container_name = self._split_container_key(container_key)
+        source = self._source_by_id(source_id)
+        if not source:
+            return {"success": False, "message": "未找到对应的启用源"}
+
+        containers = self.get_docker_list(source)
+        target = None
+        for container in containers:
+            if self._container_key(source, container.get("name", "")) == container_key:
+                target = container
+                break
+        if not target:
+            return {"success": False, "message": "未找到对应容器"}
+        if not target.get("haveUpdate"):
+            return {"success": False, "message": "容器当前无需升级"}
+
+        image = target.get("usingImage")
+        if not image or str(image).startswith("sha256:"):
+            message = "镜像 TAG 不正确，无法手动升级"
+            logger.error(
+                f"DC助手多源版 手动升级失败 "
+                f"source={source['name']} container={target.get('name')} image={image or 'unknown'} reason={message}"
+            )
+            self._record_task_log("手动升级", source, target.get("name"), image or "unknown", False, message)
+            return {"success": False, "message": message}
+
+        return self._update_container(source, target, scene="手动升级", notify=False)
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         config = self.get_config() or {}
@@ -799,12 +956,13 @@ class DockerCopilotHelperMulti(_PluginBase):
         return {
             "id": source.get("id"),
             "name": source.get("name"),
-            "host": source.get("host"),
+            "host": "已脱敏" if source.get("host") else "",
             "enabled": source.get("enabled", True)
         }
 
     @staticmethod
     def _public_container(container: Dict[str, Any]) -> Dict[str, Any]:
+        last_log = container.get("_last_log") or {}
         return {
             "key": container.get("_key"),
             "source_id": container.get("_source_id"),
@@ -815,7 +973,11 @@ class DockerCopilotHelperMulti(_PluginBase):
             "status": container.get("status"),
             "runningTime": container.get("runningTime"),
             "createTime": container.get("createTime"),
-            "haveUpdate": container.get("haveUpdate")
+            "haveUpdate": container.get("haveUpdate"),
+            "selected_notify": container.get("_selected_notify", False),
+            "selected_auto": container.get("_selected_auto", False),
+            "last_result": last_log.get("result") or ("等待更新" if container.get("haveUpdate") else "无需更新"),
+            "last_message": last_log.get("message") or "-"
         }
 
     def _build_source_items(self) -> List[Dict[str, str]]:
@@ -926,6 +1088,8 @@ class DockerCopilotHelperMulti(_PluginBase):
     def _collect_page_state(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         source_states = []
         containers = []
+        notify_selected = set(self._updatable_list or [])
+        auto_selected = set(self._auto_update_list or [])
         for source in self._sources:
             source_containers = []
             state = "停用"
@@ -941,11 +1105,11 @@ class DockerCopilotHelperMulti(_PluginBase):
                         version = "1.1.x"
                     else:
                         state = "异常"
-                        msg = data.get("msg") if isinstance(data, dict) else "无响应"
+                        msg = self._format_dc_error(data)
                         message = f"接口异常：{msg}"
                 except Exception as err:
                     state = "异常"
-                    message = f"连接异常：{err}"
+                    message = f"连接异常：{self._safe_reason(err)}"
                     source_containers = []
             for container in source_containers:
                 item = dict(container)
@@ -953,16 +1117,28 @@ class DockerCopilotHelperMulti(_PluginBase):
                 item["_source_id"] = source["id"]
                 item["_source_name"] = source["name"]
                 item["_key"] = self._container_key(source, item.get("name", ""))
+                name = item.get("name")
+                legacy_notify = name in notify_selected and not self._has_key_for_source(notify_selected, source["id"])
+                legacy_auto = name in auto_selected and not self._has_key_for_source(auto_selected, source["id"])
+                item["_selected_notify"] = item["_key"] in notify_selected or legacy_notify
+                item["_selected_auto"] = item["_key"] in auto_selected or legacy_auto
+                item["_last_log"] = self._last_log_for_container(item["_key"])
                 containers.append(item)
+            selected_auto_count = len([item for item in containers if item.get("_source_id") == source.get("id")
+                                       and item.get("_selected_auto")])
+            auto_updatable_count = len([item for item in containers if item.get("_source_id") == source.get("id")
+                                        and item.get("_selected_auto") and item.get("haveUpdate")])
             source_states.append({
                 "id": source.get("id"),
                 "name": source.get("name"),
-                "host": source.get("host"),
+                "host": "已脱敏" if source.get("host") else "",
                 "enabled": source.get("enabled", True),
                 "state": state,
                 "version": version,
                 "message": message,
-                "container_count": len(source_containers)
+                "container_count": len(source_containers),
+                "selected_auto_count": selected_auto_count,
+                "auto_updatable_count": auto_updatable_count
             })
         return source_states, containers
 
