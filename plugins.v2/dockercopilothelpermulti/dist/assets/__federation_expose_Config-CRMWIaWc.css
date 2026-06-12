@@ -1,0 +1,34 @@
+
+.dc-config[data-v-6d2d907e] {
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.config-body[data-v-6d2d907e] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 24px;
+  overscroll-behavior: contain;
+}
+.config-actions[data-v-6d2d907e] {
+  flex: 0 0 auto;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgb(var(--v-theme-surface));
+}
+.section-title[data-v-6d2d907e] {
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+.gap-2[data-v-6d2d907e] {
+  gap: 8px;
+}
+.source-card[data-v-6d2d907e] {
+  border-radius: 14px;
+}
+code[data-v-6d2d907e] {
+  background: rgba(var(--v-theme-primary), 0.08);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
