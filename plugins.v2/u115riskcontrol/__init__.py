@@ -49,7 +49,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -1160,22 +1160,33 @@ class U115RiskControl(_PluginBase):
         retried_ids = set(str(item) for item in retry_state.get("retried_ids", []))
         histories = self._list_failed_transfer_histories(TransferHistoryOper, TransferHistory)
         candidates = []
+        candidate_details: List[str] = []
+        skipped_details: List[str] = []
         for history in histories:
             history_id = str(getattr(history, "id", ""))
-            if not history_id or history_id in retried_ids:
+            history_summary = self._format_transfer_history_summary(history)
+            if not history_id:
+                skipped_details.append(f"{history_summary}: 缺少历史ID")
+                continue
+            if history_id in retried_ids:
+                skipped_details.append(f"{history_summary}: 此前已由插件重试过")
+                continue
+            if self._retry_failed_max_count and len(candidates) >= self._retry_failed_max_count:
+                skipped_details.append(f"{history_summary}: 超过单次上限")
                 continue
             candidates.append(history)
-            if self._retry_failed_max_count and len(candidates) >= self._retry_failed_max_count:
-                break
+            candidate_details.append(history_summary)
 
         total = len(candidates)
         success_count = 0
         failed_count = 0
-        skipped_count = max(len(histories) - total, 0)
+        skipped_count = len(skipped_details)
         failure_details: List[str] = []
 
         for history in candidates:
             history_id = str(getattr(history, "id", ""))
+            history_summary = self._format_transfer_history_summary(history)
+            logger.info(f"[U115RiskControl] retry transfer history started: {history_summary}")
             try:
                 state, message = self._retry_one_transfer_history(
                     history=history,
@@ -1198,9 +1209,13 @@ class U115RiskControl(_PluginBase):
             }
             if state:
                 success_count += 1
+                logger.info(f"[U115RiskControl] retry transfer history accepted: {history_summary}")
             else:
                 failed_count += 1
-                failure_details.append(f"#{history_id}: {self._short_text(message)}")
+                failure_details.append(f"{history_summary}: {self._short_text(message)}")
+                logger.warning(
+                    f"[U115RiskControl] retry transfer history failed: {history_summary}, message={message}"
+                )
 
         retry_state["version"] = RETRY_DATA_VERSION
         retry_state["retried_ids"] = sorted(retried_ids, key=lambda item: int(item) if item.isdigit() else item)[-500:]
@@ -1211,6 +1226,8 @@ class U115RiskControl(_PluginBase):
             "success": success_count,
             "failed": failed_count,
             "skipped": skipped_count,
+            "candidates": candidate_details[:20],
+            "skipped_details": skipped_details[:20],
         }
         self._save_retry_state(retry_state)
 
@@ -1225,9 +1242,13 @@ class U115RiskControl(_PluginBase):
         else:
             self._last_retry_status = "已完成"
 
-        detail = f"本次候选 {total} 条，成功 {success_count} 条，失败 {failed_count} 条，跳过 {skipped_count} 条。"
+        scan_detail = f"本次扫描到状态失败历史 {len(histories)} 条；本次候选 {total} 条，成功 {success_count} 条，失败 {failed_count} 条，跳过 {skipped_count} 条。"
+        candidate_text = self._join_limited_details(candidate_details, "候选任务")
+        skipped_text = self._join_limited_details(skipped_details, "跳过任务")
+        detail_parts = [scan_detail, candidate_text, skipped_text]
         if failure_details:
-            detail = f"{detail} 失败摘要：{'；'.join(failure_details[:3])}"
+            detail_parts.append(f"失败摘要：{'；'.join(failure_details[:3])}")
+        detail = " ".join(part for part in detail_parts if part)
         self._record_event(
             event_type=EVENT_TYPE_RETRY_FINISHED,
             source="U115RiskControl / failed transfer retry",
@@ -1250,6 +1271,28 @@ class U115RiskControl(_PluginBase):
                 continue
         histories = TransferHistory.list_by_page(transfer_history._db, 1, 200, False)
         return list(histories or [])
+
+    def _format_transfer_history_summary(self, history: Any) -> str:
+        history_id = self._short_text(getattr(history, "id", "") or "无ID", 24)
+        title = self._short_text(getattr(history, "title", "") or getattr(history, "name", ""), 80)
+        if not title:
+            src_payload = getattr(history, "src_fileitem", None)
+            if isinstance(src_payload, dict):
+                for key in ("name", "basename", "path", "file_path", "src"):
+                    title = self._short_text(self._basename(src_payload.get(key)), 80)
+                    if title:
+                        break
+        if not title:
+            title = self._short_text(
+                self._basename(getattr(history, "src", "") or getattr(history, "dest", "")),
+                80,
+            )
+        if not title:
+            title = "未命名任务"
+        episodes = self._short_text(getattr(history, "episodes", "") or "", 40)
+        if episodes:
+            title = f"{title} {episodes}"
+        return f"#{history_id} {title}"
 
     def _retry_one_transfer_history(self, *, history, TransferChain, FileItem, MediaType, EpisodeFormat) -> Tuple[bool, str]:
         src_payload = getattr(history, "src_fileitem", None)
@@ -1363,6 +1406,22 @@ class U115RiskControl(_PluginBase):
         if len(text) > limit:
             return f"{text[:limit]}..."
         return text
+
+    @staticmethod
+    def _basename(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text.replace("\\", "/").rstrip("/").split("/")[-1]
+
+    def _join_limited_details(self, items: List[str], label: str, limit: int = 5) -> str:
+        if not items:
+            return ""
+        shown = "；".join(self._short_text(item, 100) for item in items[:limit])
+        remaining = len(items) - limit
+        if remaining > 0:
+            shown = f"{shown}；另 {remaining} 条"
+        return f"{label}：{shown}。"
 
     def _extract_message(self, result: Any) -> str:
         if isinstance(result, dict):
