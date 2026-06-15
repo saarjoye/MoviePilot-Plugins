@@ -113,8 +113,8 @@
   "TingBookSync": {
     "name": "听书同步",
     "description": "扫描听书系统下载监听目录，接管散音频，上传 115 并生成 302 STRM。",
-    "labels": "听书,工具",
-    "version": "0.1.25",
+    "labels": "有声书,工具",
+    "version": "0.1.28",
     "icon": "tingbooksync.png",
     "author": "wYw",
     "level": 1,
@@ -142,7 +142,8 @@
       "v0.1.21": "TingBookSync 0.1.21 增强整理操作进度日志",
       "v0.1.22": "TingBookSync 0.1.22 修复重新生成STRM走上传和pickcode补齐",
       "v0.1.24": "TingBookSync 0.1.24 改为pickcode直连STRM播放模式",
-      "v0.1.25": "TingBookSync 0.1.25 修复 ADS 访问 302 STRM 播放接口返回 404：支持 HEAD，透传 User-Agent 给 115 取链，取链失败返回可诊断错误。"
+      "v0.1.25": "TingBookSync 0.1.25 修复 ADS 访问 302 STRM 播放接口返回 404：支持 HEAD，透传 User-Agent 给 115 取链，取链失败返回可诊断错误。",
+      "v0.1.28": "TingBookSync 0.1.28 发布：同步 STRM 批量覆盖重生能力，并配合 ADS STRM 302 魔改版测试"
     }
   }
 }
