@@ -213,7 +213,7 @@ NETFLIX_GENRE_NAME_MAP = {
 }
 
 
-CACHE_SCHEMA_VERSION = 11
+CACHE_SCHEMA_VERSION = 12
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
@@ -405,8 +405,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.22"
-    plugin_release_date = "2026-04-20"
+    plugin_version = "0.6.23"
+    plugin_release_date = "2026-06-17"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -1422,6 +1422,10 @@ class UpcomingReleases(_PluginBase):
         type_key = self._clean_text((recognition or {}).get("type_key") or item.get("type_key")).lower()
         if self._type_key_to_media_type(type_key) != MediaType.TV:
             return None
+        for key in ("season", "begin_season", "season_number"):
+            season = safe_int((recognition or {}).get(key), 0)
+            if 0 < season <= 100:
+                return season
         title = self._clean_text(item.get("title"))
         if not title:
             return 1
@@ -1430,7 +1434,89 @@ class UpcomingReleases(_PluginBase):
         except Exception as err:
             logger.warning(f"[UpcomingReleases] parse subscribe season failed: {title} - {err}")
             season = None
-        return season or 1
+        if season:
+            return season
+        suffix_season = self._extract_title_suffix_season(title, recognition)
+        return suffix_season or 1
+
+    def _extract_title_suffix_season(
+        self,
+        title: str,
+        recognition: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        title_text = self._clean_text(title)
+        if not title_text:
+            return None
+        title_base = re.sub(r"(?:19|20)\d{2}$", "", title_text).strip()
+        match = re.search(r"(?<![A-Za-z0-9])(?:S|Season)\s*0*([2-9]\d?)(?!\d)$", title_base, re.IGNORECASE)
+        if not match:
+            match = re.search(r"(.+?)(?:第\s*)?([二三四五六七八九十两\d]{1,4})\s*季$", title_base)
+        if not match:
+            match = re.search(r"(.+?)([2-9]\d?)$", title_base)
+        if not match:
+            return None
+        prefix = self._clean_text(match.group(1) if match.lastindex and match.lastindex > 1 else title_base)
+        if re.search(r"(?:19|20)\d{2}$", title_base):
+            return None
+        if not self._looks_like_title_sequel_prefix(prefix, recognition):
+            return None
+        season = self._parse_season_number_text(match.group(match.lastindex))
+        if 0 < season <= 100:
+            return season
+        return None
+
+    def _parse_season_number_text(self, value: Any) -> int:
+        text = self._clean_text(value)
+        if not text:
+            return 0
+        if text.isdigit():
+            return safe_int(text, 0)
+        digit_map = {
+            "零": 0,
+            "〇": 0,
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
+        if text == "十":
+            return 10
+        if text.startswith("十"):
+            return 10 + digit_map.get(text[1:], 0)
+        if text.endswith("十"):
+            return digit_map.get(text[:-1], 0) * 10
+        if "十" in text:
+            left, right = text.split("十", 1)
+            return digit_map.get(left, 0) * 10 + digit_map.get(right, 0)
+        return digit_map.get(text, 0)
+
+    def _looks_like_title_sequel_prefix(
+        self,
+        prefix: str,
+        recognition: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        prefix_text = self._clean_text(prefix)
+        if len(prefix_text) < 2:
+            return False
+        if re.search(r"[A-Za-z][A-Za-z0-9._ -]*$", prefix_text) and not self._contains_cjk(prefix_text):
+            return False
+        recognition_title = self._clean_text((recognition or {}).get("display_title") or (recognition or {}).get("title"))
+        if recognition_title:
+            normalized_prefix = self._normalize_compare_text(prefix_text)
+            normalized_recognition = self._normalize_compare_text(recognition_title)
+            if normalized_prefix and (
+                normalized_prefix == normalized_recognition
+                or normalized_prefix in normalized_recognition
+                or normalized_recognition in normalized_prefix
+            ):
+                return True
+        return self._contains_cjk(prefix_text)
 
     def _type_key_to_media_type(self, type_key: Optional[str]) -> Optional[MediaType]:
         normalized = self._clean_text(type_key).lower()
@@ -2559,7 +2645,9 @@ class UpcomingReleases(_PluginBase):
             if resolved_mtype == MediaType.MOVIE:
                 meta.type = MediaType.MOVIE
             elif resolved_mtype == MediaType.TV:
-                meta.type = MediaType.TV
+                meta.type = MediaType.TV
+                if meta.begin_season is None:
+                    meta.begin_season = self._extract_title_suffix_season(title) or None
             try:
                 media = self.chain.recognize_media(meta=meta, mtype=resolved_mtype, cache=True)
                 if media:
@@ -2581,6 +2669,7 @@ class UpcomingReleases(_PluginBase):
             "tmdb_id": media.tmdb_id,
             "douban_id": media.douban_id,
             "bangumi_id": media.bangumi_id,
+            "season": safe_int(getattr(media, "season", None), 0) or None,
             "title": item.get("title"),
             "display_title": display_title or item.get("title"),
             "year": item.get("year"),
@@ -2948,9 +3037,10 @@ class UpcomingReleases(_PluginBase):
             "tmdb_id": None,
             "douban_id": None,
             "bangumi_id": None,
+            "season": self._extract_title_suffix_season(item.get("title")) or None,
             "title": item.get("title"),
             "display_title": item.get("title"),
-            "year": item.get("year"),
+            "year": item.get("year"),
             "country_codes": country_codes,
             "genre_names": genre_names,
             "updated": int(time.time()),
