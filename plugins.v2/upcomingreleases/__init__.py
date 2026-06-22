@@ -213,7 +213,7 @@ NETFLIX_GENRE_NAME_MAP = {
 }
 
 
-CACHE_SCHEMA_VERSION = 12
+CACHE_SCHEMA_VERSION = 13
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
@@ -405,8 +405,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.23"
-    plugin_release_date = "2026-06-17"
+    plugin_version = "0.6.24"
+    plugin_release_date = "2026-06-22"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -1000,9 +1000,23 @@ class UpcomingReleases(_PluginBase):
         )
         logger.info(f"[UpcomingReleases] page subscribe result: title={item.get('title')} sid={sid} message={message or ''}")
         release_text = self._format_release_display(item)
-        if sid and not self._is_exists_message(message):
+        if sid and not self._is_exists_message(message):
+            verified, actual_season, verify_message = self._verify_added_subscribe(item, sid, resolved_season)
+            if not verified:
+                logger.error(
+                    "[UpcomingReleases] page subscribe season verify failed: "
+                    f"title={item.get('title')} sid={sid} target_season={resolved_season} "
+                    f"actual_season={actual_season} reason={verify_message}"
+                )
+                warning = (
+                    f"{item.get('title')} 订阅创建后{verify_message}"
+                    f"（目标 S{safe_int(resolved_season, 0):02d}，实际 "
+                    f"{'S' + str(actual_season).zfill(2) if actual_season else '空'}）。"
+                )
+                self._set_page_feedback("error", warning)
+                return {"success": False, "message": warning, "sid": sid}
             self._set_page_feedback("success", f"已添加订阅：{item.get('title')}（{release_text}）")
-            return {"success": True, "message": message or "added"}
+            return {"success": True, "message": message or "added", "sid": sid, "actual_season": actual_season}
 
         if self._is_exists_message(message):
             claimed = self._claim_subscribe_owner(item=item, username=username)
@@ -1065,7 +1079,81 @@ class UpcomingReleases(_PluginBase):
             logger.warning(f"[UpcomingReleases] ???? mediaid ????: {err}")
             return None
 
-    def _subscribe_record_matches_username(self, subscribe, username: Optional[str] = None) -> bool:
+    def _get_subscribe_by_sid(self, sid: Any):
+        sid_value = safe_int(sid, 0)
+        if not sid_value:
+            return None
+        subscribe_oper = SubscribeOper()
+        getter = getattr(subscribe_oper, "get", None)
+        if callable(getter):
+            try:
+                return getter(sid_value)
+            except Exception as err:
+                logger.warning(f"[UpcomingReleases] subscribe sid lookup failed: sid={sid_value} - {err}")
+        try:
+            return Subscribe.get(subscribe_oper._db, rid=sid_value)
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] subscribe sid model lookup failed: sid={sid_value} - {err}")
+            return None
+
+    def _subscribe_season_matches(self, expected_season: Optional[int], record_season: Any) -> bool:
+        expected = safe_int(expected_season, 0)
+        actual = safe_int(record_season, 0)
+        if expected >= 2:
+            return actual == expected
+        if expected == 1:
+            return actual in {0, 1}
+        return True
+
+    def _verify_added_subscribe(
+        self,
+        item: Dict[str, Any],
+        sid: Any,
+        target_season: Optional[int],
+    ) -> Tuple[bool, Optional[int], str]:
+        record = self._get_subscribe_by_sid(sid)
+        if not record:
+            return False, None, "订阅创建后未查询到数据库记录"
+        actual_season = safe_int(getattr(record, "season", None), 0) or None
+        if not self._subscribe_season_matches(target_season, actual_season):
+            return False, actual_season, "季号不一致"
+        expected_mediaid = self._make_subscribe_mediaid(item)
+        actual_mediaid = self._clean_text(getattr(record, "mediaid", None))
+        if expected_mediaid and actual_mediaid != expected_mediaid:
+            try:
+                SubscribeOper().update(getattr(record, "id", sid), {"mediaid": expected_mediaid})
+            except Exception as err:
+                logger.warning(f"[UpcomingReleases] subscribe mediaid backfill failed: sid={sid} - {err}")
+                return False, actual_season, "mediaid 未写入订阅表"
+            record = self._get_subscribe_by_sid(sid)
+            actual_mediaid = self._clean_text(getattr(record, "mediaid", None))
+            if actual_mediaid != expected_mediaid:
+                return False, actual_season, "mediaid 未写入订阅表"
+        return True, actual_season, ""
+
+    def _format_subscribe_result_detail(
+        self,
+        item: Dict[str, Any],
+        sid: Any = None,
+        target_season: Optional[int] = None,
+        actual_season: Optional[int] = None,
+    ) -> str:
+        release_text = self._clean_text(item.get("release_text") or self._format_release_display(item))
+        title = self._clean_text(item.get("title"))
+        target = safe_int(target_season, 0)
+        actual = safe_int(actual_season, 0)
+        parts = [title]
+        if target > 0:
+            parts.append(f"(Season {target})")
+        elif release_text:
+            parts.append(f"({release_text})")
+        if sid:
+            parts.append(f"-> sid={sid}")
+        if actual > 0:
+            parts.append(f"actual=S{actual:02d}")
+        return " ".join(parts)
+
+    def _subscribe_record_matches_username(self, subscribe, username: Optional[str] = None) -> bool:
         normalized_username = self._resolve_subscribe_username(username)
         if not normalized_username:
             return True
@@ -1082,9 +1170,19 @@ class UpcomingReleases(_PluginBase):
         populate_recognition: bool = False,
         recognition: Optional[Dict[str, Any]] = None,
     ):
-        mediaid = self._make_subscribe_mediaid(item)
-        record = self._get_subscribe_by_mediaid(mediaid)
-        if record and self._subscribe_record_matches_username(record, username=username):
+        mediaid = self._make_subscribe_mediaid(item)
+        recognition = recognition or self._get_cached_recognition(
+            item,
+            populate=populate_recognition,
+            require_ids=False,
+        ) or {}
+        resolved_season = self._resolve_item_subscribe_season(item, recognition)
+        record = self._get_subscribe_by_mediaid(mediaid)
+        if (
+            record
+            and self._subscribe_record_matches_username(record, username=username)
+            and self._subscribe_season_matches(resolved_season, getattr(record, "season", None))
+        ):
             return record
 
         expected_title = self._normalize_compare_text(item.get("title"))
@@ -1119,7 +1217,11 @@ class UpcomingReleases(_PluginBase):
                 except Exception as err:
                     logger.warning(f"[UpcomingReleases] subscribe ID lookup failed: {lookup} - {err}")
                     record = None
-                if record and self._subscribe_record_matches_username(record, username=username):
+                if (
+                    record
+                    and self._subscribe_record_matches_username(record, username=username)
+                    and self._subscribe_season_matches(expected_season, getattr(record, "season", None))
+                ):
                     return record
 
         try:
@@ -1141,7 +1243,7 @@ class UpcomingReleases(_PluginBase):
                 if expected_year and subscribe_year and subscribe_year != expected_year:
                     continue
                 subscribe_season = getattr(subscribe, "season", None)
-                if expected_season is not None and subscribe_season not in {None, expected_season}:
+                if not self._subscribe_season_matches(expected_season, subscribe_season):
                     continue
                 return subscribe
         return None
@@ -1285,7 +1387,16 @@ class UpcomingReleases(_PluginBase):
                     "text": status_chip_map[subscription_status]["text"],
                 }
             )
-        if item.get("time_key") in TIME_LABELS and item.get("time_key") != "all":
+        target_season = safe_int(item.get("target_season"), 0)
+        if target_season > 0:
+            chips.append(
+                {
+                    "component": "VChip",
+                    "props": {"class": "mr-2 mb-2", "color": "secondary", "size": "small", "variant": "tonal"},
+                    "text": f"S{target_season:02d}",
+                }
+            )
+        if item.get("time_key") in TIME_LABELS and item.get("time_key") != "all":
             chips.append(
                 {
                     "component": "VChip",
@@ -1414,6 +1525,59 @@ class UpcomingReleases(_PluginBase):
                 values.append(normalized)
         return values or ["tv"]
 
+    def _extract_item_target_season(
+        self,
+        item: Dict[str, Any],
+        recognition: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[int], Optional[str]]:
+        type_key = self._clean_text((recognition or {}).get("type_key") or item.get("type_key")).lower()
+        if self._type_key_to_media_type(type_key) != MediaType.TV:
+            return None, None
+        direct_season = safe_int(item.get("target_season"), 0)
+        direct_source = self._clean_text(item.get("season_source"))
+        if 0 < direct_season <= 100 and direct_source != "default":
+            return direct_season, direct_source or "item"
+        for field in ("release_text", "title", "story"):
+            season = self._extract_explicit_season_text(item.get(field))
+            if season is not None:
+                return season, field
+        for key in ("target_season", "season", "begin_season", "season_number"):
+            season = safe_int((recognition or {}).get(key), 0)
+            if 0 < season <= 100:
+                source = self._clean_text((recognition or {}).get("season_source")) or key
+                return season, source
+        title = self._clean_text(item.get("title"))
+        if title:
+            try:
+                season = MetaInfo(title).begin_season
+            except Exception as err:
+                logger.warning(f"[UpcomingReleases] parse subscribe season failed: {title} - {err}")
+                season = None
+            if season:
+                return season, "meta"
+            suffix_season = self._extract_title_suffix_season(title, recognition)
+            if suffix_season:
+                return suffix_season, "title"
+        return 1, "default"
+
+    def _extract_explicit_season_text(self, value: Any) -> Optional[int]:
+        text = self._clean_text(value)
+        if not text:
+            return None
+        patterns = [
+            r"(?<![A-Za-z0-9])Season\s*0*([1-9]\d?)(?!\d)",
+            r"(?<![A-Za-z0-9])S\s*0*([1-9]\d?)(?!\d)",
+            r"第\s*([一二三四五六七八九十两〇零\d]{1,4})\s*季",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            season = self._parse_season_number_text(match.group(1))
+            if 0 < season <= 100:
+                return season
+        return None
+
     def _resolve_item_subscribe_season(
         self,
         item: Dict[str, Any],
@@ -1422,22 +1586,8 @@ class UpcomingReleases(_PluginBase):
         type_key = self._clean_text((recognition or {}).get("type_key") or item.get("type_key")).lower()
         if self._type_key_to_media_type(type_key) != MediaType.TV:
             return None
-        for key in ("season", "begin_season", "season_number"):
-            season = safe_int((recognition or {}).get(key), 0)
-            if 0 < season <= 100:
-                return season
-        title = self._clean_text(item.get("title"))
-        if not title:
-            return 1
-        try:
-            season = MetaInfo(title).begin_season
-        except Exception as err:
-            logger.warning(f"[UpcomingReleases] parse subscribe season failed: {title} - {err}")
-            season = None
-        if season:
-            return season
-        suffix_season = self._extract_title_suffix_season(title, recognition)
-        return suffix_season or 1
+        season, _ = self._extract_item_target_season(item, recognition)
+        return season or 1
 
     def _extract_title_suffix_season(
         self,
@@ -1572,8 +1722,21 @@ class UpcomingReleases(_PluginBase):
         recognition: Optional[Dict[str, Any]] = None,
     ):
         mediaid = self._make_subscribe_mediaid(item)
-        record = self._get_subscribe_history_by_mediaid(mediaid)
-        if record and self._subscribe_record_matches_username(record, username=username):
+        recognition = recognition or self._get_cached_recognition(
+            item,
+            populate=populate_recognition,
+            require_ids=False,
+        ) or {}
+        resolved_season = self._resolve_item_subscribe_season(item, recognition)
+        record = self._get_subscribe_history_by_mediaid(mediaid)
+        if (
+            record
+            and self._subscribe_record_matches_username(record, username=username)
+            and self._subscribe_season_matches(
+                resolved_season,
+                getattr(record, "season", None),
+            )
+        ):
             return record
 
         expected_title = self._normalize_compare_text(item.get("title"))
@@ -1603,13 +1766,13 @@ class UpcomingReleases(_PluginBase):
                     continue
                 history_season = getattr(history, "season", None)
                 if tmdb_id and getattr(history, "tmdbid", None) == tmdb_id:
-                    if expected_season is None or history_season in {None, expected_season}:
+                    if self._subscribe_season_matches(expected_season, history_season):
                         return history
                 if douban_id and self._clean_text(getattr(history, "doubanid", None)) == douban_id:
-                    if expected_season is None or history_season in {None, expected_season}:
+                    if self._subscribe_season_matches(expected_season, history_season):
                         return history
                 if bangumi_id and safe_int(getattr(history, "bangumiid", None), 0) == bangumi_id:
-                    if expected_season is None or history_season in {None, expected_season}:
+                    if self._subscribe_season_matches(expected_season, history_season):
                         return history
 
         for type_key in type_candidates:
@@ -1625,7 +1788,7 @@ class UpcomingReleases(_PluginBase):
                 if expected_year and history_year and history_year != expected_year:
                     continue
                 history_season = getattr(history, "season", None)
-                if expected_season is not None and history_season not in {None, expected_season}:
+                if not self._subscribe_season_matches(expected_season, history_season):
                     continue
                 return history
         return None
@@ -1735,7 +1898,9 @@ class UpcomingReleases(_PluginBase):
     def _make_browser_group_key(self, item: Dict[str, Any]) -> Tuple[str, str]:
         title_key = self._normalize_compare_text(item.get("title"))
         type_key = self._clean_text(item.get("type_key") or "").lower() or "unknown"
-        return title_key, type_key
+        target_season = safe_int(item.get("target_season"), 0)
+        season_key = str(target_season) if target_season > 1 else ""
+        return "|".join([title_key, season_key]) if season_key else title_key, type_key
 
     def _merge_browser_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -1782,7 +1947,13 @@ class UpcomingReleases(_PluginBase):
         primary["platform_labels"] = platform_labels
         primary["detail_link"] = detail_links[0] if detail_links else primary.get("detail_link")
         primary["detail_links"] = detail_links
-        primary["reserve_count"] = reserve_count
+        primary["reserve_count"] = reserve_count
+        for item in group_items:
+            target_season = safe_int(item.get("target_season"), 0)
+            if target_season > 0:
+                primary["target_season"] = target_season
+                primary["season_source"] = item.get("season_source")
+                break
         if stories:
             primary["story"] = max(stories, key=len)
         return primary
@@ -1869,7 +2040,9 @@ class UpcomingReleases(_PluginBase):
             "time_label": TIME_LABELS.get(time_key) if time_key and time_key != "all" else "",
             "release_display": self._format_release_display(item),
             "release_date": item.get("release_date"),
-            "release_text": item.get("release_text"),
+            "release_text": item.get("release_text"),
+            "target_season": safe_int(item.get("target_season"), 0) or None,
+            "season_source": item.get("season_source"),
             "region_text": self._get_item_region_text(item),
             "genre_text": self._get_item_genre_text(item),
             "story": story_text,
@@ -2580,7 +2753,14 @@ class UpcomingReleases(_PluginBase):
         if type_key not in TYPE_LABELS:
             type_key = "tv"
         if not year:
-            year = self._guess_year(title, release_date, release_text)
+            year = self._guess_year(title, release_date, release_text)
+        season_item = {
+            "type_key": type_key,
+            "title": self._clean_text(title),
+            "release_text": self._clean_text(release_text) or "敬请期待",
+            "story": self._clean_text(story),
+        }
+        target_season, season_source = self._extract_item_target_season(season_item)
         return {
             "platform": platform,
             "platform_label": PLATFORM_LABELS.get(platform, platform),
@@ -2594,7 +2774,9 @@ class UpcomingReleases(_PluginBase):
             "detail_link": detail_link,
             "story": self._clean_text(story),
             "reserve_count": safe_int(reserve_count, 0),
-            "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text or ""),
+            "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text or ""),
+            "target_season": target_season,
+            "season_source": season_source,
         }
 
     def _resolve_media_dict(self, item: Dict[str, Any], convert_type: str) -> Dict[str, Any]:
@@ -2622,7 +2804,8 @@ class UpcomingReleases(_PluginBase):
         if not title:
             return None
         year = item.get("year")
-        text_blob = " ".join(filter(None, [title, item.get("story"), item.get("release_text"), item.get("type_label")]))
+        text_blob = " ".join(filter(None, [title, item.get("story"), item.get("release_text"), item.get("type_label")]))
+        target_season, _ = self._extract_item_target_season(item)
         candidate_types = []
         for value in [
             item.get("type_key"),
@@ -2647,7 +2830,7 @@ class UpcomingReleases(_PluginBase):
             elif resolved_mtype == MediaType.TV:
                 meta.type = MediaType.TV
                 if meta.begin_season is None:
-                    meta.begin_season = self._extract_title_suffix_season(title) or None
+                    meta.begin_season = target_season or self._extract_title_suffix_season(title) or None
             try:
                 media = self.chain.recognize_media(meta=meta, mtype=resolved_mtype, cache=True)
                 if media:
@@ -2663,13 +2846,21 @@ class UpcomingReleases(_PluginBase):
             return
         resolved_type_key = type_key or item.get("type_key") or "tv"
         display_title = self._extract_media_display_title(media, fallback_title=item.get("title"))
+        source_season = safe_int(getattr(media, "season", None), 0) or None
+        target_season, season_source = self._extract_item_target_season(
+            item,
+            {"type_key": resolved_type_key, "season": source_season},
+        )
         record = {
             "recognition_failed": False,
             "type_key": resolved_type_key,
             "tmdb_id": media.tmdb_id,
             "douban_id": media.douban_id,
             "bangumi_id": media.bangumi_id,
-            "season": safe_int(getattr(media, "season", None), 0) or None,
+            "season": source_season,
+            "source_season": source_season,
+            "target_season": target_season,
+            "season_source": season_source,
             "title": item.get("title"),
             "display_title": display_title or item.get("title"),
             "year": item.get("year"),
@@ -2721,6 +2912,7 @@ class UpcomingReleases(_PluginBase):
 
                     resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
                     resolved_season = self._resolve_item_subscribe_season(item, recognition)
+                    detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, target_season=resolved_season)}"
                     sid, message = subscribe_chain.add(
                         title=item.get("title"),
                         year=item.get("year") or "",
@@ -2735,7 +2927,17 @@ class UpcomingReleases(_PluginBase):
                     )
                     logger.info(f"[UpcomingReleases] auto subscribe result: rule={rule.get('name')} title={item.get('title')} sid={sid} message={message or ''}")
                     if sid and not self._is_exists_message(message):
-                        summary["added"].append(detail)
+                        verified, actual_season, verify_message = self._verify_added_subscribe(item, sid, resolved_season)
+                        result_detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, sid=sid, target_season=resolved_season, actual_season=actual_season)}"
+                        if verified:
+                            summary["added"].append(result_detail)
+                        else:
+                            logger.error(
+                                "[UpcomingReleases] auto subscribe season verify failed: "
+                                f"rule={rule.get('name')} title={item.get('title')} sid={sid} "
+                                f"target_season={resolved_season} actual_season={actual_season} reason={verify_message}"
+                            )
+                            summary["failed"].append(f"{result_detail} - {verify_message}")
                     elif self._is_exists_message(message):
                         if self._claim_subscribe_owner(item=item, username=default_username):
                             summary["added"].append(f"{detail} [已补全归属]")
@@ -3031,13 +3233,17 @@ class UpcomingReleases(_PluginBase):
         }
         if not genre_names and type_key in type_genre_fallback:
             genre_names = [type_genre_fallback[type_key]]
+        target_season, season_source = self._extract_item_target_season(item)
         return {
             "recognition_failed": True,
             "type_key": type_key or "tv",
             "tmdb_id": None,
             "douban_id": None,
             "bangumi_id": None,
-            "season": self._extract_title_suffix_season(item.get("title")) or None,
+            "season": None,
+            "source_season": None,
+            "target_season": target_season,
+            "season_source": season_source,
             "title": item.get("title"),
             "display_title": item.get("title"),
             "year": item.get("year"),
