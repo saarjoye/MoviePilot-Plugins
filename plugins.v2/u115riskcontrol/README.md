@@ -1,7 +1,7 @@
 ﻿# u115椋庢帶鍙傛暟
 
 杩欐槸涓€涓?MoviePilot 鎻掍欢锛岀敤浜庡湪杩愯鏃朵负 `u115` 瀛樺偍娉ㄥ叆鏇翠繚瀹堢殑闄愭祦鍙傛暟锛岄伩鍏嶆瘡娆″崌绾?MP2 瀹瑰櫒鍚庡張瑕佹墜宸ヤ慨鏀?`u115.py`銆?
-褰撳墠鐗堟湰锛歚0.1.14`
+褰撳墠鐗堟湰锛歚0.1.15`
 
 ## 褰撳墠鐗堟湰鑳藉姏
 
@@ -35,6 +35,12 @@
 - 优先使用 MoviePilot 原生 `TransferChain.redo_transfer_history(history_id)`，不可用时兼容回退 `manual_transfer`。
 - 成功判定会复查同源路径、目标路径、`download_hash`、`tmdbid + season + episode` 的成功历史；确认目标已存在时也会视为已处理。
 - `manual_required` 仅在源文件缺失、记录损坏或连续多个周期无法处理时设置。
+
+## v0.1.15 多集种子修复
+
+- 修复多集种子中同 `download_hash` 任意一集成功就误判当前失败集已成功的问题。
+- `download_hash` 现在只作为候选范围，必须同时匹配 `tmdbid`、`seasons`、`episodes` 才能确认成功。
+- 旧版误写的 `success=true` 会在下一轮扫描时重新复查；如果没有同季同集成功记录，会自动回到滚动重试队列。
 
 ## 鍙傛暟璇存槑
 

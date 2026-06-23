@@ -102,7 +102,7 @@
     "name": "u115风控参数",
     "description": "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。",
     "labels": "工具,115,风控",
-    "version": "0.1.14",
+    "version": "0.1.15",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/U115RiskControl.jpg",
     "author": "wYw",
     "level": 1,
@@ -115,7 +115,8 @@
       "v0.1.6": "u115风控参数 0.1.6 修复 MP 内置 u115 风控冷却被内部重试吞掉后，插件未调度失败整理重试的问题",
       "v0.1.7": "u115风控参数 0.1.7 新增插件启动后失败整理补偿扫描，修复冷却已结束后安装新版本不会触发重试的问题",
       "v0.1.8": "v0.1.8: show failed transfer retry task names and skip reasons",
-      "v0.1.14": "v0.1.14：失败整理改为 24 小时滚动窗口重试，冷却跳过不再记为全局异常，补整理前检查安全余量并优先使用原生 redo_transfer_history。"
+      "v0.1.14": "v0.1.14：失败整理改为 24 小时滚动窗口重试，冷却跳过不再记为全局异常，补整理前检查安全余量并优先使用原生 redo_transfer_history。",
+      "v0.1.15": "v0.1.15：修复多集种子同 download_hash 任意集成功导致失败集误判已处理的问题，download_hash 仅作为候选并需同 tmdbid、季、集匹配。"
     },
     "v2": true
   },

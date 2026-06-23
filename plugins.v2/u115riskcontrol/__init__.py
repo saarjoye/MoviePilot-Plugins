@@ -55,7 +55,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.14"
+    plugin_version = "0.1.15"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -1423,12 +1423,6 @@ class U115RiskControl(_PluginBase):
                 if by_dest and bool(getattr(by_dest, "status", False)):
                     return True, f"已发现同目标路径成功历史：#{getattr(by_dest, 'id', '')}"
 
-            download_hash = getattr(history, "download_hash", None)
-            if download_hash and hasattr(transfer_oper, "list_by_hash"):
-                for by_hash in list(transfer_oper.list_by_hash(download_hash) or []):
-                    if bool(getattr(by_hash, "status", False)):
-                        return True, f"已发现同 download_hash 成功历史：#{getattr(by_hash, 'id', '')}"
-
             tmdbid = getattr(history, "tmdbid", None)
             season = getattr(history, "seasons", None)
             episode = getattr(history, "episodes", None)
@@ -1442,9 +1436,60 @@ class U115RiskControl(_PluginBase):
                 for matched in list(matches or []):
                     if bool(getattr(matched, "status", False)):
                         return True, f"已发现同 tmdbid/季/集成功历史：#{getattr(matched, 'id', '')}"
+
+            download_hash = getattr(history, "download_hash", None)
+            if download_hash and hasattr(transfer_oper, "list_by_hash"):
+                for by_hash in list(transfer_oper.list_by_hash(download_hash) or []):
+                    if not bool(getattr(by_hash, "status", False)):
+                        continue
+                    if self._is_same_media_episode(history, by_hash):
+                        return True, f"已发现同 download_hash 且同季集成功历史：#{getattr(by_hash, 'id', '')}"
         except Exception as exc:
             return False, f"复查成功历史失败：{self._short_text(exc)}"
         return False, ""
+
+    def _is_same_media_episode(self, left: Any, right: Any) -> bool:
+        left_tmdbid = self._normalize_match_value(getattr(left, "tmdbid", None))
+        right_tmdbid = self._normalize_match_value(getattr(right, "tmdbid", None))
+        if not left_tmdbid or left_tmdbid != right_tmdbid:
+            return False
+        return (
+            self._normalize_season_episode_value(getattr(left, "seasons", None))
+            == self._normalize_season_episode_value(getattr(right, "seasons", None))
+            and self._normalize_episode_set(getattr(left, "episodes", None))
+            == self._normalize_episode_set(getattr(right, "episodes", None))
+        )
+
+    @staticmethod
+    def _normalize_match_value(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_season_episode_value(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        return text.lstrip("S").lstrip("0") or ("0" if text else "")
+
+    def _normalize_episode_set(self, value: Any) -> Tuple[str, ...]:
+        text = str(value or "").strip().upper()
+        if not text:
+            return tuple()
+        normalized = text.replace(" ", "")
+        if "-" in normalized:
+            try:
+                start_text, end_text = normalized.split("-", 1)
+                start = int(start_text.replace("E", "") or 0)
+                end = int(end_text.replace("E", "") or 0)
+                if start and end and start <= end:
+                    return tuple(str(index) for index in range(start, end + 1))
+            except Exception:
+                pass
+        parts = re.split(r"[,/;，、]+", normalized)
+        episodes: List[str] = []
+        for part in parts:
+            number = part.replace("E", "").lstrip("0")
+            if number:
+                episodes.append(number)
+        return tuple(episodes)
 
     @staticmethod
     def _is_missing_source_message(message: Any) -> bool:
