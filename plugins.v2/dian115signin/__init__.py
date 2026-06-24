@@ -23,7 +23,7 @@ class Dian115Signin(_PluginBase):
     # 插件描述
     plugin_desc = "癫影站点自动执行每日签到。支持普通签到与运气签到，可配置默认签到模式。"
     # 插件图标 (已转为raw直链以供页面渲染)
-    plugin_icon = "https://raw.githubusercontent.com/jiumian8/MoviePilot-Plugins/main/icons/dian115.png"
+    plugin_icon = "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/Dian115Signin.svg"
     # 插件版本
     plugin_version = "1.0.4"
     # 插件作者
