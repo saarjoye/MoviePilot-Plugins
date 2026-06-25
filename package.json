@@ -179,12 +179,13 @@
     "name": "巅影签到魔改版",
     "description": "癫影站点自动执行每日签到。支持普通签到与运气签到，可配置默认签到模式。",
     "labels": "影视,工具",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/Dian115Signin.svg",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v1.0.4": "巅影签到魔改版 1.0.4 发布：修复签到风控并新增双签到模式与积分曲线"
+      "v1.0.4": "巅影签到魔改版 1.0.4 发布：修复签到风控并新增双签到模式与积分曲线",
+      "v1.0.5": "巅影签到魔改版 1.0.5 发布：新增账号密码自动登录，Cookie 保留为兜底认证方式"
     },
     "v2": true
   }

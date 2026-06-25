@@ -25,7 +25,7 @@ class Dian115Signin(_PluginBase):
     # 插件图标 (已转为raw直链以供页面渲染)
     plugin_icon = "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/Dian115Signin.svg"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -41,6 +41,9 @@ class Dian115Signin(_PluginBase):
     _notify: bool = True
     _onlyonce: bool = False
     _cron: Optional[str] = None
+    _auth_mode: str = "password"
+    _login_email: str = ""
+    _login_password: str = ""
     _portal_token: str = ""
     _use_proxy: bool = False
     _history_count: int = 30
@@ -58,6 +61,10 @@ class Dian115Signin(_PluginBase):
     _signin_mode_options: Dict[str, str] = {
         "normal": "普通签到",
         "lucky": "运气签到",
+    }
+    _auth_mode_options: Dict[str, str] = {
+        "password": "账号密码登录",
+        "cookie": "Cookie 兜底",
     }
     _lucky_tier_options: Dict[str, str] = {
         "jackpot": "大奖",
@@ -96,6 +103,24 @@ class Dian115Signin(_PluginBase):
     def _normalize_signin_mode(cls, raw_value: Any) -> str:
         mode = str(raw_value or "normal").strip().lower()
         return mode if mode in cls._signin_mode_options else "normal"
+
+    @classmethod
+    def _normalize_auth_mode(cls, raw_value: Any, has_cookie: bool = False) -> str:
+        mode = str(raw_value or "").strip().lower()
+        if mode in cls._auth_mode_options:
+            return mode
+        return "cookie" if has_cookie else "password"
+
+    def _has_password_credentials(self) -> bool:
+        return bool((self._login_email or "").strip() and self._login_password)
+
+    def _is_configured(self) -> bool:
+        if self._auth_mode == "cookie":
+            return bool(self._portal_token)
+        return self._has_password_credentials()
+
+    def _auth_mode_name(self) -> str:
+        return self._auth_mode_options.get(self._auth_mode, self._auth_mode_options["password"])
 
     @staticmethod
     def _now_ts() -> float:
@@ -225,7 +250,8 @@ class Dian115Signin(_PluginBase):
             referer: str,
             include_content_type: bool = False,
             current_path: str = "/me",
-            browser_proof: Optional[str] = None
+            browser_proof: Optional[str] = None,
+            include_cookie: bool = True
     ) -> Dict[str, str]:
         headers = {
             "User-Agent": self._user_agent or self._default_user_agent,
@@ -245,7 +271,7 @@ class Dian115Signin(_PluginBase):
         if browser_proof:
             headers["X-Portal-Browser-Proof"] = browser_proof
 
-        cookie_header = self._build_cookie_header()
+        cookie_header = self._build_cookie_header() if include_cookie and self._auth_mode == "cookie" else ""
         if cookie_header:
             headers["Cookie"] = cookie_header
         return headers
@@ -269,12 +295,18 @@ class Dian115Signin(_PluginBase):
                 return str(api_message)
 
         if response.status_code == 403:
-            return "HTTP 状态码: 403（服务器拒绝请求，请确认 portal_token 未过期；若只填 token 仍失败，请粘贴浏览器里的完整 Cookie）"
+            return "HTTP 状态码: 403（服务器拒绝请求；账号密码模式请确认登录未触发人机验证，Cookie 兜底模式请确认 Cookie 未过期）"
         if response.status_code == 401:
-            return "HTTP 状态码: 401（登录凭证无效或已过期，请重新抓取 Cookie）"
+            return "HTTP 状态码: 401（登录凭证无效或已过期，请检查账号密码，或改用新的 Cookie 兜底）"
         return f"HTTP 状态码: {response.status_code}"
 
-    def _get_browser_proof(self, session: requests.Session, proxies, force_refresh: bool = False) -> Optional[str]:
+    def _get_browser_proof(
+            self,
+            session: requests.Session,
+            proxies,
+            force_refresh: bool = False,
+            include_cookie: bool = True
+    ) -> Optional[str]:
         now_ts = self._now_ts()
         if not force_refresh and self._browser_proof and self._browser_proof_expires_at - now_ts > 30:
             return self._browser_proof
@@ -283,7 +315,8 @@ class Dian115Signin(_PluginBase):
         headers = self._build_request_headers(
             referer=f"{self._base_url}/me",
             include_content_type=True,
-            current_path="/me"
+            current_path="/me",
+            include_cookie=include_cookie
         )
         response = session.get(
             url,
@@ -325,7 +358,7 @@ class Dian115Signin(_PluginBase):
             current_path: str = "/me",
             allow_retry: bool = True
     ) -> Tuple[requests.Response, Dict[str, Any]]:
-        proof = self._get_browser_proof(session, proxies)
+        proof = self._get_browser_proof(session, proxies, include_cookie=False)
         headers = self._build_request_headers(
             referer=f"{self._base_url}{referer_path}",
             include_content_type=True,
@@ -364,6 +397,63 @@ class Dian115Signin(_PluginBase):
 
         return response, data
 
+    def _login_with_password(self, session: requests.Session, proxies) -> None:
+        if not self._has_password_credentials():
+            raise ValueError("未配置癫影登录邮箱或密码")
+
+        payload = {
+            "email": self._login_email.strip(),
+            "password": self._login_password,
+        }
+        proof = self._get_browser_proof(session, proxies)
+        headers = self._build_request_headers(
+            referer=f"{self._base_url}/login",
+            include_content_type=True,
+            current_path="/login",
+            browser_proof=proof,
+            include_cookie=False
+        )
+        response = session.post(
+            f"{self._base_url}/api/portal/auth/login",
+            headers=headers,
+            json=payload,
+            proxies=proxies,
+            timeout=(self._connect_timeout, self._read_timeout)
+        )
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        if response.status_code != 200 or data.get("code") != "ok":
+            if self._needs_browser_proof_refresh(data):
+                proof = self._get_browser_proof(session, proxies, force_refresh=True)
+                headers = self._build_request_headers(
+                    referer=f"{self._base_url}/login",
+                    include_content_type=True,
+                    current_path="/login",
+                    browser_proof=proof,
+                    include_cookie=False
+                )
+                response = session.post(
+                    f"{self._base_url}/api/portal/auth/login",
+                    headers=headers,
+                    json=payload,
+                    proxies=proxies,
+                    timeout=(self._connect_timeout, self._read_timeout)
+                )
+                try:
+                    data = response.json()
+                except ValueError:
+                    data = {}
+
+        if response.status_code != 200 or data.get("code") != "ok":
+            code = str(data.get("code") or "").strip()
+            msg = data.get("msg") or data.get("message") or data.get("error")
+            if code == "turnstile_failed" or "turnstile" in str(msg or "").lower():
+                raise ValueError("账号密码登录需要人机验证，请改用 Cookie 兜底模式")
+            raise ValueError(msg or self._format_http_error(response, data))
+
     def init_plugin(self, config: Optional[dict] = None) -> None:
         try:
             self.stop_service()
@@ -378,6 +468,9 @@ class Dian115Signin(_PluginBase):
             self._notify = True
             self._onlyonce = False
             self._cron = "0 10 * * *"
+            self._auth_mode = "password"
+            self._login_email = ""
+            self._login_password = ""
             self._portal_token = ""
             self._use_proxy = False
             self._history_count = 30
@@ -398,6 +491,9 @@ class Dian115Signin(_PluginBase):
                 self._onlyonce = self._to_bool(config.get("onlyonce", False))
                 self._cron = config.get("cron") or "0 10 * * *"
                 self._portal_token = self._normalize_cookie_input(config.get("portal_token"))
+                self._auth_mode = self._normalize_auth_mode(config.get("auth_mode"), bool(self._portal_token))
+                self._login_email = (config.get("login_email") or "").strip()
+                self._login_password = str(config.get("login_password") or "")
                 self._use_proxy = self._to_bool(config.get("use_proxy", False))
                 self._history_count = self._to_int(config.get("history_count", 30), 30)
                 self._random_time_range = (config.get("random_time_range") or "").strip()
@@ -602,6 +698,70 @@ class Dian115Signin(_PluginBase):
                                         "content": [
                                             {
                                                 "component": "VCol",
+                                                "props": {"cols": 12, "sm": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSelect",
+                                                        "props": {
+                                                            "model": "auth_mode",
+                                                            "label": "认证方式",
+                                                            "items": [
+                                                                {"title": "账号密码登录", "value": "password"},
+                                                                {"title": "Cookie 兜底", "value": "cookie"},
+                                                            ],
+                                                            "prepend-inner-icon": "mdi-shield-account-outline",
+                                                            "persistent-hint": True,
+                                                            "hint": "默认使用账号密码自动登录；若站点开启人机验证，再改用 Cookie 兜底。"
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "sm": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "login_email",
+                                                            "label": "登录邮箱",
+                                                            "placeholder": "请输入癫影登录邮箱",
+                                                            "autocomplete": "off",
+                                                            "name": "dian115-signin-email",
+                                                            "prepend-inner-icon": "mdi-email-outline",
+                                                            "persistent-hint": True,
+                                                            "hint": "账号密码模式使用；仅保存在本地插件配置。"
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "sm": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "login_password",
+                                                            "label": "登录密码",
+                                                            "type": "password",
+                                                            "placeholder": "请输入癫影登录密码",
+                                                            "autocomplete": "new-password",
+                                                            "name": "dian115-signin-password",
+                                                            "prepend-inner-icon": "mdi-lock-outline",
+                                                            "persistent-hint": True,
+                                                            "hint": "不会写入日志或历史记录；若担心保存密码，可改用 Cookie 兜底。"
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                        ]
+                                    },
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
                                                 "props": {"cols": 12},
                                                 "content": [
                                                     {
@@ -633,12 +793,12 @@ class Dian115Signin(_PluginBase):
                                                         "props": {
                                                             "model": "user_agent",
                                                             "label": "User-Agent",
-                                                            "placeholder": "粘贴同一浏览器请求头里的 User-Agent，遇到 browser proof required 时必填",
+                                                            "placeholder": "可选；账号密码模式通常留空",
                                                             "autocomplete": "off",
                                                             "name": "dian115-signin-user-agent",
                                                             "prepend-inner-icon": "mdi-card-account-details-outline",
                                                             "persistent-hint": True,
-                                                            "hint": "Cloudflare 浏览器证明通常与 Cookie 和 User-Agent 绑定；建议与抓取 Cookie 的同一请求保持一致。"
+                                                            "hint": "遇到 browser proof required 时，可填抓取 Cookie 的同一浏览器 User-Agent。"
                                                         }
                                                     }
                                                 ]
@@ -656,13 +816,13 @@ class Dian115Signin(_PluginBase):
                                                         "component": "VTextField",
                                                         "props": {
                                                             "model": "portal_token",
-                                                            "label": "Portal Token (Cookie)",
-                                                            "placeholder": "请输入抓包获取的 portal_token",
+                                                            "label": "备用 Cookie",
+                                                            "placeholder": "Cookie 兜底模式填写；账号密码模式可留空",
                                                             "autocomplete": "off",
                                                             "name": "dian115-signin-token",
                                                             "prepend-inner-icon": "mdi-cookie",
                                                             "persistent-hint": True,
-                                                            "hint": "可填入完整 Cookie 请求头，或只填 portal_token 的值；插件会自动提取并保存 portal_token。"
+                                                            "hint": "当账号密码登录因人机验证失败时使用；可填完整 Cookie 请求头或 portal_token。"
                                                         }
                                                     }
                                                 ]
@@ -901,19 +1061,19 @@ class Dian115Signin(_PluginBase):
                                                             {
                                                                 "component": "VIcon",
                                                                 "props": {"color": "primary", "class": "mt-1 mr-2"},
-                                                                "text": "mdi-cookie"
+                                                                "text": "mdi-shield-account-outline"
                                                             },
                                                             {
                                                                 "component": "div",
                                                                 "props": {"class": "text-subtitle-1 font-weight-regular mb-1"},
-                                                                "text": "凭证获取方式"
+                                                                "text": "认证方式"
                                                             }
                                                         ]
                                                     },
                                                     {
                                                         "component": "div",
                                                         "props": {"class": "text-body-2 ml-8"},
-                                                        "text": "在浏览器中登录癫影，通过开发者工具抓取同一请求的 Cookie 和 User-Agent；可整段粘贴 Cookie，插件会自动提取 portal_token 并保留风控 Cookie。"
+                                                        "text": "默认使用癫影邮箱和密码自动登录；Cookie 仅作为兜底，适合站点开启人机验证或账号密码登录受限时使用。"
                                                     }
                                                 ]
                                             },
@@ -986,7 +1146,8 @@ class Dian115Signin(_PluginBase):
         history = self.get_data("history") or []
         user_info = self.get_data("user_info") or {}
 
-        configured = bool(self._portal_token)
+        configured = self._is_configured()
+        auth_mode_name = self._auth_mode_name()
         status_text = "已启用" if self._enabled else "未启用"
         
         # 从 API 缓存中读取用户信息
@@ -1363,7 +1524,7 @@ class Dian115Signin(_PluginBase):
                                                                 "component": "div",
                                                                 "props": {"class": "d-flex flex-column justify-space-between", "style": "min-height: 64px;"},
                                                                 "content": [
-                                                                    {"component": "div", "props": {"class": "text-subtitle-2 text-medium-emphasis"}, "text": "账号配置"},
+                                                                    {"component": "div", "props": {"class": "text-subtitle-2 text-medium-emphasis"}, "text": f"账号配置 · {auth_mode_name}"},
                                                                     {"component": "VChip", "props": {"color": "success" if configured else "warning", "class": "mt-2 align-self-start"}, "text": "已配置" if configured else "未配置"}
                                                                 ]
                                                             }
@@ -1635,6 +1796,9 @@ class Dian115Signin(_PluginBase):
             "notify": self._notify,
             "onlyonce": self._onlyonce,
             "cron": self._cron or "",
+            "auth_mode": self._auth_mode,
+            "login_email": self._login_email,
+            "login_password": self._login_password,
             "portal_token": self._portal_token,
             "use_proxy": self._use_proxy,
             "history_count": self._history_count,
@@ -1654,6 +1818,9 @@ class Dian115Signin(_PluginBase):
             "notify": self._to_bool(config.get("notify", False)),
             "onlyonce": self._to_bool(config.get("onlyonce", False)),
             "cron": config.get("cron") or "0 10 * * *",
+            "auth_mode": self._normalize_auth_mode(config.get("auth_mode"), bool(config.get("portal_token"))),
+            "login_email": (config.get("login_email") or "").strip(),
+            "login_password": str(config.get("login_password") or ""),
             "portal_token": self._normalize_cookie_input(config.get("portal_token")),
             "use_proxy": self._to_bool(config.get("use_proxy", False)),
             "history_count": self._to_int(config.get("history_count", 30), 30),
@@ -1754,7 +1921,9 @@ class Dian115Signin(_PluginBase):
             "cron": self._cron,
             "notify": self._notify,
             "use_proxy": self._use_proxy,
-            "configured": bool(self._portal_token),
+            "auth_mode": self._auth_mode,
+            "auth_mode_name": self._auth_mode_name(),
+            "configured": self._is_configured(),
             "latest_result": latest,
             "history_count": len(history),
         }
@@ -1985,11 +2154,12 @@ class Dian115Signin(_PluginBase):
 
     def _signin(self, retry_index: int = 0) -> Dict[str, Any]:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if not self._portal_token:
+        if not self._is_configured():
+            missing_message = "未配置癫影登录邮箱或密码" if self._auth_mode == "password" else "未配置 portal_token (Cookie)"
             result = {
                 "success": False,
                 "timestamp": timestamp,
-                "message": "未配置 portal_token (Cookie)",
+                "message": missing_message,
                 "action": "config_required",
             }
             self._record_history(result)
@@ -2002,6 +2172,8 @@ class Dian115Signin(_PluginBase):
 
             session = requests.Session()
             session.headers.update(self._build_request_headers(referer=f"{self._base_url}/me"))
+            if self._auth_mode == "password":
+                self._login_with_password(session, proxies)
 
             # 1. 签到前先请求 /api/portal/me 提取用户信息 (Nickname, VIP, Points 等)
             try:
@@ -2009,7 +2181,7 @@ class Dian115Signin(_PluginBase):
                 if user_info:
                     self.save_data("user_info", user_info)
                 else:
-                    logger.warning(f"{self.plugin_name}: 未能提取到有效的用户信息，可能 Cookie 已过期")
+                    logger.warning(f"{self.plugin_name}: 未能提取到有效的用户信息，可能登录态已过期")
             except Exception as e:
                 logger.error(f"{self.plugin_name}: 获取用户信息失败 - {e}")
                 user_info = {}
