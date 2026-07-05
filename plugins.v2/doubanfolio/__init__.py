@@ -18,7 +18,7 @@ lock = threading.Lock()
 
 class DoubanFolio(_PluginBase):
     # 插件名称
-    plugin_name = "豆瓣档案(自用版)"
+    plugin_name = "豆瓣影音档案"
     # 插件描述
     plugin_desc = "追剧观影自动同步进度到豆瓣，打造专属观影档案"
     # 插件图标
@@ -26,9 +26,9 @@ class DoubanFolio(_PluginBase):
     # 插件版本
     plugin_version = "1.0.3"
     # 插件作者
-    plugin_author = "xijin285"
+    plugin_author = "wYw"
     # 作者主页
-    author_url = "https://github.com/xijin285"
+    author_url = "https://github.com/saarjoye"
     # 插件配置项ID前缀
     plugin_config_prefix = "doubanfolio_"
     # 加载顺序
