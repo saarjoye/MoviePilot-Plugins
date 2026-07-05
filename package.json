@@ -189,19 +189,6 @@
     },
     "v2": true
   },
-  "DoubanFolio": {
-    "name": "豆瓣影音档案",
-    "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
-    "labels": "影视,工具",
-    "version": "1.0.3",
-    "icon": "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png",
-    "author": "wYw",
-    "level": 1,
-    "history": {
-      "v1.0.3": "豆瓣影音档案 1.0.3 更新作者主页为插件仓库地址"
-    },
-    "v2": true
-  },
   "DoubanMediaFolio": {
     "name": "豆瓣影音档案",
     "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
