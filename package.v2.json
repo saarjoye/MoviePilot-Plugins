@@ -162,5 +162,17 @@
       "v1.0.4": "巅影签到魔改版 1.0.4 发布：修复签到风控并新增双签到模式与积分曲线",
       "v1.0.5": "巅影签到魔改版 1.0.5 发布：新增账号密码自动登录，Cookie 保留为兜底认证方式"
     }
+  },
+  "DoubanFolio": {
+    "name": "豆瓣档案(自用版)",
+    "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
+    "labels": "影视,工具",
+    "version": "1.0.3",
+    "icon": "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png",
+    "author": "xijin285",
+    "level": 1,
+    "history": {
+      "v1.0.3": "豆瓣档案 1.0.3 增加CK失效后账号密码自动登录刷新"
+    }
   }
 }
