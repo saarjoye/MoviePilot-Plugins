@@ -1,6 +1,8 @@
 import time
+import re
 from typing import Any, List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
+from threading import RLock
 
 from app import schemas
 from app.core.config import settings
@@ -20,7 +22,7 @@ class HRManager(_PluginBase):
     # 插件图标
     plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -56,6 +58,8 @@ class HRManager(_PluginBase):
     _scheduler = None
     # 用于去重的种子哈希缓存 (哈希: 处理时间戳)
     _processed_torrents = {}
+    # 插件私有数据键：下载器 -> 种子哈希 -> 站点名称
+    _torrent_sites_data_key = "torrent_sites_v1"
 
     def init_plugin(self, config: dict = None):
         # 停止现有任务
@@ -131,6 +135,9 @@ class HRManager(_PluginBase):
 
             self._sites_config = self._validate_and_normalize_sites_config(self._sites_config)
 
+        self._torrent_sites_lock = RLock()
+        self._torrent_sites = self._load_torrent_sites()
+
         # 初始化下载器帮助类
         self._downloaderhelper = DownloaderHelper()
 
@@ -183,7 +190,7 @@ class HRManager(_PluginBase):
                 logger.debug("未从种子中提取到任何tracker信息")
                 return None
             
-            logger.debug(f"从种子中提取到的trackers：{trackers}")
+            logger.debug(f"从种子中提取到 {len(trackers)} 个tracker地址")
             
             # 特定tracker到域名的映射（仅作为后备）
             tracker_mappings = {
@@ -196,6 +203,7 @@ class HRManager(_PluginBase):
             for tracker in trackers:
                 if not tracker:
                     continue
+                tracker = str(tracker)
                 
                 domain = None
                 
@@ -211,24 +219,209 @@ class HRManager(_PluginBase):
                 if not domain:
                     continue
                 
-                logger.debug(f"从tracker {tracker} 提取到域名：{domain}")
+                domain = str(domain).strip().lower()
+                logger.debug(f"从tracker提取到域名：{domain}")
                 
                 # 尝试匹配配置的站点
                 
                 for site_config in self._sites_config:
                     site_name = site_config.get('site_name')
-                    if site_name and domain.lower() in site_name.lower():
-                        logger.debug(f"从tracker域名 {domain} 匹配到配置的站点：{site_name}")
+                    if site_name and domain in site_name.lower():
+                        logger.debug(f"从tracker域名匹配到配置的站点：{site_name}")
                         return site_name
-                        
-            # 如果所有tracker都没有匹配到站点，返回第一个tracker的域名
-            domain = StringUtils.get_url_domain(trackers[0])
-            if domain:
-                logger.debug(f"所有tracker都未匹配到已知站点，返回第一个tracker的域名：{domain}")
-                return domain
+
+                try:
+                    from app.db.site_oper import SiteOper
+
+                    site = SiteOper().get_by_domain(domain=domain)
+                    configured_name = self._match_configured_site_name(
+                        getattr(site, "name", None) if site else None
+                    )
+                    if configured_name:
+                        logger.debug(f"从MoviePilot站点记录匹配到配置的站点：{configured_name}")
+                        return configured_name
+                except Exception as e:
+                    logger.debug(f"通过MoviePilot站点记录解析tracker失败：{type(e).__name__}")
+
+            logger.debug("所有tracker均未匹配到已配置站点")
         except Exception as e:
-            logger.error(f"从tracker解析站点失败: {e}")
+            logger.error(f"从tracker解析站点失败: {type(e).__name__}")
         return None
+
+    def _match_configured_site_name(self, site_name: Any) -> Optional[str]:
+        """返回配置中的规范站点名，拒绝未知站点。"""
+        if site_name is None:
+            return None
+        normalized_name = str(site_name).strip().casefold()
+        if not normalized_name:
+            return None
+        for site_config in self._sites_config:
+            configured_name = str(site_config.get("site_name", "") or "").strip()
+            if configured_name and configured_name.casefold() == normalized_name:
+                return configured_name
+        return None
+
+    def _load_torrent_sites(self) -> Dict[str, Dict[str, str]]:
+        """加载并校验插件私有的种子站点映射。"""
+        try:
+            stored_data = self.get_data(self._torrent_sites_data_key)
+        except Exception as e:
+            logger.warning(f"加载种子站点映射失败：{type(e).__name__}")
+            return {}
+
+        if stored_data in (None, {}):
+            return {}
+        if not isinstance(stored_data, dict):
+            logger.warning("种子站点映射格式无效，已忽略")
+            return {}
+
+        normalized_data: Dict[str, Dict[str, str]] = {}
+        for downloader_name, torrent_map in stored_data.items():
+            normalized_downloader = str(downloader_name or "").strip()
+            if not normalized_downloader or not isinstance(torrent_map, dict):
+                continue
+            normalized_torrents: Dict[str, str] = {}
+            for torrent_hash, site_name in torrent_map.items():
+                normalized_hash = str(torrent_hash or "").strip().lower()
+                normalized_site = str(site_name or "").strip()
+                if normalized_hash and normalized_site:
+                    normalized_torrents[normalized_hash] = normalized_site
+            if normalized_torrents:
+                normalized_data[normalized_downloader] = normalized_torrents
+        return normalized_data
+
+    def _persist_torrent_sites(self) -> bool:
+        try:
+            self.save_data(self._torrent_sites_data_key, self._torrent_sites)
+            return True
+        except Exception as e:
+            logger.warning(f"保存种子站点映射失败：{type(e).__name__}")
+            return False
+
+    def _remember_torrent_site(self, downloader_name: str, torrent_hash: str, site_name: str) -> bool:
+        configured_name = self._match_configured_site_name(site_name)
+        normalized_downloader = str(downloader_name or "").strip()
+        normalized_hash = str(torrent_hash or "").strip().lower()
+        if not configured_name or not normalized_downloader or not normalized_hash:
+            return False
+
+        with self._torrent_sites_lock:
+            downloader_sites = self._torrent_sites.setdefault(normalized_downloader, {})
+            if downloader_sites.get(normalized_hash) == configured_name:
+                return True
+            downloader_sites[normalized_hash] = configured_name
+            return self._persist_torrent_sites()
+
+    def _get_remembered_torrent_site(self, downloader_name: str, torrent_hash: str) -> Optional[str]:
+        normalized_downloader = str(downloader_name or "").strip()
+        normalized_hash = str(torrent_hash or "").strip().lower()
+        if not normalized_downloader or not normalized_hash:
+            return None
+        with self._torrent_sites_lock:
+            site_name = self._torrent_sites.get(normalized_downloader, {}).get(normalized_hash)
+        return self._match_configured_site_name(site_name)
+
+    def _forget_torrent_site(self, downloader_name: str, torrent_hash: str) -> None:
+        normalized_downloader = str(downloader_name or "").strip()
+        normalized_hash = str(torrent_hash or "").strip().lower()
+        if not normalized_downloader or not normalized_hash:
+            return
+        with self._torrent_sites_lock:
+            downloader_sites = self._torrent_sites.get(normalized_downloader)
+            if not downloader_sites or normalized_hash not in downloader_sites:
+                return
+            del downloader_sites[normalized_hash]
+            if not downloader_sites:
+                self._torrent_sites.pop(normalized_downloader, None)
+            self._persist_torrent_sites()
+
+    def _prune_torrent_sites(self, downloader_name: str, active_hashes: set) -> None:
+        normalized_downloader = str(downloader_name or "").strip()
+        normalized_hashes = {str(item or "").strip().lower() for item in active_hashes if item}
+        if not normalized_downloader:
+            return
+        with self._torrent_sites_lock:
+            downloader_sites = self._torrent_sites.get(normalized_downloader)
+            if not downloader_sites:
+                return
+            stale_hashes = [item for item in downloader_sites if item not in normalized_hashes]
+            if not stale_hashes:
+                return
+            for torrent_hash in stale_hashes:
+                del downloader_sites[torrent_hash]
+            if not downloader_sites:
+                self._torrent_sites.pop(normalized_downloader, None)
+            self._persist_torrent_sites()
+
+    def _resolve_torrent_site(
+        self,
+        downloader_name: str,
+        torrent_hash: str,
+        torrent_name: str,
+        torrent_info: Optional[dict] = None,
+        preferred_site: Any = None,
+        remember: bool = False,
+    ) -> Optional[str]:
+        """按可信提示、持久化映射、种子名和tracker顺序解析站点。"""
+        site_name = self._match_configured_site_name(preferred_site)
+        if not site_name:
+            site_name = self._get_remembered_torrent_site(downloader_name, torrent_hash)
+        if not site_name:
+            site_name = self._extract_site_name(str(torrent_name or ""))
+        if not site_name and torrent_info:
+            site_name = self._get_site_from_tracker(torrent_info)
+        site_name = self._match_configured_site_name(site_name)
+        if site_name and remember:
+            self._remember_torrent_site(downloader_name, torrent_hash, site_name)
+        return site_name
+
+    @staticmethod
+    def _safe_optional_bool(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            value_str = value.strip().lower()
+            if value_str in ["1", "true", "yes", "y", "on", "是"]:
+                return True
+            if value_str in ["0", "false", "no", "n", "off", "否"]:
+                return False
+            return None
+        if isinstance(value, (int, float)):
+            return value != 0
+        return None
+
+    @classmethod
+    def _extract_hr_status_from_text(cls, text: Any) -> Optional[bool]:
+        if not isinstance(text, str) or not text:
+            return None
+        hr_match = re.search(
+            r'Hit\s*&\s*Run\s*[:：]\s*(是|否|Yes|No|True|False|1|0)',
+            text,
+            re.IGNORECASE,
+        )
+        return cls._safe_optional_bool(hr_match.group(1)) if hr_match else None
+
+    def _resolve_hr_status(
+        self,
+        explicit_status: Any,
+        torrent_hash: str,
+        torrent_name: str,
+        site_config: dict,
+    ) -> bool:
+        """按三态优先级解析HR状态，明确False不会进入兜底识别。"""
+        normalized_status = self._safe_optional_bool(explicit_status)
+        if normalized_status is not None:
+            logger.info(f"从下载事件获取到明确HR状态：{normalized_status}")
+            return normalized_status
+
+        logger.debug(f"下载事件未提供明确HR状态，查询种子 {torrent_name} 的下载历史")
+        db_hr_info = self._get_hr_info_from_db(torrent_hash, torrent_name)
+        db_status = self._safe_optional_bool(db_hr_info.get("is_hr"))
+        if db_status is not None:
+            logger.info(f"从下载历史获取到明确HR状态：{db_status}")
+            return db_status
+
+        return self._is_hr_seed(torrent_name, site_config)
     
     @eventmanager.register(EventType.DownloadAdded)
     def on_download_added(self, event: Event):
@@ -266,7 +459,10 @@ class HRManager(_PluginBase):
                 for expired_hash in expired_torrents:
                     del self._processed_torrents[expired_hash]
             
-            logger.debug(f"从事件中获取的原始数据：hash={torrent_hash}, downloader={downloader_name}, context={context}")
+            logger.debug(
+                f"下载事件字段状态：hash={'有' if torrent_hash else '无'}, "
+                f"downloader={'有' if downloader_name else '无'}, context={'有' if context else '无'}"
+            )
             
             # 首先尝试使用参考插件的方式处理
             if downloader_name and torrent_hash and context and hasattr(context, "torrent_info"):
@@ -307,26 +503,25 @@ class HRManager(_PluginBase):
                 
                 logger.info(f"处理新种子：{torrent_name} (哈希: {torrent_hash})，来自下载器：{downloader_name}")
                 
-                # 从torrent_info中获取站点名称
-                site_name = None
-                if hasattr(torrent_info, "site_name"):
-                    site_name = torrent_info.site_name
-                    logger.debug(f"从torrent_info中获取站点名称：{site_name}")
-                
-                # 如果没有从torrent_info中获取到站点名称，尝试其他方法
+                preferred_site = getattr(torrent_info, "site_name", None)
+                site_name = self._resolve_torrent_site(
+                    downloader_name=downloader_name,
+                    torrent_hash=torrent_hash,
+                    torrent_name=torrent_name,
+                    preferred_site=preferred_site,
+                )
+
                 if not site_name:
-                    # 从种子名称中解析站点
-                    site_name = self._extract_site_name(torrent_name)
-                    
-                    # 如果仍然没有站点名称，尝试从tracker中解析
-                    if not site_name:
-                        logger.debug(f"尝试从tracker解析种子 {torrent_name} 的站点信息")
-                        torrents, error = downloader.get_torrents()
-                        if not error and torrents:
-                            for torrent in torrents:
-                                if torrent.get("hash") == torrent_hash:
-                                    site_name = self._get_site_from_tracker(torrent)
-                                    break
+                    logger.debug(f"尝试从tracker解析种子 {torrent_name} 的站点信息")
+                    torrents, error = downloader.get_torrents(ids=torrent_hash)
+                    if not error and torrents:
+                        site_name = self._resolve_torrent_site(
+                            downloader_name=downloader_name,
+                            torrent_hash=torrent_hash,
+                            torrent_name=torrent_name,
+                            torrent_info=torrents[0],
+                            preferred_site=preferred_site,
+                        )
                 
                 if not site_name:
                     logger.warning(f"无法解析种子所属站点：{torrent_name}")
@@ -344,22 +539,13 @@ class HRManager(_PluginBase):
                     return
                 logger.info(f"站点 {site_name} 的HR配置：{site_config}")
                 
-                # 从torrent_info中获取HR状态
-                is_hr_seed = False
-                if hasattr(torrent_info, "hit_and_run"):
-                    is_hr_seed = torrent_info.hit_and_run
-                    logger.info(f"✓ 从torrent_info中获取到HR状态：{is_hr_seed}")
-                
-                # 如果没有从torrent_info中获取到HR状态，尝试其他方法
-                if not is_hr_seed:
-                    # 尝试从数据库查询
-                    logger.debug(f"尝试从数据库查询种子 {torrent_name} 的HR信息")
-                    db_hr_info = self._get_hr_info_from_db(torrent_hash, torrent_name)
-                    is_hr_seed = db_hr_info.get("is_hr", False)
-                
-                # 如果仍然没有HR信息，使用常规检测方法
-                if not is_hr_seed:
-                    is_hr_seed = self._is_hr_seed(torrent_name, site_config)
+                explicit_hr_status = getattr(torrent_info, "hit_and_run", None)
+                is_hr_seed = self._resolve_hr_status(
+                    explicit_status=explicit_hr_status,
+                    torrent_hash=torrent_hash,
+                    torrent_name=torrent_name,
+                    site_config=site_config,
+                )
                 
                 if is_hr_seed:
                     # 设置HR标签
@@ -414,6 +600,7 @@ class HRManager(_PluginBase):
                             logger.debug(f"种子 {torrent_hash} 设置标签后的标签：{new_tags}")
                             
                         logger.info(f"成功为种子 {torrent_hash} 设置HR标签：{self._hr_tag}")
+                        self._remember_torrent_site(downloader_name, torrent_hash, site_name)
                     except Exception as e:
                         logger.error(f"设置HR标签失败：{str(e)}")
                         raise
@@ -443,8 +630,7 @@ class HRManager(_PluginBase):
                 logger.error("下载事件数据为空")
                 return
             
-            # 打印完整的下载事件数据，用于调试
-            logger.debug(f"下载事件数据：{download_info}")
+            logger.debug(f"兼容模式下载事件字段：{sorted(download_info.keys()) if isinstance(download_info, dict) else '非字典'}")
 
             # 处理不同格式的事件数据
             if isinstance(download_info, dict):
@@ -469,13 +655,12 @@ class HRManager(_PluginBase):
                             logger.error(f"无法获取message对象的文本内容: {e}")
                     
                     if notification_text:
-                        logger.debug(f"通知文本：{notification_text}")
+                        logger.debug("已从兼容模式事件中取得通知文本")
                         
                         # 从通知文本中提取信息
                         download_info['notification_text'] = notification_text
                         
                         # 提取种子名称
-                        import re
                         torrent_match = re.search(r'种子：(.*?)\n', notification_text)
                         if torrent_match:
                             download_info['name'] = torrent_match.group(1)
@@ -488,11 +673,10 @@ class HRManager(_PluginBase):
                             logger.debug(f"从通知文本中提取站点：{download_info['site_name']}")
                         
                         # 提取HR信息 - 使用更灵活的正则表达式
-                        hr_match = re.search(r'Hit&Run\s*[:：]\s*(是|Yes)', notification_text, re.IGNORECASE)
-                        if hr_match:
-                            download_info['is_hr'] = True
-                            logger.debug("从通知文本中检测到Hit&Run：是")
-                            logger.info(f"✓ 从通知文本中确认种子 {download_info.get('name', '未知')} 是HR种子")
+                        parsed_hr_status = self._extract_hr_status_from_text(notification_text)
+                        if parsed_hr_status is not None:
+                            download_info['is_hr'] = parsed_hr_status
+                            logger.debug(f"从通知文本中检测到明确Hit&Run状态：{download_info['is_hr']}")
                 
                 # 尝试从下载器名称或其他字段获取站点信息
                 if 'downloader' in download_info:
@@ -561,26 +745,25 @@ class HRManager(_PluginBase):
             downloader = downloader_service.instance
             logger.debug(f"成功获取下载器实例：{downloader_name}")
 
-            # 解析站点信息
             logger.debug(f"尝试解析种子 {torrent_name} 的站点信息")
-            
-            # 优先使用从通知文本中提取的站点名称
-            site_name = download_info.get("site_name")
-            
-            # 如果没有从通知中提取到站点名称，尝试从种子名称中解析
-            if not site_name:
-                site_name = self._extract_site_name(torrent_name)
-                
-            # 如果仍然没有站点名称，尝试从tracker中解析
+            site_name = self._resolve_torrent_site(
+                downloader_name=downloader_name,
+                torrent_hash=torrent_hash,
+                torrent_name=torrent_name,
+                preferred_site=download_info.get("site_name"),
+            )
+
             if not site_name:
                 logger.debug(f"尝试从tracker解析种子 {torrent_name} 的站点信息")
-                # 从下载器获取种子信息，尝试解析tracker
-                torrents, error = downloader.get_torrents()
+                torrents, error = downloader.get_torrents(ids=torrent_hash)
                 if not error and torrents:
-                    for torrent in torrents:
-                        if torrent.get("hash") == torrent_hash:
-                            site_name = self._get_site_from_tracker(torrent)
-                            break
+                    site_name = self._resolve_torrent_site(
+                        downloader_name=downloader_name,
+                        torrent_hash=torrent_hash,
+                        torrent_name=torrent_name,
+                        torrent_info=torrents[0],
+                        preferred_site=download_info.get("site_name"),
+                    )
             
             if not site_name:
                 logger.warning(f"无法解析种子所属站点：{torrent_name}")
@@ -601,18 +784,12 @@ class HRManager(_PluginBase):
             # 检查是否为HR种子
             logger.debug(f"检查种子 {torrent_name} 是否为HR种子")
             
-            # 优先使用从通知文本中提取的HR信息
-            is_hr_seed = download_info.get("is_hr", False)
-            
-            # 如果没有从通知中提取到HR信息，尝试从数据库查询
-            if not is_hr_seed:
-                logger.debug(f"尝试从数据库查询种子 {torrent_name} 的HR信息")
-                db_hr_info = self._get_hr_info_from_db(torrent_hash, torrent_name)
-                is_hr_seed = db_hr_info.get("is_hr", False)
-            
-            # 如果仍然没有HR信息，使用常规检测方法
-            if not is_hr_seed:
-                is_hr_seed = self._is_hr_seed(torrent_name, site_config)
+            is_hr_seed = self._resolve_hr_status(
+                explicit_status=download_info.get("is_hr"),
+                torrent_hash=torrent_hash,
+                torrent_name=torrent_name,
+                site_config=site_config,
+            )
             
             if is_hr_seed:
                 # 设置HR标签
@@ -667,6 +844,7 @@ class HRManager(_PluginBase):
                         logger.debug(f"种子 {torrent_hash} 设置标签后的标签：{new_tags}")
                         
                     logger.info(f"成功为种子 {torrent_hash} 设置HR标签：{self._hr_tag}")
+                    self._remember_torrent_site(downloader_name, torrent_hash, site_name)
                 except Exception as e:
                     logger.error(f"设置HR标签失败：{str(e)}")
                     raise
@@ -743,18 +921,21 @@ class HRManager(_PluginBase):
                     logger.error(f"✗ 获取下载器 {downloader_name} 种子列表失败：{error}")
                     continue
 
+                self._prune_torrent_sites(
+                    downloader_name,
+                    {torrent.get("hash") for torrent in (torrents or []) if torrent.get("hash")},
+                )
+
                 if not torrents:
                     logger.info(f"✓ 下载器 {downloader_name} 中没有种子")
                     continue
                 logger.info(f"✓ 成功获取下载器 {downloader_name} 中的 {len(torrents)} 个种子")
-                logger.debug(f"获取到的种子列表：{[t.get('name') for t in torrents]}")
-                # 打印第一个种子的完整信息，用于调试
+                logger.debug(f"下载器本次返回 {len(torrents)} 个种子")
+                # 只记录字段是否存在，避免tracker等敏感内容进入日志
                 if torrents:
-                    logger.debug(f"第一个种子的完整信息：{torrents[0]}")
-                    # 特别打印时间相关的字段
-                    logger.debug(f"种子时间相关字段：")
+                    logger.debug("检查首个种子的时间字段可用性")
                     for field in ['added_time', 'created_at', 'start_time', 'time_added', 'date_added', 'addedOn', 'add_time', 'added', 'added_on']:
-                        logger.debug(f"  {field}: {torrents[0].get(field)}")
+                        logger.debug(f"  {field}: {'有' if torrents[0].get(field) is not None else '无'}")
 
                 # 过滤出HR种子：自动识别 + 标签匹配
                 logger.info(f"开始识别HR种子，当前HR标签：{self._hr_tag}...")
@@ -792,10 +973,14 @@ class HRManager(_PluginBase):
                     else:
                         # 尝试自动识别
                         logger.debug(f"尝试自动识别种子 {torrent_name} 是否为HR种子")
-                        # 解析站点信息
-                        site_name = self._extract_site_name(torrent_name)
+                        site_name = self._resolve_torrent_site(
+                            downloader_name=downloader_name,
+                            torrent_hash=torrent.get("hash"),
+                            torrent_name=torrent_name,
+                            torrent_info=torrent,
+                        )
                         if site_name:
-                            logger.debug(f"✓ 从种子名称提取到站点：{site_name}")
+                            logger.debug(f"✓ 解析到站点：{site_name}")
                             # 获取站点HR配置
                             site_config = self._get_site_config(site_name)
                             if site_config:
@@ -807,7 +992,7 @@ class HRManager(_PluginBase):
                             else:
                                 logger.debug(f"✗ 未找到站点 {site_name} 的HR配置，跳过自动识别")
                         else:
-                            logger.debug(f"✗ 无法从种子名称提取站点信息，跳过自动识别")
+                            logger.debug("✗ 无法解析站点信息，跳过自动识别")
                     
                     if is_hr:
                         hr_torrents.append(torrent)
@@ -829,9 +1014,14 @@ class HRManager(_PluginBase):
                         logger.info(f"检查HR种子：{torrent_name} (状态: {state})")
                         logger.debug(f"种子详情：哈希={torrent_hash}, 做种时间={seeding_time:.2f}小时, 分享率={ratio:.2f}, 状态={state}")
 
-                        # 解析站点信息
                         logger.debug(f"尝试解析种子 {torrent_name} 的站点信息")
-                        site_name = self._extract_site_name(torrent_name)
+                        site_name = self._resolve_torrent_site(
+                            downloader_name=downloader_name,
+                            torrent_hash=torrent_hash,
+                            torrent_name=torrent_name,
+                            torrent_info=torrent,
+                            remember=True,
+                        )
                         if not site_name:
                             logger.warning(f"无法解析种子所属站点：{torrent_name}")
                             logger.debug(f"当前配置的站点：{[site.get('site_name') for site in self._sites_config]}")
@@ -871,7 +1061,7 @@ class HRManager(_PluginBase):
                             # 计算已过去的天数
                             days_passed = (datetime.now() - datetime.fromtimestamp(added_time)).days
                             logger.info(f"HR期限检查 - 已过去：{days_passed}天，要求期限：{hr_deadline_days}天")
-                            
+
                             if days_passed > hr_deadline_days and not hr_finished:
                                 # 超过期限，发送警告通知
                                 logger.warning(f"⚠ 种子 {torrent_name} 已超过HR满足期限 {hr_deadline_days}天")
@@ -939,6 +1129,7 @@ class HRManager(_PluginBase):
                                     logger.debug(f"种子 {torrent_hash} 设置标签后的标签：{new_tags}")
                                 
                                 logger.info(f"成功更新种子 {torrent_hash} 的标签")
+                                self._forget_torrent_site(downloader_name, torrent_hash)
                             except Exception as e:
                                 logger.error(f"更新种子标签失败：{str(e)}")
                                 raise
@@ -2291,7 +2482,7 @@ class HRManager(_PluginBase):
         """
         从数据库查询种子的HR信息
         """
-        hr_info = {"is_hr": False}
+        hr_info = {"is_hr": None}
         try:
             from app.db.downloadhistory_oper import DownloadHistoryOper
             
@@ -2302,20 +2493,18 @@ class HRManager(_PluginBase):
             if torrent_hash:
                 download_history = download_history_oper.get_by_hash(download_hash=torrent_hash)
                 if download_history:
-                    logger.debug(f"从数据库中查询到下载历史记录：{download_history}")
+                    logger.debug("从数据库中查询到下载历史记录")
                     
                     # 检查种子描述中是否包含HR信息（主要来源）
                     if hasattr(download_history, 'torrent_description') and download_history.torrent_description:
-                        logger.debug(f"种子描述：{download_history.torrent_description}")
-                        import re
-                        # 匹配多种HR格式，包括"Hit&Run：是"、"Hit & Run: Yes"等
-                        hr_match = re.search(r'Hit\s*&\s*Run\s*[:：]\s*(是|Yes|1)', download_history.torrent_description, re.IGNORECASE)
-                        if hr_match:
-                            hr_info["is_hr"] = True
-                            logger.debug("从数据库种子描述中检测到Hit&Run：是")
-                            logger.info(f"✓ 从数据库中确认种子 {torrent_name} 是HR种子")
+                        parsed_hr_status = self._extract_hr_status_from_text(
+                            download_history.torrent_description
+                        )
+                        if parsed_hr_status is not None:
+                            hr_info["is_hr"] = parsed_hr_status
+                            logger.debug(f"从数据库种子描述中检测到明确Hit&Run状态：{hr_info['is_hr']}")
         except Exception as e:
-            logger.error(f"从数据库查询HR信息失败: {e}", exc_info=True)
+            logger.error(f"从数据库查询HR信息失败: {type(e).__name__}")
         
         return hr_info
 
@@ -2408,7 +2597,7 @@ class HRManager(_PluginBase):
                     continue
                 
                 logger.info(f"✓ 成功获取下载器 {downloader_name} 中的 {len(torrents)} 个种子")
-                logger.debug(f"获取到的种子列表：{[t.get('name') for t in torrents]}")
+                logger.debug(f"下载器本次返回 {len(torrents)} 个种子")
                 
                 # 过滤出HR种子：自动识别 + 标签匹配
                 hr_torrents = []
@@ -2451,10 +2640,14 @@ class HRManager(_PluginBase):
                     else:
                         # 尝试自动识别
                         logger.debug(f"尝试自动识别种子 {torrent_name} 是否为HR种子")
-                        # 解析站点信息
-                        site_name = self._extract_site_name(torrent_name)
+                        site_name = self._resolve_torrent_site(
+                            downloader_name=downloader_name,
+                            torrent_hash=torrent_hash,
+                            torrent_name=torrent_name,
+                            torrent_info=torrent,
+                        )
                         if site_name:
-                            logger.debug(f"✓ 从种子名称提取到站点：{site_name}")
+                            logger.debug(f"✓ 解析到站点：{site_name}")
                             # 获取站点HR配置
                             site_config = self._get_site_config(site_name)
                             if site_config:
@@ -2466,7 +2659,7 @@ class HRManager(_PluginBase):
                             else:
                                 logger.debug(f"✗ 未找到站点 {site_name} 的HR配置，跳过自动识别")
                         else:
-                            logger.debug(f"✗ 无法从种子名称提取站点信息，跳过自动识别")
+                            logger.debug("✗ 无法解析站点信息，跳过自动识别")
                     
                     if is_hr:
                         hr_torrents.append(torrent)
@@ -2487,7 +2680,6 @@ class HRManager(_PluginBase):
                     added_time = self._get_torrent_added_time(torrent)
                     if not added_time:
                         logger.debug(f"✗ 种子 {torrent_name} 未找到有效添加时间字段")
-                        logger.debug(f"  种子所有可用字段：{list(torrent.keys())}")
                     logger.info(f"  添加时间：{added_time} (timestamp)")
                     
                     logger.info(f"\n处理HR种子：{torrent_name} (hash: {torrent_hash})")
@@ -2496,9 +2688,14 @@ class HRManager(_PluginBase):
                     logger.info(f"  当前分享率：{ratio:.2f}")
                     logger.info(f"  添加时间：{added_time} (timestamp)")
                     
-                    # 解析站点信息
-                    site_name = self._extract_site_name(torrent_name)
-                    logger.info(f"  从种子名称解析出的站点：{site_name}")
+                    site_name = self._resolve_torrent_site(
+                        downloader_name=downloader_name,
+                        torrent_hash=torrent_hash,
+                        torrent_name=torrent_name,
+                        torrent_info=torrent,
+                        remember=True,
+                    )
+                    logger.info(f"  解析出的站点：{site_name}")
                     if not site_name:
                         site_name = "未知站点"
                         logger.warning(f"  ✗ 无法解析种子 {torrent_name} 的站点信息，设置为未知站点")
@@ -2616,7 +2813,7 @@ class HRManager(_PluginBase):
             logger.info("\n=== HR种子数据获取完成 ===")
             logger.info(f"✓ 总HR种子数量：{total_hr_seeds}")
             logger.info(f"✓ HR种子站点分布：{site_stats}")
-            logger.info(f"✓ HR种子详情列表：{all_hr_seeds}")
+            logger.info(f"✓ HR种子详情生成完成，共 {len(all_hr_seeds)} 条")
             logger.info(f"✓ 返回给详情页的数据结构：{hr_seeds_data}")
         
         except Exception as e:
