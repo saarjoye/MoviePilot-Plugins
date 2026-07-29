@@ -12,6 +12,20 @@ from app.schemas.types import EventType, MediaType
 import re
 from app.log import logger
 from app.schemas import Notification, NotificationType, MessageChannel
+from .sync_models import (
+    DATETIME_FORMAT,
+    FailureKind,
+    RETRY_REOPEN_DELAY,
+    SubjectCandidate,
+    SubjectResolveResult,
+    TERMINAL_FAILURES,
+    failure_is_suppressed,
+    normalize_wait_entry,
+    record_retry_failure,
+    resolve_subject_target,
+    retry_is_due,
+    schedule_initial_retry,
+)
 
 lock = threading.Lock()
 
@@ -24,7 +38,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -52,6 +66,7 @@ class DoubanMediaFolio(_PluginBase):
     _mobile_num = None
 
     _wait_process: Dict = None
+    _failed_process: Dict = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -112,7 +127,7 @@ class DoubanMediaFolio(_PluginBase):
                     subject_name, subject_id = douban_helper.get_subject_id(title="肖申克的救赎")
                 except Exception:
                     subject_id = None  # 检测异常时静默处理
-                
+
                 if subject_id:
                     self._cookie = douban_helper.get_cookie_string()
                     # 10分钟内只输出一次cookie有效日志
@@ -127,12 +142,13 @@ class DoubanMediaFolio(_PluginBase):
                         self._send_notification(False, "豆瓣cookie/ck可能已失效，自动登录未成功，请检查账号密码或是否需要人工验证。")
                         self._last_cookie_invalid_time = now
                 self._last_cookie_check_time = now
-            
+
             event_info: WebhookEventInfo = event.event_data
             play_start = {"playback.start", "media.play", "PlaybackStart"}
             path = event_info.item_path
             processed_items: Dict = self.get_data('data') or {}
             self._wait_process: Dict = self.get_data('wait') or {}
+            self._failed_process: Dict = self.get_data('failed') or {}
 
             if (event_info.event in play_start and event_info.user_name in self._user.split(',')) or played:
                 if played:
@@ -202,14 +218,25 @@ class DoubanMediaFolio(_PluginBase):
                 logger.info(f"{title} 跳过同步，不发送通知")
             return
 
-        sync_ret = self._sync_to_douban(title, status, event_info.item_type, processed_items, mediainfo.poster_path)
+        sync_ret = self._sync_to_douban(
+            title,
+            status,
+            event_info.item_type,
+            processed_items,
+            mediainfo.poster_path,
+            direct_douban_id=getattr(mediainfo, "douban_id", None),
+            year=getattr(mediainfo, "year", None),
+            season_id=season_id,
+        )
         # 尝试同步之前同步失败的
         if sync_ret:
             logger.info(f"尝试同步之前同步失败的条目")
             self._wait_process: Dict = self.get_data('wait') or {}
-            for key, value in self._wait_process.items():
+            for key, value in list(self._wait_process.items()):
+                if not retry_is_due(value):
+                    continue
                 logger.info(f"尝试同步: {key}")
-                self._sync_to_douban(key, value["status"], value["type"], processed_items, value["poster_path"])
+                self._retry_waiting_item(key, value, processed_items)
 
     def _process_movie(self, event_info: WebhookEventInfo, processed_items: Dict, played: bool = False):
         title = event_info.item_name
@@ -233,7 +260,15 @@ class DoubanMediaFolio(_PluginBase):
             logger.info(f"{title} 已同步到豆瓣在看，不处理")
             return
 
-        self._sync_to_douban(title, "collect", event_info.item_type, processed_items, mediainfo.poster_path)
+        self._sync_to_douban(
+            title,
+            "collect",
+            event_info.item_type,
+            processed_items,
+            mediainfo.poster_path,
+            direct_douban_id=getattr(mediainfo, "douban_id", None),
+            year=getattr(mediainfo, "year", None),
+        )
 
     def _recognize_media(self, meta: MetaInfo, tmdb_id: Optional[int]) -> Optional[MediaInfo]:
         return MediaChain().recognize_media(meta=meta, mtype=meta.type, tmdbid=tmdb_id, cache=True)
@@ -262,61 +297,231 @@ class DoubanMediaFolio(_PluginBase):
             else:
                 logger.error(error_msg)
 
-    def _sync_to_douban(self, title: str, status: str, mediaType: str, processed_items: Dict,
-                        poster_path: str) -> bool:
-        logger.info(f"开始尝试获取 {title} 豆瓣id")
-        douban_helper = self._get_douban_helper()
-        subject_name, subject_id = douban_helper.get_subject_id(title=title)
+    def _retry_waiting_item(self, title: str, value: Dict, processed_items: Dict) -> bool:
+        value = normalize_wait_entry(value)
+        media_type = value.get("type", "TV")
+        season_id = value.get("season_id")
+        meta = MetaInfo(title)
+        meta.type = MediaType("电视剧" if media_type == "TV" else "电影")
+        if media_type == "TV" and season_id:
+            meta.begin_season = season_id
+        mediainfo = self._recognize_media(meta, None)
+        return self._sync_to_douban(
+            title=title,
+            status=value.get("status", "do"),
+            mediaType=media_type,
+            processed_items=processed_items,
+            poster_path=value.get("poster_path", ""),
+            direct_douban_id=getattr(mediainfo, "douban_id", None) if mediainfo else None,
+            year=getattr(mediainfo, "year", None) if mediainfo else value.get("year"),
+            season_id=season_id,
+            is_retry=True,
+        )
 
-        if subject_id:
-            logger.info(f"查询：{title} => 匹配豆瓣：{subject_name} https://movie.douban.com/subject/{subject_id}/")
-            ret = douban_helper.set_watching_status(subject_id=subject_id, status=status, private=self._private)
-            if ret:
-                self._cookie = douban_helper.get_cookie_string()
-                processed_items[title] = {
-                    "subject_id": subject_id,
-                    "subject_name": subject_name,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "poster_path": poster_path,
-                    "type": "电视剧" if mediaType == "TV" else "电影"
-                }
-
-                if title in self._wait_process:
-                    del self._wait_process[title]
-
-                self.save_data('data', processed_items)
+    def _sync_to_douban(
+            self,
+            title: str,
+            status: str,
+            mediaType: str,
+            processed_items: Dict,
+            poster_path: str,
+            direct_douban_id: Optional[str] = None,
+            year: Optional[int] = None,
+            season_id: Optional[int] = None,
+            is_retry: bool = False,
+    ) -> bool:
+        self._wait_process = self._wait_process or self.get_data('wait') or {}
+        self._failed_process = self._failed_process or self.get_data('failed') or {}
+        direct_id = str(direct_douban_id or "").strip()
+        waiting = normalize_wait_entry(self._wait_process.get(title)) if title in self._wait_process else None
+        if waiting:
+            waiting_direct_id = str(waiting.get("douban_id") or "").strip()
+            waiting_target_id = waiting_direct_id or str(waiting.get("subject_id") or "").strip()
+            if direct_id and waiting_target_id and direct_id != waiting_target_id:
+                del self._wait_process[title]
                 self.save_data('wait', self._wait_process)
-                logger.info(f"{title} 同步到档案成功")
-                # 通知：同步成功
-                self._send_notification(True, f"《{title}》已成功同步到豆瓣档案。")
-                return True
+                waiting = None
+            elif not retry_is_due(waiting):
+                return False
             else:
-                error_msg = f'{title} 同步到档案失败'
-                if 'The resource you requested could not be found.' in error_msg:
-                    logger.error('请求的资源未找到（可能是条目不存在或ID错误）')
-                else:
-                    logger.error(error_msg)
-                if title not in self._wait_process:
-                    self._wait_process[title] = {
-                        "subject_id": subject_id,
-                        "subject_name": subject_name,
-                        "status": status,
-                        "poster_path": poster_path,
-                        "type": mediaType
-                    }
-                    self.save_data('wait', self._wait_process)
-                    error_msg = f'{title} 添加到待同步列表'
-                    if 'The resource you requested could not be found.' in error_msg:
-                        logger.error('请求的资源未找到（可能是条目不存在或ID错误）')
-                    else:
-                        logger.error(error_msg)
-                # 通知：同步失败
-                self._send_notification(False, f"《{title}》同步到豆瓣档案失败，请检查cookie或网络。")
+                is_retry = True
+
+        if self._is_failure_suppressed(title, direct_id):
+            return False
+
+        logger.info(f"开始尝试解析 {title} 豆瓣条目")
+        douban_helper = self._get_douban_helper()
+        if direct_id:
+            resolve_result = resolve_subject_target(
+                direct_douban_id=direct_id,
+                title=title,
+                candidates=[],
+                year=year,
+                media_type=mediaType,
+                season=season_id,
+            )
         else:
-            logger.warn(f"获取 {title} subject_id 失败，本条目不存在于豆瓣")
-            # 豆瓣上没有找到剧集，这是正常情况，不推送失败通知
-            # 只有在cookie检测失败时才会推送通知
-        return False
+            resolve_result = douban_helper.resolve_subject(
+                title=title,
+                year=year,
+                media_type=mediaType,
+                season=season_id,
+            )
+
+        if not resolve_result.candidate:
+            self._handle_sync_failure(
+                title=title,
+                status=status,
+                media_type=mediaType,
+                poster_path=poster_path,
+                year=year,
+                season_id=season_id,
+                resolve_result=resolve_result,
+                is_retry=is_retry,
+            )
+            return False
+
+        candidate = resolve_result.candidate
+        if self._is_failure_suppressed(title, candidate.subject_id):
+            return False
+        logger.info(
+            f"查询：{title} => 匹配豆瓣：{candidate.title} "
+            f"https://movie.douban.com/subject/{candidate.subject_id}/ 来源：{candidate.source}"
+        )
+        action_result = douban_helper.set_watching_status_result(
+            subject_id=candidate.subject_id,
+            status=status,
+            private=self._private,
+        )
+        if not action_result.success:
+            self._handle_sync_failure(
+                title=title,
+                status=status,
+                media_type=mediaType,
+                poster_path=poster_path,
+                year=year,
+                season_id=season_id,
+                candidate=candidate,
+                action_result=action_result,
+                is_retry=is_retry,
+                direct_douban_id=direct_id,
+            )
+            return False
+
+        self._cookie = douban_helper.get_cookie_string()
+        processed_items[title] = {
+            "subject_id": candidate.subject_id,
+            "subject_name": candidate.title,
+            "timestamp": datetime.now().strftime(DATETIME_FORMAT),
+            "poster_path": poster_path,
+            "type": "电视剧" if mediaType == "TV" else "电影"
+        }
+        self._wait_process.pop(title, None)
+        self._failed_process.pop(title, None)
+        self.save_data('data', processed_items)
+        self.save_data('wait', self._wait_process)
+        self.save_data('failed', self._failed_process)
+        logger.info(f"{title} 同步到档案成功")
+        self._send_notification(True, f"《{title}》已成功同步到豆瓣档案。")
+        return True
+
+    def _is_failure_suppressed(self, title: str, current_subject_id: str = "") -> bool:
+        failed = self._failed_process.get(title)
+        suppressed, should_remove = failure_is_suppressed(failed, current_subject_id)
+        if should_remove:
+            self._failed_process.pop(title, None)
+            self.save_data('failed', self._failed_process)
+        return suppressed
+
+    def _handle_sync_failure(
+            self,
+            title: str,
+            status: str,
+            media_type: str,
+            poster_path: str,
+            year: Optional[int],
+            season_id: Optional[int],
+            resolve_result: Optional[SubjectResolveResult] = None,
+            candidate: Optional[SubjectCandidate] = None,
+            action_result=None,
+            is_retry: bool = False,
+            direct_douban_id: str = "",
+    ):
+        failure = action_result or resolve_result
+        kind = failure.kind
+        message = failure.message or "未知原因"
+        subject_id = candidate.subject_id if candidate else ""
+        subject_name = candidate.title if candidate else title
+        permanent = kind in TERMINAL_FAILURES
+
+        if permanent:
+            self._wait_process.pop(title, None)
+            self._failed_process[title] = {
+                "subject_id": subject_id,
+                "kind": kind.value,
+                "reason": message,
+                "timestamp": datetime.now().strftime(DATETIME_FORMAT),
+                "blocked_until": "",
+            }
+            self.save_data('wait', self._wait_process)
+            self.save_data('failed', self._failed_process)
+            logger.error(f"{title} 同步停止：{message}")
+            if kind == FailureKind.NOT_ALLOWED:
+                notice = (
+                    f"《{title}》匹配到豆瓣条目「{subject_name}」(ID {subject_id})，"
+                    "但豆瓣未开播或不允许标记；已停止自动重试，请确认条目、开播状态或豆瓣页面权限。"
+                )
+            else:
+                notice = f"《{title}》{message}；为避免误标，已停止自动重试。"
+            self._send_notification(False, notice)
+            return
+
+        queue_entry = {
+            "subject_id": subject_id,
+            "subject_name": subject_name,
+            "douban_id": direct_douban_id,
+            "status": status,
+            "poster_path": poster_path,
+            "type": media_type,
+            "year": year,
+            "season_id": season_id,
+            "last_error": message,
+        }
+        existing = normalize_wait_entry(self._wait_process.get(title)) if title in self._wait_process else None
+        if existing and is_retry:
+            existing.update(queue_entry)
+            updated, exhausted = record_retry_failure(existing)
+            if exhausted:
+                self._wait_process.pop(title, None)
+                self._failed_process[title] = {
+                    "subject_id": subject_id,
+                    "kind": kind.value,
+                    "reason": message,
+                    "timestamp": datetime.now().strftime(DATETIME_FORMAT),
+                    "blocked_until": (datetime.now() + RETRY_REOPEN_DELAY).strftime(DATETIME_FORMAT),
+                }
+                self.save_data('wait', self._wait_process)
+                self.save_data('failed', self._failed_process)
+                logger.error(f"{title} 自动重试已达到上限")
+                self._send_notification(
+                    False,
+                    f"《{title}》连续 5 次自动重试仍失败：{message}；已暂停重试 24 小时。",
+                )
+                return
+            self._wait_process[title] = updated
+            self.save_data('wait', self._wait_process)
+            logger.warning(f"{title} 自动重试失败，将在冷却后再次尝试：{message}")
+            return
+
+        if not existing:
+            self._wait_process[title] = schedule_initial_retry(queue_entry)
+            self.save_data('wait', self._wait_process)
+            logger.error(f"{title} 因可重试错误加入待同步列表：{message}")
+            if kind == FailureKind.AUTH:
+                notice = f"《{title}》因豆瓣登录状态无效同步失败，已加入待同步列表；请检查 Cookie/CK 或账号验证状态。"
+            else:
+                notice = f"《{title}》因网络或豆瓣服务临时异常同步失败，已加入待同步列表。"
+            self._send_notification(False, notice)
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """

@@ -168,12 +168,13 @@
     "name": "豆瓣影音档案",
     "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
     "labels": "影视,工具",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v1.0.3": "豆瓣影音档案 1.0.3 更换插件ID为DoubanMediaFolio避免与原版冲突"
+      "v1.0.3": "豆瓣影音档案 1.0.3 更换插件ID为DoubanMediaFolio避免与原版冲突",
+      "v1.0.4": "优先使用媒体识别豆瓣ID，修复错误条目匹配、失败误报和重复重试通知"
     }
   }
 }

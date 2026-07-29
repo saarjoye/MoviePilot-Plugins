@@ -10,6 +10,15 @@ from app.core.config import settings
 from app.core.meta import MetaBase
 from app.helper.cookiecloud import CookieCloudHelper
 from app.log import logger
+from .sync_models import (
+    DoubanActionResult,
+    FailureKind,
+    SubjectCandidate,
+    SubjectResolveResult,
+    classify_action_response,
+    extract_season,
+    select_subject_candidate,
+)
 
 
 class DoubanApi:
@@ -230,10 +239,15 @@ class DoubanApi:
             return True
         return self.auto_login and self.login()
 
-    def get_subject_id(self, title: str = None, meta: MetaBase = None) -> Tuple | None:
-        if not title:
-            title = meta.title
-
+    def resolve_subject(
+            self,
+            title: str,
+            year: Optional[int] = None,
+            media_type: Optional[str] = None,
+            season: Optional[int] = None,
+    ) -> SubjectResolveResult:
+        """搜索并选择唯一高置信豆瓣条目。"""
+        silent = title == "肖申克的救赎"
         response = None
         for retry in range(2):
             try:
@@ -244,55 +258,95 @@ class DoubanApi:
                     timeout=15
                 )
             except Exception as err:
-                if title == "肖申克的救赎":
-                    return None, None
-                logger.error(f"搜索 {title} 失败: {err}")
-                return None, None
+                if not silent:
+                    logger.error(f"搜索 {title} 失败: {self._safe_message(err)}")
+                return SubjectResolveResult(
+                    candidate=None,
+                    kind=FailureKind.TRANSIENT,
+                    message="连接豆瓣搜索服务失败",
+                    retryable=True,
+                )
 
-            if response.status_code == 200 or retry > 0 or not self.auto_login:
+            if response.status_code == 200:
                 break
-            if self._looks_like_auth_failed(response) and self.login():
+            auth_failed = self._looks_like_auth_failed(response)
+            if retry == 0 and auth_failed and self.auto_login and self.login():
                 continue
+            if auth_failed:
+                return SubjectResolveResult(
+                    candidate=None,
+                    kind=FailureKind.AUTH,
+                    message="豆瓣登录状态无效，搜索条目失败",
+                    retryable=True,
+                )
             break
 
-        if not response or response.status_code != 200:
-            if title == "肖申克的救赎":
-                return None, None
-            status_code = response.status_code if response else "无响应"
-            logger.error(f"搜索 {title} 失败 状态码：{status_code}")
-            return None, None
+        if response is None or response.status_code != 200:
+            status_code = response.status_code if response is not None else "无响应"
+            if not silent:
+                logger.error(f"搜索 {title} 失败 状态码：{status_code}")
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.TRANSIENT,
+                message=f"豆瓣搜索服务返回 HTTP {status_code}",
+                retryable=True,
+            )
 
         soup = BeautifulSoup(response.text, "lxml")
-        title_divs = soup.find_all("div", class_="title")
-        subject_items: List = []
-        for div in title_divs:
+        candidates: List[SubjectCandidate] = []
+        for div in soup.find_all("div", class_="title"):
             a_tags = div.find_all("a")
             if not a_tags:
                 continue
-            item = {}
-            item["title"] = (a_tags[0].string or "").strip()
-            link = unquote(a_tags[0]["href"])
-            if link.count("subject/"):
-                match = re.search(r"subject/(\d+)/", link)
-                if match:
-                    item["subject_id"] = match.group(1)
-            if item.get("title") and item.get("subject_id"):
-                subject_items.append(item)
+            subject_title = a_tags[0].get_text(strip=True)
+            link = unquote(a_tags[0].get("href", ""))
+            match = re.search(r"subject/(\d+)/", link)
+            if not subject_title or not match:
+                continue
 
-        if not subject_items:
-            if title == "肖申克的救赎":
-                return None, None
-            logger.warn(f"找不到 {title} 相关条目，本条目不存在于豆瓣")
-            return None, None
+            result_node = div.find_parent("div", class_="result") or div.parent
+            result_text = result_node.get_text(" ", strip=True) if result_node else div.get_text(" ", strip=True)
+            year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", result_text)
+            type_match = re.search(r"[\[【]([^\]】]+)[\]】]", div.get_text(" ", strip=True))
+            candidates.append(SubjectCandidate(
+                subject_id=match.group(1),
+                title=subject_title,
+                year=int(year_match.group(1)) if year_match else None,
+                media_type=type_match.group(1).strip() if type_match else None,
+                season=extract_season(subject_title),
+            ))
 
-        for subject_item in subject_items:
-            return subject_item["title"], subject_item["subject_id"]
+        if not candidates and not silent:
+            logger.warning(f"找不到 {title} 相关条目，本条目不存在于豆瓣")
+        return select_subject_candidate(title, candidates, year, media_type, season)
+
+    def get_subject_id(self, title: str = None, meta: MetaBase = None) -> Tuple | None:
+        if not title:
+            title = meta.title
+        result = self.resolve_subject(
+            title=title,
+            year=getattr(meta, "year", None) if meta else None,
+            media_type=str(getattr(meta, "type", "")) if meta else None,
+            season=getattr(meta, "begin_season", None) if meta else None,
+        )
+        if result.candidate:
+            return result.candidate.title, result.candidate.subject_id
         return None, None
 
-    def set_watching_status(self, subject_id: str, status: str = "do", private: bool = True) -> bool:
+    def set_watching_status_result(
+            self,
+            subject_id: str,
+            status: str = "do",
+            private: bool = True,
+    ) -> DoubanActionResult:
         for retry in range(2):
             if not self._ensure_ck():
-                return False
+                return DoubanActionResult(
+                    success=False,
+                    kind=FailureKind.AUTH,
+                    message="豆瓣登录状态无效，无法提交观影状态",
+                    retryable=True,
+                )
 
             try:
                 response = self.session.post(
@@ -316,30 +370,54 @@ class DoubanApi:
                     timeout=15
                 )
             except Exception as err:
-                logger.error(f"提交豆瓣观影状态失败: {err}")
-                return False
+                logger.error(f"提交豆瓣观影状态失败: {self._safe_message(err)}")
+                return DoubanActionResult(
+                    success=False,
+                    kind=FailureKind.TRANSIENT,
+                    message="连接豆瓣标记服务失败",
+                    retryable=True,
+                )
 
             try:
                 result = response.json()
             except Exception:
                 result = {}
 
-            if response.status_code == 200:
-                ret = result.get("r")
-                if not (isinstance(ret, bool) and ret is False):
-                    self._update_cookies_from_session()
-                    return True
-                if not self._looks_like_auth_failed(response, result):
-                    logger.error(f"douban_id: {subject_id} 未开播或不允许标记")
-                    return False
-
-            if retry == 0 and self.auto_login and self._looks_like_auth_failed(response, result) and self.login():
+            raw_message = str(
+                result.get("message")
+                or result.get("msg")
+                or result.get("description")
+                or ""
+            )
+            safe_message = self._safe_message(raw_message) if raw_message else ""
+            auth_failed = self._looks_like_auth_failed(response, result)
+            action_result = classify_action_response(
+                status_code=response.status_code,
+                payload=result,
+                auth_failed=auth_failed,
+                message=safe_message,
+            )
+            if action_result.success:
+                self._update_cookies_from_session()
+                return action_result
+            if retry == 0 and self.auto_login and action_result.kind == FailureKind.AUTH and self.login():
                 continue
 
-            logger.error(self._safe_message(response.text))
-            return False
+            if action_result.kind == FailureKind.NOT_ALLOWED:
+                logger.error(f"douban_id: {subject_id} 未开播或不允许标记")
+            else:
+                logger.error(action_result.message or f"提交豆瓣观影状态失败 HTTP {response.status_code}")
+            return action_result
 
-        return False
+        return DoubanActionResult(
+            success=False,
+            kind=FailureKind.AUTH,
+            message="豆瓣自动登录重试后仍无法提交观影状态",
+            retryable=True,
+        )
+
+    def set_watching_status(self, subject_id: str, status: str = "do", private: bool = True) -> bool:
+        return self.set_watching_status_result(subject_id, status, private).success
 
 
 if __name__ == "__main__":
