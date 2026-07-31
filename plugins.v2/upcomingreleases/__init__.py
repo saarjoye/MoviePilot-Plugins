@@ -405,7 +405,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.25"
+    plugin_version = "0.6.26"
     plugin_release_date = "2026-07-31"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -2676,7 +2676,7 @@ class UpcomingReleases(_PluginBase):
             for attempt in range(3):
                 response = self._request_json(
                     (
-                        f"{NETFLIX_RELEASES_URL}?countryCode={NETFLIX_DEFAULT_REGION}"
+                        f"{NETFLIX_RELEASES_URL}?country={NETFLIX_DEFAULT_REGION}"
                         f"&language={NETFLIX_DEFAULT_LANGUAGE}&page={page}"
                     ),
                     headers={
