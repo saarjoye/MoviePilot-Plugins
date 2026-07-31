@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -20,6 +21,14 @@ class FailureKind(str, Enum):
     NOT_ALLOWED = "not_allowed"
     NO_MATCH = "no_match"
     AMBIGUOUS = "ambiguous"
+
+
+class AuthState(str, Enum):
+    VALID = "valid"
+    LOGGED_OUT = "logged_out"
+    TRANSIENT = "transient"
+    RESTRICTED = "restricted"
+    UNKNOWN = "unknown"
 
 
 TERMINAL_FAILURES = {
@@ -72,6 +81,22 @@ class DoubanActionResult:
 
 
 @dataclass(frozen=True)
+class AuthCheckResult:
+    state: AuthState
+    message: str = ""
+    retryable: bool = False
+    login_attempted: bool = False
+
+    @property
+    def success(self) -> bool:
+        return self.state == AuthState.VALID
+
+    @property
+    def explicitly_logged_out(self) -> bool:
+        return self.state == AuthState.LOGGED_OUT
+
+
+@dataclass(frozen=True)
 class EpisodeMetadata:
     episode_number: int
     air_date: Optional[str] = None
@@ -99,6 +124,72 @@ class SegmentedResolveResult:
             if segment.start_episode <= episode_number <= segment.end_episode:
                 return segment
         return None
+
+
+def classify_auth_check(
+        status_code: int,
+        final_url: str,
+        page_title: str = "",
+        page_text: str = "",
+) -> AuthCheckResult:
+    """Classify the read-only /mine/ response without treating access errors as logout."""
+    status_code = int(status_code or 0)
+    final_url = str(final_url or "")
+    title = str(page_title or "").strip().casefold()
+    text = str(page_text or "")[:2000].casefold()
+    parsed = urlparse(final_url)
+    host = parsed.hostname or ""
+    path = parsed.path.rstrip("/") or "/"
+
+    if status_code == 429 or status_code >= 500:
+        return AuthCheckResult(
+            state=AuthState.TRANSIENT,
+            message=f"豆瓣登录状态检查暂时不可用（HTTP {status_code}）",
+            retryable=True,
+        )
+
+    if status_code in (401, 403):
+        return AuthCheckResult(
+            state=AuthState.RESTRICTED,
+            message=f"豆瓣限制了登录状态检查请求（HTTP {status_code}）",
+            retryable=True,
+        )
+
+    is_login_page = (
+        host == "accounts.douban.com" and path.startswith("/passport/login")
+    ) or title == "登录豆瓣"
+    if is_login_page:
+        return AuthCheckResult(
+            state=AuthState.LOGGED_OUT,
+            message="豆瓣登录状态已失效",
+            retryable=True,
+        )
+
+    restricted_markers = ("异常请求", "访问被拒绝", "访问受限", "机器人", "captcha")
+    if any(marker in text or marker in title for marker in restricted_markers):
+        return AuthCheckResult(
+            state=AuthState.RESTRICTED,
+            message="豆瓣登录状态检查遇到访问限制",
+            retryable=True,
+        )
+
+    if 200 <= status_code < 400 and host == "www.douban.com" and path == "/mine":
+        return AuthCheckResult(state=AuthState.VALID, message="豆瓣登录状态有效")
+
+    return AuthCheckResult(
+        state=AuthState.UNKNOWN,
+        message="无法确认豆瓣登录状态",
+        retryable=True,
+    )
+
+
+def choose_refreshed_ck(previous_ck: str, *candidates: Optional[str]) -> str:
+    """Choose a usable refreshed CK, falling back to the previous value."""
+    for candidate in candidates:
+        value = str(candidate or "").strip().strip('"')
+        if value and value.casefold() != "deleted":
+            return value
+    return str(previous_ck or "")
 
 
 _CHINESE_NUMBERS = {

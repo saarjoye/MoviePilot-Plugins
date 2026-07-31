@@ -11,11 +11,15 @@ from app.core.meta import MetaBase
 from app.helper.cookiecloud import CookieCloudHelper
 from app.log import logger
 from .sync_models import (
+    AuthCheckResult,
+    AuthState,
     DoubanActionResult,
     FailureKind,
     SubjectCandidate,
     SubjectResolveResult,
     SubjectSearchResult,
+    choose_refreshed_ck,
+    classify_auth_check,
     classify_action_response,
     extract_season,
     select_subject_candidate,
@@ -24,6 +28,7 @@ from .sync_models import (
 
 class DoubanApi:
     HOME_URL = "https://www.douban.com/"
+    MINE_URL = "https://www.douban.com/mine/"
     LOGIN_PAGE = "https://accounts.douban.com/passport/login"
     LOGIN_API = "https://accounts.douban.com/j/mobile/login/basic"
     SEARCH_URL = "https://www.douban.com/search"
@@ -41,7 +46,7 @@ class DoubanApi:
         self.auto_login = bool(auto_login)
         self.session = requests.Session()
         self.cookies: Dict[str, str] = self._load_cookies(user_cookie)
-        self.ck: str = ""
+        self.ck: str = self.cookies.get("ck", "")
 
         self.headers = {
             "User-Agent": settings.USER_AGENT,
@@ -56,13 +61,8 @@ class DoubanApi:
 
         if not self.cookies:
             logger.error("cookie获取为空，请检查插件配置或cookie cloud")
-
-        self.set_ck()
-        if not self.ck and self.auto_login:
-            self.login()
-
-        if not self.ck:
-            logger.error("请求ck失败，请检查cookie登录状态或豆瓣账号密码配置")
+        elif not self.ck:
+            logger.warning("豆瓣Cookie中未发现CK，将在提交观影状态前按需刷新")
 
     def _load_cookies(self, user_cookie: str = None) -> Dict[str, str]:
         if user_cookie:
@@ -148,8 +148,22 @@ class DoubanApi:
                 return True
         return False
 
-    def set_ck(self) -> bool:
+    def _restore_ck(self, ck: str):
+        if not ck:
+            self.ck = ""
+            return
+        self.cookies["ck"] = ck
+        self.session.cookies.set("ck", ck)
+        self.ck = ck
+
+    def set_ck(self, force_refresh: bool = False) -> bool:
+        previous_ck = self.ck or self.cookies.get("ck", "")
+        if previous_ck and not force_refresh:
+            self._restore_ck(previous_ck)
+            return True
+
         self._remove_cookie("ck")
+        self.ck = ""
         try:
             response = self.session.get(
                 self.HOME_URL,
@@ -158,25 +172,82 @@ class DoubanApi:
                 allow_redirects=True
             )
         except Exception as err:
-            logger.error(f"请求豆瓣首页刷新ck失败: {err}")
-            self.ck = ""
+            logger.error(f"请求豆瓣首页刷新ck失败: {self._safe_message(err)}")
+            self._restore_ck(previous_ck)
             return False
 
         self._update_cookies_from_session()
-        ck = self.cookies.get("ck") or self._extract_ck(response.headers.get("Set-Cookie", ""))
-        if ck and ck != '"deleted"':
+        session_ck = self.session.cookies.get_dict().get("ck")
+        header_ck = self._extract_ck(response.headers.get("Set-Cookie", ""))
+        ck = choose_refreshed_ck("", session_ck, header_ck)
+        if ck:
             self.cookies["ck"] = ck
             self.session.cookies.set("ck", ck)
             self.ck = ck
             return True
 
-        self.ck = ""
+        self._restore_ck(previous_ck)
         return False
+
+    @staticmethod
+    def _response_title(response: requests.Response) -> str:
+        text = response.text[:4000] if response.text else ""
+        match = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+        return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+    def _check_auth_once(self) -> AuthCheckResult:
+        try:
+            response = self.session.get(
+                self.MINE_URL,
+                headers={**self.headers, "Host": "www.douban.com"},
+                timeout=15,
+                allow_redirects=True,
+            )
+        except Exception as err:
+            logger.warning(f"检查豆瓣登录状态失败: {self._safe_message(err)}")
+            return AuthCheckResult(
+                state=AuthState.TRANSIENT,
+                message="连接豆瓣登录状态检查服务失败",
+                retryable=True,
+            )
+
+        return classify_auth_check(
+            status_code=response.status_code,
+            final_url=response.url,
+            page_title=self._response_title(response),
+            page_text=response.text[:2000] if response.text else "",
+        )
+
+    def check_auth_status(self, allow_login: bool = True) -> AuthCheckResult:
+        result = self._check_auth_once()
+        if not result.explicitly_logged_out or not allow_login:
+            return result
+
+        can_login = self.auto_login and bool(self.username and self.password)
+        if not can_login:
+            return result
+
+        if not self.login():
+            return AuthCheckResult(
+                state=AuthState.LOGGED_OUT,
+                message="豆瓣登录状态已失效，自动登录未成功",
+                retryable=True,
+                login_attempted=True,
+            )
+
+        verified = self._check_auth_once()
+        return AuthCheckResult(
+            state=verified.state,
+            message=verified.message,
+            retryable=verified.retryable,
+            login_attempted=True,
+        )
 
     def login(self) -> bool:
         if not self.username or not self.password:
             return False
 
+        previous_ck = self.ck or self.cookies.get("ck", "")
         try:
             self.session.get(
                 self.LOGIN_PAGE,
@@ -214,7 +285,12 @@ class DoubanApi:
 
         if response.status_code == 200 and result.get("status") == "success":
             self._update_cookies_from_session()
-            if self.set_ck():
+            login_ck = self.cookies.get("ck", "")
+            if login_ck and login_ck != previous_ck:
+                self._restore_ck(login_ck)
+                logger.info("豆瓣账号密码登录成功，已获得新ck")
+                return True
+            if self.set_ck(force_refresh=True):
                 logger.info("豆瓣账号密码登录成功，已刷新ck")
                 return True
             logger.error("豆瓣账号密码登录成功，但刷新ck失败")
@@ -233,54 +309,63 @@ class DoubanApi:
             logger.error(f"豆瓣账号密码登录失败: {safe_message}")
         return False
 
-    def _ensure_ck(self) -> bool:
+    def _ensure_ck_result(self) -> DoubanActionResult:
         if self.ck:
-            return True
+            return DoubanActionResult(success=True)
         if self.set_ck():
-            return True
-        return self.auto_login and self.login()
+            return DoubanActionResult(success=True)
+
+        auth_result = self.check_auth_status(allow_login=True)
+        if auth_result.success:
+            if self.ck or self.set_ck():
+                return DoubanActionResult(success=True)
+            return DoubanActionResult(
+                success=False,
+                kind=FailureKind.TRANSIENT,
+                message="豆瓣登录状态有效，但暂时无法刷新CK",
+                retryable=True,
+            )
+        if auth_result.explicitly_logged_out:
+            return DoubanActionResult(
+                success=False,
+                kind=FailureKind.AUTH,
+                message=auth_result.message or "豆瓣登录状态无效，无法提交观影状态",
+                retryable=True,
+            )
+        return DoubanActionResult(
+            success=False,
+            kind=FailureKind.TRANSIENT,
+            message=auth_result.message or "暂时无法确认豆瓣登录状态",
+            retryable=True,
+        )
+
+    def _ensure_ck(self) -> bool:
+        return self._ensure_ck_result().success
 
     def search_subject_candidates(self, title: str) -> SubjectSearchResult:
         """搜索豆瓣条目并返回候选列表，不执行目标选择。"""
-        silent = title == "肖申克的救赎"
-        response = None
-        for retry in range(2):
-            try:
-                response = self.session.get(
-                    self.SEARCH_URL,
-                    params={"cat": "1002", "q": title},
-                    headers={**self.headers, "Host": "www.douban.com", "Cookie": self._cookie_header()},
-                    timeout=15
-                )
-            except Exception as err:
-                if not silent:
-                    logger.error(f"搜索 {title} 失败: {self._safe_message(err)}")
-                return SubjectSearchResult(
-                    kind=FailureKind.TRANSIENT,
-                    message="连接豆瓣搜索服务失败",
-                    retryable=True,
-                )
-
-            if response.status_code == 200:
-                break
-            auth_failed = self._looks_like_auth_failed(response)
-            if retry == 0 and auth_failed and self.auto_login and self.login():
-                continue
-            if auth_failed:
-                return SubjectSearchResult(
-                    kind=FailureKind.AUTH,
-                    message="豆瓣登录状态无效，搜索条目失败",
-                    retryable=True,
-                )
-            break
-
-        if response is None or response.status_code != 200:
-            status_code = response.status_code if response is not None else "无响应"
-            if not silent:
-                logger.error(f"搜索 {title} 失败 状态码：{status_code}")
+        try:
+            response = self.session.get(
+                self.SEARCH_URL,
+                params={"cat": "1002", "q": title},
+                headers={**self.headers, "Host": "www.douban.com", "Cookie": self._cookie_header()},
+                timeout=15
+            )
+        except Exception as err:
+            logger.error(f"搜索 {title} 失败: {self._safe_message(err)}")
             return SubjectSearchResult(
                 kind=FailureKind.TRANSIENT,
-                message=f"豆瓣搜索服务返回 HTTP {status_code}",
+                message="连接豆瓣搜索服务失败",
+                retryable=True,
+            )
+
+        is_login_page = "passport/login" in response.url or self._response_title(response) == "登录豆瓣"
+        if response.status_code != 200 or is_login_page:
+            status_code = response.status_code
+            logger.error(f"搜索 {title} 失败 状态码：{status_code}")
+            return SubjectSearchResult(
+                kind=FailureKind.TRANSIENT,
+                message="豆瓣搜索服务暂时不可用" if is_login_page else f"豆瓣搜索服务返回 HTTP {status_code}",
                 retryable=True,
             )
 
@@ -350,13 +435,9 @@ class DoubanApi:
             private: bool = True,
     ) -> DoubanActionResult:
         for retry in range(2):
-            if not self._ensure_ck():
-                return DoubanActionResult(
-                    success=False,
-                    kind=FailureKind.AUTH,
-                    message="豆瓣登录状态无效，无法提交观影状态",
-                    retryable=True,
-                )
+            ck_result = self._ensure_ck_result()
+            if not ck_result.success:
+                return ck_result
 
             try:
                 response = self.session.post(

@@ -45,7 +45,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -120,35 +120,41 @@ class DoubanMediaFolio(_PluginBase):
                 self._last_skip_log_time = now
             return
         try:
-            # 优化：减少cookie检测频率，只在必要时检测
             import time
             if not hasattr(self, '_last_cookie_check_time'):
                 self._last_cookie_check_time = 0
             now = time.time()
-            # 每小时只检测一次cookie有效性，避免频繁检测
             if now - self._last_cookie_check_time > 3600:  # 1小时
-                if not hasattr(self, '_last_cookie_invalid_time'):
-                    self._last_cookie_invalid_time = 0
-                # 用真实存在的电影名检测cookie有效性，避免误判
                 try:
                     douban_helper = self._get_douban_helper()
-                    subject_name, subject_id = douban_helper.get_subject_id(title="肖申克的救赎")
-                except Exception:
-                    subject_id = None  # 检测异常时静默处理
+                    auth_result = douban_helper.check_auth_status(allow_login=True)
+                except Exception as err:
+                    auth_result = None
+                    logger.warning(f"检查豆瓣登录状态异常: {DoubanApi._safe_message(err)}")
 
-                if subject_id:
+                if auth_result and auth_result.success:
                     self._cookie = douban_helper.get_cookie_string()
-                    # 10分钟内只输出一次cookie有效日志
+                    self._cookie_invalid_notified = False
                     if not hasattr(self, '_last_cookie_valid_time'):
                         self._last_cookie_valid_time = 0
                     if now - self._last_cookie_valid_time > 600:
-                        logger.info("cookie有效性检测通过")
+                        logger.info("豆瓣登录状态检测通过")
                         self._last_cookie_valid_time = now
-                else:
-                    # 10分钟内只推送一次失效通知
-                    if now - self._last_cookie_invalid_time > 600:
-                        self._send_notification(False, "豆瓣cookie/ck可能已失效，自动登录未成功，请检查账号密码或是否需要人工验证。")
-                        self._last_cookie_invalid_time = now
+                elif auth_result and auth_result.explicitly_logged_out:
+                    if not getattr(self, '_cookie_invalid_notified', False):
+                        message = (
+                            "豆瓣登录状态已明确失效，自动登录未成功，请人工登录或更新Cookie。"
+                            if auth_result.login_attempted
+                            else "豆瓣登录状态已明确失效，请人工登录或更新Cookie。"
+                        )
+                        self._send_notification(False, message)
+                        self._cookie_invalid_notified = True
+                elif auth_result:
+                    if not hasattr(self, '_last_cookie_check_warning_time'):
+                        self._last_cookie_check_warning_time = 0
+                    if now - self._last_cookie_check_warning_time > 21600:
+                        logger.warning(auth_result.message or "暂时无法确认豆瓣登录状态")
+                        self._last_cookie_check_warning_time = now
                 self._last_cookie_check_time = now
 
             event_info: WebhookEventInfo = event.event_data
