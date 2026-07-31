@@ -405,8 +405,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.24"
-    plugin_release_date = "2026-06-22"
+    plugin_version = "0.6.25"
+    plugin_release_date = "2026-07-31"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -986,6 +986,7 @@ class UpcomingReleases(_PluginBase):
         subscribe_chain = SubscribeChain()
         resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
+        media_source, media_id = self._resolve_subscribe_identity(recognition)
         sid, message = subscribe_chain.add(
             title=item.get("title"),
             year=item.get("year") or "",
@@ -994,6 +995,8 @@ class UpcomingReleases(_PluginBase):
             doubanid=self._clean_text(recognition.get("douban_id")) or None,
             bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
             mediaid=self._make_subscribe_mediaid(item),
+            media_source=media_source,
+            media_id=media_id,
             season=resolved_season,
             exist_ok=True,
             username=username,
@@ -1001,7 +1004,9 @@ class UpcomingReleases(_PluginBase):
         logger.info(f"[UpcomingReleases] page subscribe result: title={item.get('title')} sid={sid} message={message or ''}")
         release_text = self._format_release_display(item)
         if sid and not self._is_exists_message(message):
-            verified, actual_season, verify_message = self._verify_added_subscribe(item, sid, resolved_season)
+            verified, actual_season, verify_message = self._verify_added_subscribe(
+                item, sid, resolved_season, recognition=recognition
+            )
             if not verified:
                 logger.error(
                     "[UpcomingReleases] page subscribe season verify failed: "
@@ -1030,8 +1035,27 @@ class UpcomingReleases(_PluginBase):
         self._set_page_feedback("error", f"{item.get('title')} 订阅失败：{message or '未知原因'}")
         return {"success": False, "message": message or "failed"}
 
-    def _make_subscribe_mediaid(self, item: Dict[str, Any]) -> str:
-        return f"upcomingreleases:{item.get('media_id')}"
+    def _make_subscribe_mediaid(self, item: Dict[str, Any]) -> str:
+        return f"upcomingreleases:{item.get('media_id')}"
+
+    def _resolve_subscribe_identity(
+        self,
+        recognition: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        recognition = recognition or {}
+        tmdb_id = safe_int(recognition.get("tmdb_id"), 0)
+        if tmdb_id:
+            return "themoviedb", str(tmdb_id)
+
+        douban_id = self._clean_text(recognition.get("douban_id"))
+        if douban_id:
+            return "douban", douban_id
+
+        bangumi_id = safe_int(recognition.get("bangumi_id"), 0)
+        if bangumi_id:
+            return "bangumi", str(bangumi_id)
+
+        return None, None
 
     def _resolve_subscribe_username(self, username: Optional[str] = None) -> Optional[str]:
         normalized = self._clean_text(username)
@@ -1110,6 +1134,7 @@ class UpcomingReleases(_PluginBase):
         item: Dict[str, Any],
         sid: Any,
         target_season: Optional[int],
+        recognition: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Optional[int], str]:
         record = self._get_subscribe_by_sid(sid)
         if not record:
@@ -1117,6 +1142,14 @@ class UpcomingReleases(_PluginBase):
         actual_season = safe_int(getattr(record, "season", None), 0) or None
         if not self._subscribe_season_matches(target_season, actual_season):
             return False, actual_season, "季号不一致"
+
+        expected_source, expected_id = self._resolve_subscribe_identity(recognition)
+        if expected_source and expected_id:
+            actual_source = self._clean_text(getattr(record, "media_source", None))
+            actual_id = self._clean_text(getattr(record, "media_id", None))
+            if actual_source != expected_source or actual_id != expected_id:
+                return False, actual_season, "主订阅媒体身份不一致"
+
         expected_mediaid = self._make_subscribe_mediaid(item)
         actual_mediaid = self._clean_text(getattr(record, "mediaid", None))
         if expected_mediaid and actual_mediaid != expected_mediaid:
@@ -1124,11 +1157,13 @@ class UpcomingReleases(_PluginBase):
                 SubscribeOper().update(getattr(record, "id", sid), {"mediaid": expected_mediaid})
             except Exception as err:
                 logger.warning(f"[UpcomingReleases] subscribe mediaid backfill failed: sid={sid} - {err}")
-                return False, actual_season, "mediaid 未写入订阅表"
-            record = self._get_subscribe_by_sid(sid)
-            actual_mediaid = self._clean_text(getattr(record, "mediaid", None))
-            if actual_mediaid != expected_mediaid:
-                return False, actual_season, "mediaid 未写入订阅表"
+            else:
+                record = self._get_subscribe_by_sid(sid)
+                actual_mediaid = self._clean_text(getattr(record, "mediaid", None)) if record else ""
+                if actual_mediaid != expected_mediaid:
+                    logger.warning(
+                        f"[UpcomingReleases] subscribe mediaid backfill not confirmed: sid={sid}"
+                    )
         return True, actual_season, ""
 
     def _format_subscribe_result_detail(
@@ -2913,6 +2948,7 @@ class UpcomingReleases(_PluginBase):
                     resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
                     resolved_season = self._resolve_item_subscribe_season(item, recognition)
                     detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, target_season=resolved_season)}"
+                    media_source, media_id = self._resolve_subscribe_identity(recognition)
                     sid, message = subscribe_chain.add(
                         title=item.get("title"),
                         year=item.get("year") or "",
@@ -2921,13 +2957,17 @@ class UpcomingReleases(_PluginBase):
                         doubanid=self._clean_text(recognition.get("douban_id")) or None,
                         bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
                         mediaid=self._make_subscribe_mediaid(item),
+                        media_source=media_source,
+                        media_id=media_id,
                         season=resolved_season,
                         exist_ok=True,
                         username=default_username,
                     )
                     logger.info(f"[UpcomingReleases] auto subscribe result: rule={rule.get('name')} title={item.get('title')} sid={sid} message={message or ''}")
                     if sid and not self._is_exists_message(message):
-                        verified, actual_season, verify_message = self._verify_added_subscribe(item, sid, resolved_season)
+                        verified, actual_season, verify_message = self._verify_added_subscribe(
+                            item, sid, resolved_season, recognition=recognition
+                        )
                         result_detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, sid=sid, target_season=resolved_season, actual_season=actual_season)}"
                         if verified:
                             summary["added"].append(result_detail)
