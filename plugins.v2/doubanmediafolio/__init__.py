@@ -14,17 +14,24 @@ from app.log import logger
 from app.schemas import Notification, NotificationType, MessageChannel
 from .sync_models import (
     DATETIME_FORMAT,
+    MATCHER_VERSION,
+    EpisodeMetadata,
     FailureKind,
     RETRY_REOPEN_DELAY,
     SubjectCandidate,
     SubjectResolveResult,
     TERMINAL_FAILURES,
+    build_segmented_subject_mapping,
     failure_is_suppressed,
+    find_processed_record_key,
     normalize_wait_entry,
     record_retry_failure,
     resolve_subject_target,
     retry_is_due,
     schedule_initial_retry,
+    segment_from_mapping_cache,
+    should_use_segmented_fallback,
+    status_for_segment,
 )
 
 lock = threading.Lock()
@@ -38,7 +45,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -67,6 +74,7 @@ class DoubanMediaFolio(_PluginBase):
 
     _wait_process: Dict = None
     _failed_process: Dict = None
+    _tv_mappings: Dict = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -149,6 +157,7 @@ class DoubanMediaFolio(_PluginBase):
             processed_items: Dict = self.get_data('data') or {}
             self._wait_process: Dict = self.get_data('wait') or {}
             self._failed_process: Dict = self.get_data('failed') or {}
+            self._tv_mappings: Dict = self.get_data('tv_mappings') or {}
 
             if (event_info.event in play_start and event_info.user_name in self._user.split(',')) or played:
                 if played:
@@ -227,6 +236,10 @@ class DoubanMediaFolio(_PluginBase):
             direct_douban_id=getattr(mediainfo, "douban_id", None),
             year=getattr(mediainfo, "year", None),
             season_id=season_id,
+            episode_id=episode_id,
+            episode_count=len(episodes),
+            tmdb_id=getattr(mediainfo, "tmdb_id", None) or tmdb_id,
+            season_name=self._get_season_name(mediainfo, season_id),
         )
         # 尝试同步之前同步失败的
         if sync_ret:
@@ -281,6 +294,150 @@ class DoubanMediaFolio(_PluginBase):
             auto_login=self._auto_login
         )
 
+    @staticmethod
+    def _item_value(item, key: str, default=None):
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    def _get_season_name(self, mediainfo: Optional[MediaInfo], season_id: Optional[int]) -> str:
+        for season in getattr(mediainfo, "season_info", None) or []:
+            if self._item_value(season, "season_number") == season_id:
+                return str(self._item_value(season, "name", "") or "").strip()
+        return ""
+
+    @staticmethod
+    def _mapping_key(tmdb_id: Optional[int], season_id: Optional[int]) -> str:
+        return f"tmdb:{tmdb_id}:s{season_id}"
+
+    def _cached_tv_segment(
+            self,
+            tmdb_id: Optional[int],
+            season_id: Optional[int],
+            episode_id: Optional[int],
+            season_name: str,
+            episode_count: int,
+    ):
+        if not tmdb_id or season_id is None or episode_id is None:
+            return None
+        self._tv_mappings = self._tv_mappings or self.get_data('tv_mappings') or {}
+        entry = self._tv_mappings.get(self._mapping_key(tmdb_id, season_id))
+        expected_name = season_name or str((entry or {}).get("season_name") or "")
+        expected_count = episode_count or int((entry or {}).get("episode_count") or 0)
+        segment = segment_from_mapping_cache(entry, expected_name, expected_count, episode_id)
+        return (segment.candidate, segment.end_episode) if segment else None
+
+    def _resolve_segmented_tv(
+            self,
+            douban_helper: DoubanApi,
+            title: str,
+            tmdb_id: Optional[int],
+            season_id: Optional[int],
+            episode_id: Optional[int],
+            episode_count: int,
+            season_name: str,
+    ):
+        if not tmdb_id or season_id is None or episode_id is None:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.NO_MATCH,
+                message="缺少 TMDB 季集信息，无法执行兼容匹配",
+            ), None
+        try:
+            from app.chain.tmdb import TmdbChain
+
+            tmdb_chain = TmdbChain()
+            if not season_name:
+                for season in tmdb_chain.tmdb_seasons(tmdbid=int(tmdb_id)) or []:
+                    if self._item_value(season, "season_number") == season_id:
+                        season_name = str(self._item_value(season, "name", "") or "").strip()
+                        break
+            tmdb_episodes = tmdb_chain.tmdb_episodes(tmdbid=int(tmdb_id), season=int(season_id)) or []
+        except Exception as err:
+            logger.error(f"获取 TMDB 季集元数据失败: {err}")
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.TRANSIENT,
+                message="获取 TMDB 季集元数据失败",
+                retryable=True,
+            ), None
+
+        episodes = [
+            EpisodeMetadata(
+                episode_number=int(self._item_value(item, "episode_number", 0) or 0),
+                air_date=self._item_value(item, "air_date"),
+            )
+            for item in tmdb_episodes
+            if self._item_value(item, "episode_number")
+        ]
+        if not season_name or not episodes:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.NO_MATCH,
+                message="TMDB 未提供可用于兼容匹配的季名或单集日期",
+            ), None
+        if episode_count and len(episodes) != episode_count:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.NO_MATCH,
+                message="TMDB 单集元数据尚未完整，暂不执行分段匹配",
+            ), None
+
+        base_title = re.sub(r"\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$", "", title).strip()
+        search_result = douban_helper.search_subject_candidates(f"{base_title} {season_name}".strip())
+        if not search_result.success and search_result.kind != FailureKind.NONE:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=search_result.kind,
+                message=search_result.message,
+                retryable=search_result.retryable,
+            ), None
+        mapping = build_segmented_subject_mapping(
+            base_title=base_title,
+            season_name=season_name,
+            episodes=episodes,
+            candidates=search_result.candidates,
+        )
+        if not mapping.success:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=mapping.kind,
+                message=mapping.message,
+            ), None
+        segment = mapping.segment_for(episode_id)
+        if not segment:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.NO_MATCH,
+                message=f"当前第 {episode_id} 集不在已确认的豆瓣分段范围内",
+            ), None
+
+        self._tv_mappings = self._tv_mappings or self.get_data('tv_mappings') or {}
+        self._tv_mappings[self._mapping_key(tmdb_id, season_id)] = {
+            "matcher_version": MATCHER_VERSION,
+            "season_name": season_name,
+            "episode_count": episode_count or len(episodes),
+            "segments": [
+                {
+                    "start_episode": item.start_episode,
+                    "end_episode": item.end_episode,
+                    "subject_id": item.candidate.subject_id,
+                    "subject_name": item.candidate.title,
+                    "year": item.candidate.year,
+                }
+                for item in mapping.segments
+            ],
+        }
+        self.save_data('tv_mappings', self._tv_mappings)
+        candidate = SubjectCandidate(
+            subject_id=segment.candidate.subject_id,
+            title=segment.candidate.title,
+            year=segment.candidate.year,
+            media_type=segment.candidate.media_type,
+            source="tmdb_segment",
+        )
+        return SubjectResolveResult(candidate=candidate), segment.end_episode
+
     def _send_notification(self, success: bool, message: str):
         if not self._notify:
             return
@@ -306,6 +463,7 @@ class DoubanMediaFolio(_PluginBase):
         if media_type == "TV" and season_id:
             meta.begin_season = season_id
         mediainfo = self._recognize_media(meta, None)
+        season_name = self._get_season_name(mediainfo, season_id) if mediainfo else value.get("season_name", "")
         return self._sync_to_douban(
             title=title,
             status=value.get("status", "do"),
@@ -315,6 +473,10 @@ class DoubanMediaFolio(_PluginBase):
             direct_douban_id=getattr(mediainfo, "douban_id", None) if mediainfo else None,
             year=getattr(mediainfo, "year", None) if mediainfo else value.get("year"),
             season_id=season_id,
+            episode_id=value.get("episode_id"),
+            episode_count=value.get("episode_count", 0),
+            tmdb_id=getattr(mediainfo, "tmdb_id", None) if mediainfo else value.get("tmdb_id"),
+            season_name=season_name,
             is_retry=True,
         )
 
@@ -328,10 +490,15 @@ class DoubanMediaFolio(_PluginBase):
             direct_douban_id: Optional[str] = None,
             year: Optional[int] = None,
             season_id: Optional[int] = None,
+            episode_id: Optional[int] = None,
+            episode_count: int = 0,
+            tmdb_id: Optional[int] = None,
+            season_name: str = "",
             is_retry: bool = False,
     ) -> bool:
         self._wait_process = self._wait_process or self.get_data('wait') or {}
         self._failed_process = self._failed_process or self.get_data('failed') or {}
+        self._tv_mappings = self._tv_mappings or self.get_data('tv_mappings') or {}
         direct_id = str(direct_douban_id or "").strip()
         waiting = normalize_wait_entry(self._wait_process.get(title)) if title in self._wait_process else None
         if waiting:
@@ -351,6 +518,8 @@ class DoubanMediaFolio(_PluginBase):
 
         logger.info(f"开始尝试解析 {title} 豆瓣条目")
         douban_helper = self._get_douban_helper()
+        segment_end = None
+        segmented = False
         if direct_id:
             resolve_result = resolve_subject_target(
                 direct_douban_id=direct_id,
@@ -361,12 +530,37 @@ class DoubanMediaFolio(_PluginBase):
                 season=season_id,
             )
         else:
-            resolve_result = douban_helper.resolve_subject(
-                title=title,
-                year=year,
-                media_type=mediaType,
-                season=season_id,
-            )
+            cached = None
+            if mediaType == "TV":
+                cached = self._cached_tv_segment(
+                    tmdb_id=tmdb_id,
+                    season_id=season_id,
+                    episode_id=episode_id,
+                    season_name=season_name,
+                    episode_count=episode_count,
+                )
+            if cached:
+                resolve_result = SubjectResolveResult(candidate=cached[0])
+                segment_end = cached[1]
+                segmented = True
+            else:
+                resolve_result = douban_helper.resolve_subject(
+                    title=title,
+                    year=year,
+                    media_type=mediaType,
+                    season=season_id,
+                )
+                if should_use_segmented_fallback(mediaType, direct_id, resolve_result.kind):
+                    resolve_result, segment_end = self._resolve_segmented_tv(
+                        douban_helper=douban_helper,
+                        title=title,
+                        tmdb_id=tmdb_id,
+                        season_id=season_id,
+                        episode_id=episode_id,
+                        episode_count=episode_count,
+                        season_name=season_name,
+                    )
+                    segmented = resolve_result.candidate is not None
 
         if not resolve_result.candidate:
             self._handle_sync_failure(
@@ -376,6 +570,10 @@ class DoubanMediaFolio(_PluginBase):
                 poster_path=poster_path,
                 year=year,
                 season_id=season_id,
+                episode_id=episode_id,
+                episode_count=episode_count,
+                tmdb_id=tmdb_id,
+                season_name=season_name,
                 resolve_result=resolve_result,
                 is_retry=is_retry,
             )
@@ -384,23 +582,39 @@ class DoubanMediaFolio(_PluginBase):
         candidate = resolve_result.candidate
         if self._is_failure_suppressed(title, candidate.subject_id):
             return False
+        effective_status = status_for_segment(status, episode_id, segment_end) if segmented else status
+        processed_key = title
+        if segmented:
+            existing_key = find_processed_record_key(processed_items, title, candidate.subject_id)
+            if existing_key:
+                existing_status = str(processed_items[existing_key].get("status") or "")
+                if effective_status == "do" or existing_status == "collect":
+                    logger.info(f"{candidate.title} 已同步到豆瓣，不重复处理")
+                    return False
+                processed_key = existing_key
+            else:
+                processed_key = f"{title}::{candidate.subject_id}"
         logger.info(
             f"查询：{title} => 匹配豆瓣：{candidate.title} "
             f"https://movie.douban.com/subject/{candidate.subject_id}/ 来源：{candidate.source}"
         )
         action_result = douban_helper.set_watching_status_result(
             subject_id=candidate.subject_id,
-            status=status,
+            status=effective_status,
             private=self._private,
         )
         if not action_result.success:
             self._handle_sync_failure(
                 title=title,
-                status=status,
+                status=effective_status,
                 media_type=mediaType,
                 poster_path=poster_path,
                 year=year,
                 season_id=season_id,
+                episode_id=episode_id,
+                episode_count=episode_count,
+                tmdb_id=tmdb_id,
+                season_name=season_name,
                 candidate=candidate,
                 action_result=action_result,
                 is_retry=is_retry,
@@ -409,12 +623,13 @@ class DoubanMediaFolio(_PluginBase):
             return False
 
         self._cookie = douban_helper.get_cookie_string()
-        processed_items[title] = {
+        processed_items[processed_key] = {
             "subject_id": candidate.subject_id,
             "subject_name": candidate.title,
             "timestamp": datetime.now().strftime(DATETIME_FORMAT),
             "poster_path": poster_path,
-            "type": "电视剧" if mediaType == "TV" else "电影"
+            "type": "电视剧" if mediaType == "TV" else "电影",
+            "status": effective_status,
         }
         self._wait_process.pop(title, None)
         self._failed_process.pop(title, None)
@@ -422,7 +637,7 @@ class DoubanMediaFolio(_PluginBase):
         self.save_data('wait', self._wait_process)
         self.save_data('failed', self._failed_process)
         logger.info(f"{title} 同步到档案成功")
-        self._send_notification(True, f"《{title}》已成功同步到豆瓣档案。")
+        self._send_notification(True, f"《{candidate.title}》已成功同步到豆瓣档案。")
         return True
 
     def _is_failure_suppressed(self, title: str, current_subject_id: str = "") -> bool:
@@ -441,6 +656,10 @@ class DoubanMediaFolio(_PluginBase):
             poster_path: str,
             year: Optional[int],
             season_id: Optional[int],
+            episode_id: Optional[int] = None,
+            episode_count: int = 0,
+            tmdb_id: Optional[int] = None,
+            season_name: str = "",
             resolve_result: Optional[SubjectResolveResult] = None,
             candidate: Optional[SubjectCandidate] = None,
             action_result=None,
@@ -462,6 +681,7 @@ class DoubanMediaFolio(_PluginBase):
                 "reason": message,
                 "timestamp": datetime.now().strftime(DATETIME_FORMAT),
                 "blocked_until": "",
+                "matcher_version": MATCHER_VERSION,
             }
             self.save_data('wait', self._wait_process)
             self.save_data('failed', self._failed_process)
@@ -485,6 +705,10 @@ class DoubanMediaFolio(_PluginBase):
             "type": media_type,
             "year": year,
             "season_id": season_id,
+            "episode_id": episode_id,
+            "episode_count": episode_count,
+            "tmdb_id": tmdb_id,
+            "season_name": season_name,
             "last_error": message,
         }
         existing = normalize_wait_entry(self._wait_process.get(title)) if title in self._wait_process else None
@@ -499,6 +723,7 @@ class DoubanMediaFolio(_PluginBase):
                     "reason": message,
                     "timestamp": datetime.now().strftime(DATETIME_FORMAT),
                     "blocked_until": (datetime.now() + RETRY_REOPEN_DELAY).strftime(DATETIME_FORMAT),
+                    "matcher_version": MATCHER_VERSION,
                 }
                 self.save_data('wait', self._wait_process)
                 self.save_data('failed', self._failed_process)

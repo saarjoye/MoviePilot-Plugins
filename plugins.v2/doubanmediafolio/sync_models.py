@@ -2,13 +2,15 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 RETRY_COOLDOWN = timedelta(hours=6)
 MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
+MATCHER_VERSION = 2
+SEGMENT_GAP_DAYS = 60
 
 
 class FailureKind(str, Enum):
@@ -50,11 +52,53 @@ class SubjectResolveResult:
 
 
 @dataclass(frozen=True)
+class SubjectSearchResult:
+    candidates: Tuple[SubjectCandidate, ...] = ()
+    kind: FailureKind = FailureKind.NONE
+    message: str = ""
+    retryable: bool = False
+
+    @property
+    def success(self) -> bool:
+        return bool(self.candidates)
+
+
+@dataclass(frozen=True)
 class DoubanActionResult:
     success: bool
     kind: FailureKind = FailureKind.NONE
     message: str = ""
     retryable: bool = False
+
+
+@dataclass(frozen=True)
+class EpisodeMetadata:
+    episode_number: int
+    air_date: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SubjectSegment:
+    start_episode: int
+    end_episode: int
+    candidate: SubjectCandidate
+
+
+@dataclass(frozen=True)
+class SegmentedResolveResult:
+    segments: Tuple[SubjectSegment, ...] = ()
+    kind: FailureKind = FailureKind.NONE
+    message: str = ""
+
+    @property
+    def success(self) -> bool:
+        return bool(self.segments)
+
+    def segment_for(self, episode_number: int) -> Optional[SubjectSegment]:
+        for segment in self.segments:
+            if segment.start_episode <= episode_number <= segment.end_episode:
+                return segment
+        return None
 
 
 _CHINESE_NUMBERS = {
@@ -105,6 +149,224 @@ def normalize_media_type(value: Optional[str]) -> Optional[str]:
         return "movie"
     if value in {"tv", "电视剧", "电视", "剧集", "动画", "动漫", "综艺", "纪录片"}:
         return "tv"
+    return None
+
+
+def _season_label_key(season_name: Optional[str], base_title: str) -> str:
+    label = normalize_title(season_name)
+    base = normalize_title(base_title)
+    if base and label.startswith(base):
+        label = label[len(base):]
+    label = re.sub(r"(?:season|part)\d+$", "", label, flags=re.IGNORECASE)
+    return label[:-1] if label.endswith("篇") else label
+
+
+def _candidate_part_number(title: str) -> Optional[int]:
+    match = re.search(r"\bpart[.\s_-]*(\d+)\b", title, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _parse_air_date(value: Optional[str]):
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_episode_groups(episodes: Sequence[EpisodeMetadata]) -> List[List[EpisodeMetadata]]:
+    dated = []
+    for episode in episodes:
+        air_date = _parse_air_date(episode.air_date)
+        if episode.episode_number and air_date:
+            dated.append((episode, air_date))
+    dated.sort(key=lambda item: item[0].episode_number)
+    if not dated or len(dated) != len(episodes):
+        return []
+    episode_numbers = [item[0].episode_number for item in dated]
+    if episode_numbers != list(range(episode_numbers[0], episode_numbers[-1] + 1)):
+        return []
+
+    groups: List[List[EpisodeMetadata]] = [[dated[0][0]]]
+    previous_date = dated[0][1]
+    for episode, air_date in dated[1:]:
+        if (air_date - previous_date).days >= SEGMENT_GAP_DAYS:
+            groups.append([])
+        groups[-1].append(episode)
+        previous_date = air_date
+    return groups
+
+
+def _filter_segment_candidates(
+        base_title: str,
+        season_name: str,
+        candidates: Iterable[SubjectCandidate],
+) -> List[SubjectCandidate]:
+    base = normalize_title(base_title)
+    season_label = _season_label_key(season_name, base_title)
+    if not base or not season_label:
+        return []
+
+    matched = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate.subject_id or candidate.subject_id in seen:
+            continue
+        candidate_title = normalize_title(candidate.title)
+        candidate_type = normalize_media_type(candidate.media_type)
+        if candidate_type not in {None, "tv"}:
+            continue
+        if not candidate_title.startswith(base):
+            continue
+        if season_label not in candidate_title[len(base):]:
+            continue
+        seen.add(candidate.subject_id)
+        matched.append(candidate)
+    return matched
+
+
+def build_segmented_subject_mapping(
+        base_title: str,
+        season_name: str,
+        episodes: Sequence[EpisodeMetadata],
+        candidates: Iterable[SubjectCandidate],
+) -> SegmentedResolveResult:
+    groups = _split_episode_groups(episodes)
+    matched = _filter_segment_candidates(base_title, season_name, candidates)
+    if not groups or not matched:
+        return SegmentedResolveResult(
+            kind=FailureKind.NO_MATCH,
+            message="未找到可由 TMDB 季名确认的豆瓣条目",
+        )
+
+    if len(matched) == 1:
+        first_episode = min(ep.episode_number for group in groups for ep in group)
+        last_episode = max(ep.episode_number for group in groups for ep in group)
+        first_year = _parse_air_date(groups[0][0].air_date).year
+        candidate = matched[0]
+        if candidate.year and int(candidate.year) != first_year:
+            return SegmentedResolveResult(
+                kind=FailureKind.NO_MATCH,
+                message="豆瓣候选年份与 TMDB 季首播年份不一致",
+            )
+        return SegmentedResolveResult(segments=(SubjectSegment(first_episode, last_episode, candidate),))
+
+    if len(matched) != len(groups):
+        return SegmentedResolveResult(
+            kind=FailureKind.AMBIGUOUS,
+            message="豆瓣候选数与 TMDB 播出批次数不一致",
+        )
+
+    groups_by_year: Dict[int, List[List[EpisodeMetadata]]] = {}
+    candidates_by_year: Dict[int, List[SubjectCandidate]] = {}
+    for group in groups:
+        year = _parse_air_date(group[0].air_date).year
+        groups_by_year.setdefault(year, []).append(group)
+    for candidate in matched:
+        if not candidate.year:
+            return SegmentedResolveResult(
+                kind=FailureKind.AMBIGUOUS,
+                message="分段豆瓣候选缺少年份，无法安全排序",
+            )
+        candidates_by_year.setdefault(int(candidate.year), []).append(candidate)
+    if {year: len(items) for year, items in groups_by_year.items()} != {
+        year: len(items) for year, items in candidates_by_year.items()
+    }:
+        return SegmentedResolveResult(
+            kind=FailureKind.AMBIGUOUS,
+            message="豆瓣候选年份与 TMDB 播出批次无法一一对应",
+        )
+
+    segments = []
+    for year in sorted(groups_by_year):
+        year_groups = groups_by_year[year]
+        year_candidates = candidates_by_year[year]
+        if len(year_candidates) > 1:
+            numbered = [(_candidate_part_number(item.title), item) for item in year_candidates]
+            if any(number is None for number, _ in numbered) or len({number for number, _ in numbered}) != len(numbered):
+                return SegmentedResolveResult(
+                    kind=FailureKind.AMBIGUOUS,
+                    message="同年豆瓣候选缺少唯一 Part 顺序",
+                )
+            year_candidates = [item for _, item in sorted(numbered, key=lambda pair: pair[0])]
+        for group, candidate in zip(year_groups, year_candidates):
+            segments.append(SubjectSegment(
+                start_episode=group[0].episode_number,
+                end_episode=group[-1].episode_number,
+                candidate=candidate,
+            ))
+    segments.sort(key=lambda item: item.start_episode)
+    return SegmentedResolveResult(segments=tuple(segments))
+
+
+def mapping_cache_is_valid(
+        entry: Optional[Dict[str, Any]],
+        season_name: str,
+        episode_count: int,
+) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return (
+        entry.get("matcher_version") == MATCHER_VERSION
+        and str(entry.get("season_name") or "") == str(season_name or "")
+        and int(entry.get("episode_count") or 0) == int(episode_count or 0)
+        and bool(entry.get("segments"))
+    )
+
+
+def segment_from_mapping_cache(
+        entry: Optional[Dict[str, Any]],
+        season_name: str,
+        episode_count: int,
+        episode_number: int,
+) -> Optional[SubjectSegment]:
+    if not mapping_cache_is_valid(entry, season_name, episode_count):
+        return None
+    for segment in entry.get("segments", []):
+        start_episode = int(segment.get("start_episode", 0))
+        end_episode = int(segment.get("end_episode", 0))
+        if start_episode <= episode_number <= end_episode:
+            return SubjectSegment(
+                start_episode=start_episode,
+                end_episode=end_episode,
+                candidate=SubjectCandidate(
+                    subject_id=str(segment.get("subject_id") or ""),
+                    title=str(segment.get("subject_name") or ""),
+                    year=segment.get("year"),
+                    media_type="电视剧",
+                    source="tmdb_segment_cache",
+                ),
+            )
+    return None
+
+
+def should_use_segmented_fallback(
+        media_type: str,
+        direct_douban_id: Optional[str],
+        failure_kind: FailureKind,
+) -> bool:
+    return (
+        normalize_media_type(media_type) == "tv"
+        and not str(direct_douban_id or "").strip()
+        and failure_kind in {FailureKind.NO_MATCH, FailureKind.AMBIGUOUS}
+    )
+
+
+def status_for_segment(default_status: str, episode_number: Optional[int], segment_end: Optional[int]) -> str:
+    if episode_number is None or segment_end is None:
+        return default_status
+    return "collect" if int(episode_number) >= int(segment_end) else "do"
+
+
+def find_processed_record_key(
+        processed_items: Dict[str, Any],
+        title: str,
+        subject_id: str,
+) -> Optional[str]:
+    for key, value in processed_items.items():
+        if key != title and not key.startswith(f"{title}::"):
+            continue
+        if isinstance(value, dict) and str(value.get("subject_id") or "") == str(subject_id or ""):
+            return key
     return None
 
 
@@ -272,6 +534,11 @@ def failure_is_suppressed(
     """返回是否抑制，以及调用方是否应删除已失效的抑制记录。"""
     if not isinstance(entry, dict):
         return False, False
+    if (
+            entry.get("kind") in {FailureKind.NO_MATCH.value, FailureKind.AMBIGUOUS.value}
+            and int(entry.get("matcher_version") or 0) < MATCHER_VERSION
+    ):
+        return False, True
     stored_id = str(entry.get("subject_id") or "").strip()
     current_id = str(current_subject_id or "").strip()
     if stored_id and not current_id:

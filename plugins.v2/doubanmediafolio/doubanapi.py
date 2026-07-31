@@ -15,6 +15,7 @@ from .sync_models import (
     FailureKind,
     SubjectCandidate,
     SubjectResolveResult,
+    SubjectSearchResult,
     classify_action_response,
     extract_season,
     select_subject_candidate,
@@ -239,14 +240,8 @@ class DoubanApi:
             return True
         return self.auto_login and self.login()
 
-    def resolve_subject(
-            self,
-            title: str,
-            year: Optional[int] = None,
-            media_type: Optional[str] = None,
-            season: Optional[int] = None,
-    ) -> SubjectResolveResult:
-        """搜索并选择唯一高置信豆瓣条目。"""
+    def search_subject_candidates(self, title: str) -> SubjectSearchResult:
+        """搜索豆瓣条目并返回候选列表，不执行目标选择。"""
         silent = title == "肖申克的救赎"
         response = None
         for retry in range(2):
@@ -260,8 +255,7 @@ class DoubanApi:
             except Exception as err:
                 if not silent:
                     logger.error(f"搜索 {title} 失败: {self._safe_message(err)}")
-                return SubjectResolveResult(
-                    candidate=None,
+                return SubjectSearchResult(
                     kind=FailureKind.TRANSIENT,
                     message="连接豆瓣搜索服务失败",
                     retryable=True,
@@ -273,8 +267,7 @@ class DoubanApi:
             if retry == 0 and auth_failed and self.auto_login and self.login():
                 continue
             if auth_failed:
-                return SubjectResolveResult(
-                    candidate=None,
+                return SubjectSearchResult(
                     kind=FailureKind.AUTH,
                     message="豆瓣登录状态无效，搜索条目失败",
                     retryable=True,
@@ -285,8 +278,7 @@ class DoubanApi:
             status_code = response.status_code if response is not None else "无响应"
             if not silent:
                 logger.error(f"搜索 {title} 失败 状态码：{status_code}")
-            return SubjectResolveResult(
-                candidate=None,
+            return SubjectSearchResult(
                 kind=FailureKind.TRANSIENT,
                 message=f"豆瓣搜索服务返回 HTTP {status_code}",
                 retryable=True,
@@ -318,7 +310,25 @@ class DoubanApi:
 
         if not candidates and not silent:
             logger.warning(f"找不到 {title} 相关条目，本条目不存在于豆瓣")
-        return select_subject_candidate(title, candidates, year, media_type, season)
+        return SubjectSearchResult(candidates=tuple(candidates))
+
+    def resolve_subject(
+            self,
+            title: str,
+            year: Optional[int] = None,
+            media_type: Optional[str] = None,
+            season: Optional[int] = None,
+    ) -> SubjectResolveResult:
+        """搜索并选择唯一高置信豆瓣条目。"""
+        search_result = self.search_subject_candidates(title)
+        if not search_result.success and search_result.kind != FailureKind.NONE:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=search_result.kind,
+                message=search_result.message,
+                retryable=search_result.retryable,
+            )
+        return select_subject_candidate(title, search_result.candidates, year, media_type, season)
 
     def get_subject_id(self, title: str = None, meta: MetaBase = None) -> Tuple | None:
         if not title:
