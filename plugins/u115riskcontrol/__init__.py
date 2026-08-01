@@ -56,7 +56,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.16"
+    plugin_version = "0.1.17"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -2516,13 +2516,17 @@ class U115RiskControl(_PluginBase):
             "size": "small",
             "variant": "text",
             "color": "primary",
-            "text": "立即重试",
             "disabled": not task["can_retry"],
             "title": "立即重试",
         }
         return {
             "component": "VListItem",
-            "props": {"class": "py-2", "lines": "three"},
+            "props": {
+                "class": "py-2",
+                "lines": "three",
+                "title": task["title"],
+                "subtitle": f"{path_text}\n{metadata}\n{task['failure_reason']}",
+            },
             "content": [
                 {
                     "component": "VRow",
@@ -2530,42 +2534,24 @@ class U115RiskControl(_PluginBase):
                     "content": [
                         {
                             "component": "VCol",
-                            "props": {"cols": 12, "md": 6, "class": "text-wrap"},
-                            "content": [
-                                {"component": "VListItemTitle", "content": [task["title"]]},
-                                {"component": "VListItemSubtitle", "content": [path_text]},
-                            ],
-                        },
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 12, "sm": 7, "md": 4, "class": "text-medium-emphasis text-wrap"},
-                            "content": [{"component": "VListItemSubtitle", "content": [metadata]}],
-                        },
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 7, "sm": 3, "md": 1, "class": "d-flex align-center"},
+                            "props": {"cols": 7, "sm": 3, "md": 2, "class": "d-flex align-center"},
                             "content": [
                                 {
                                     "component": "VChip",
                                     "props": {
                                         "color": task["status_type"],
                                         "size": "small",
-                                        "text": task["status"],
                                     },
+                                    "content": [task["status"]],
                                 }
                             ],
                         },
                         {
                             "component": "VCol",
-                            "props": {"cols": 5, "sm": 2, "md": 1, "class": "d-flex justify-end"},
-                            "content": [{"component": "VBtn", "props": action_props}],
+                            "props": {"cols": 5, "sm": 2, "md": 2, "class": "d-flex justify-end"},
+                            "content": [{"component": "VBtn", "props": action_props, "content": ["立即重试"]}],
                         },
                     ],
-                },
-                {
-                    "component": "VListItemSubtitle",
-                    "props": {"class": "text-warning text-wrap mt-1"},
-                    "content": [task["failure_reason"]],
                 },
             ],
         }
