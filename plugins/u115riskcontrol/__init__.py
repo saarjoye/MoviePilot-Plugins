@@ -56,7 +56,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.17"
+    plugin_version = "0.1.18"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -2510,6 +2510,9 @@ class U115RiskControl(_PluginBase):
             f"已重试 {task['retry_count']} 次"
         )
         path_text = f"源：{task['source_path']}\n目标：{task['target_path']}"
+        status_text = f"状态：{task['status']}"
+        if task.get("next_retry_at"):
+            status_text = f"{status_text} · 下次重试：{task['next_retry_at']}"
         action_props = {
             "href": task["retry_url"],
             "target": "_self",
@@ -2525,7 +2528,7 @@ class U115RiskControl(_PluginBase):
                 "class": "py-2",
                 "lines": "three",
                 "title": task["title"],
-                "subtitle": f"{path_text}\n{metadata}\n{task['failure_reason']}",
+                "subtitle": f"{path_text}\n{metadata}\n{status_text} · {task['failure_reason']}",
             },
             "content": [
                 {
@@ -2534,21 +2537,7 @@ class U115RiskControl(_PluginBase):
                     "content": [
                         {
                             "component": "VCol",
-                            "props": {"cols": 7, "sm": 3, "md": 2, "class": "d-flex align-center"},
-                            "content": [
-                                {
-                                    "component": "VChip",
-                                    "props": {
-                                        "color": task["status_type"],
-                                        "size": "small",
-                                    },
-                                    "content": [task["status"]],
-                                }
-                            ],
-                        },
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 5, "sm": 2, "md": 2, "class": "d-flex justify-end"},
+                            "props": {"cols": 12, "class": "d-flex justify-end"},
                             "content": [{"component": "VBtn", "props": action_props, "content": ["立即重试"]}],
                         },
                     ],
