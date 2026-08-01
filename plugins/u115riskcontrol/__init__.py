@@ -7,6 +7,7 @@ import time
 from collections import deque
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from app.log import logger
 from app.plugins import _PluginBase
@@ -55,7 +56,7 @@ class U115RiskControl(_PluginBase):
     plugin_name = "u115风控参数"
     plugin_desc = "为 MoviePilot 的 u115 存储提供低风控参数、风控日志和失败整理冷却后重试。"
     plugin_icon = "U115RiskControl.jpg"
-    plugin_version = "0.1.15"
+    plugin_version = "0.1.16"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "u115riskcontrol_"
@@ -111,6 +112,7 @@ class U115RiskControl(_PluginBase):
         self._last_retry_progress = "未开始"
         self._last_retry_current_task = "无"
         self._last_retry_progress_detail = "无"
+        self._retry_current_history_id = ""
         self._retry_reschedule_reason = ""
         self._retry_reschedule_delay_seconds = 0
         self._last_native_limit_until = 0.0
@@ -158,7 +160,14 @@ class U115RiskControl(_PluginBase):
                 "methods": ["GET"],
                 "summary": "获取 U115RiskControl 实时状态",
                 "description": "返回当前冷却、失败整理重试和事件日志快照，供前端轮询刷新使用。",
-            }
+            },
+            {
+                "path": "/u115riskcontrol/retry",
+                "endpoint": self.retry_failed_task,
+                "methods": ["GET", "POST"],
+                "summary": "重试单条失败整理任务",
+                "description": "校验当前风控状态后，将指定失败整理历史加入单条后台重试。",
+            },
         ]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
@@ -331,6 +340,7 @@ class U115RiskControl(_PluginBase):
         snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logs = self._event_logs[-self._max_event_log_count :]
         event_text = self._format_event_preview(logs)
+        pending_tasks, pending_error = self._get_pending_retry_tasks()
         scheduled_text = "无"
         if self._retry_in_progress:
             scheduled_text = "正在执行"
@@ -436,6 +446,13 @@ class U115RiskControl(_PluginBase):
                 "component": "VRow",
                 "props": {"class": "mt-2"},
                 "content": [
+                    self._build_pending_retry_section(pending_tasks, pending_error),
+                ],
+            },
+            {
+                "component": "VRow",
+                "props": {"class": "mt-2"},
+                "content": [
                     {
                         "component": "VCol",
                         "props": {"cols": 12},
@@ -459,10 +476,203 @@ class U115RiskControl(_PluginBase):
     def get_live_status(self) -> Dict[str, Any]:
         return self._build_live_status()
 
+    def retry_failed_task(self, history_id: Any = None) -> Dict[str, Any]:
+        """Queue one failed transfer history after applying the normal retry guards."""
+        task_id = str(history_id or "").strip()
+        if not task_id:
+            return {"success": False, "status": "invalid", "message": "缺少 history_id"}
+        if not self._enabled:
+            return {"success": False, "status": "disabled", "message": "插件未启用"}
+
+        now = time.time()
+        with self._retry_lock:
+            if self._retry_in_progress:
+                return {"success": False, "status": "busy", "message": "已有重试任务正在执行"}
+            if self._retry_scheduled_until > now:
+                return {"success": False, "status": "scheduled", "message": "已有自动重试计划，请等待计划执行"}
+            if self._get_current_cooldown_remaining() > 0:
+                return {"success": False, "status": "cooldown", "message": "当前仍处于风控冷却中"}
+
+        try:
+            from app.chain.transfer import TransferChain
+            from app.db.transferhistory_oper import TransferHistoryOper
+            from app.db.models.transferhistory import TransferHistory
+            from app.schemas import FileItem, MediaType
+            from app.schemas.transfer import EpisodeFormat
+        except Exception as exc:
+            logger.warning(f"[U115RiskControl] manual retry import failed: {self._short_text(exc)}")
+            return {"success": False, "status": "unavailable", "message": "MoviePilot 整理接口不可用"}
+
+        try:
+            histories = self._list_failed_transfer_histories(TransferHistoryOper, TransferHistory)
+        except Exception as exc:
+            logger.warning(f"[U115RiskControl] manual retry history lookup failed: {self._short_text(exc)}")
+            return {"success": False, "status": "unavailable", "message": "无法读取失败整理历史"}
+
+        history = next((item for item in histories if str(getattr(item, "id", "")) == task_id), None)
+        if not history:
+            return {"success": False, "status": "not_found", "message": "未找到仍处于失败状态的整理任务"}
+        if bool(getattr(history, "status", False)):
+            return {"success": False, "status": "handled", "message": "该整理任务已不再是失败状态"}
+
+        retry_state = self._load_retry_state()
+        records = retry_state.setdefault("records", {})
+        previous = records.get(task_id) if isinstance(records, dict) else None
+        previous = self._normalize_retry_record(previous if isinstance(previous, dict) else {}, now)
+        existing_success, existing_message = self._verify_existing_success_history(
+            history=history,
+            TransferHistoryOper=TransferHistoryOper,
+        )
+        if existing_success or self._target_file_exists(history):
+            return {"success": False, "status": "handled", "message": existing_message or "目标文件已存在"}
+        if self._source_file_missing(history):
+            return {"success": False, "status": "manual_required", "message": "源文件不存在或历史记录缺少源文件项"}
+        if previous.get("manual_required") is True:
+            return {"success": False, "status": "manual_required", "message": "该任务已标记为需人工处理"}
+
+        attempt_timestamps = self._get_recent_attempt_timestamps(previous, now)
+        if len(attempt_timestamps) >= RETRY_HISTORY_MAX_ATTEMPTS_PER_WINDOW:
+            next_retry_after = min(attempt_timestamps) + RETRY_HISTORY_WINDOW_SECONDS
+            return {
+                "success": False,
+                "status": "cooldown",
+                "message": f"该任务仍在 24 小时重试冷却中，将于 {datetime.fromtimestamp(next_retry_after).strftime('%Y-%m-%d %H:%M:%S')} 后重试",
+            }
+
+        safety_state = self._get_retry_safety_state()
+        if not safety_state.get("allowed", True):
+            return {"success": False, "status": "safety", "message": "当前请求安全余量不足，暂不执行人工重试"}
+
+        with self._retry_lock:
+            if self._retry_in_progress:
+                return {"success": False, "status": "busy", "message": "已有重试任务正在执行"}
+            self._retry_in_progress = True
+            self._retry_current_history_id = task_id
+            self._last_retry_status = "人工重试已入队"
+            self._last_retry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            thread = threading.Thread(
+                target=self._run_manual_failed_transfer_retry,
+                kwargs={
+                    "history": history,
+                    "previous": previous,
+                    "TransferChain": TransferChain,
+                    "TransferHistoryOper": TransferHistoryOper,
+                    "FileItem": FileItem,
+                    "MediaType": MediaType,
+                    "EpisodeFormat": EpisodeFormat,
+                },
+                name="U115RiskControlManualRetry",
+                daemon=True,
+            )
+            self._retry_threads.append(thread)
+            thread.start()
+
+        return {"success": True, "status": "queued", "message": "单条失败整理任务已加入重试"}
+
+    def _run_manual_failed_transfer_retry(
+        self,
+        *,
+        history: Any,
+        previous: Dict[str, Any],
+        TransferChain: Any,
+        TransferHistoryOper: Any,
+        FileItem: Any,
+        MediaType: Any,
+        EpisodeFormat: Any,
+    ) -> None:
+        history_id = str(getattr(history, "id", ""))
+        summary = self._format_transfer_history_summary(history)
+        attempt_ts = time.time()
+        total_attempts = self._to_int(previous.get("total_attempts"), 0, minimum=0, maximum=100000) + 1
+        self._last_retry_status = "执行中"
+        self._last_retry_total = 1
+        self._last_retry_success = 0
+        self._last_retry_failed = 0
+        self._last_retry_skipped = 0
+        self._update_retry_progress("同步 MP 整理 1/1", summary, "人工触发单条重试")
+        self._record_event(
+            event_type=EVENT_TYPE_RETRY_STARTED,
+            source="U115RiskControl / manual retry",
+            endpoint="TransferHistory",
+            threshold=f"history_id={history_id}, attempt={total_attempts}",
+            detail="开始人工触发单条失败整理重试。",
+            suggestion="重试期间仍遵守 115 风控冷却和 24 小时滚动次数限制。",
+        )
+
+        state = False
+        message = ""
+        try:
+            state, message = self._retry_one_transfer_history(
+                history=history,
+                TransferChain=TransferChain,
+                FileItem=FileItem,
+                MediaType=MediaType,
+                EpisodeFormat=EpisodeFormat,
+            )
+            if state:
+                state, message = self._verify_transfer_history_result(
+                    history=history,
+                    history_id=history_id,
+                    TransferHistoryOper=TransferHistoryOper,
+                )
+            manual_required = self._should_mark_manual_required(
+                message=message,
+                previous_record=previous,
+                total_attempts=total_attempts,
+            )
+            retry_state = self._load_retry_state()
+            records = retry_state.setdefault("records", {})
+            records[history_id] = self._build_retry_record(
+                history=history,
+                previous=previous,
+                attempt_ts=attempt_ts,
+                state=bool(state),
+                message=message,
+                manual_required=manual_required,
+            )
+            retry_state["version"] = RETRY_DATA_VERSION
+            self._save_retry_state(retry_state)
+            self._last_retry_success = 1 if state else 0
+            self._last_retry_failed = 0 if state else 1
+            self._last_retry_manual_required_count = 1 if manual_required else 0
+            self._last_retry_status = "整理完成" if state else ("需人工处理" if manual_required else "部分整理失败")
+            self._update_retry_progress(
+                "整理成功" if state else "整理失败",
+                summary,
+                self._short_text(message) or "无返回消息",
+            )
+            self._record_event(
+                event_type=EVENT_TYPE_RETRY_FINISHED,
+                source="U115RiskControl / manual retry",
+                endpoint="TransferHistory",
+                threshold=f"history_id={history_id}, success={bool(state)}",
+                detail=f"单条人工重试{'成功' if state else '失败'}：{summary}。",
+                suggestion="如仍失败，请查看待重试列表中的失败原因和人工处理状态。",
+            )
+        except Exception as exc:
+            self._last_retry_failed = 1
+            self._last_retry_status = "执行异常"
+            self._update_retry_progress("整理异常", summary, self._short_text(exc))
+            logger.exception(f"[U115RiskControl] manual retry failed: id={history_id}")
+            self._record_event(
+                event_type=EVENT_TYPE_RETRY_FINISHED,
+                source="U115RiskControl / manual retry",
+                endpoint="TransferHistory",
+                threshold=f"history_id={history_id}, exception=True",
+                detail="单条人工重试发生异常。",
+                suggestion="请检查 MoviePilot 日志中的具体整理失败原因。",
+            )
+        finally:
+            with self._retry_lock:
+                self._retry_in_progress = False
+                self._retry_current_history_id = ""
+                self._retry_threads = [thread for thread in self._retry_threads if thread.is_alive()]
+
     def stop_service(self):
         self._restore_patch()
         self._retry_scheduled_until = 0.0
         self._retry_in_progress = False
+        self._retry_current_history_id = ""
 
     @staticmethod
     def get_render_mode() -> Tuple[str, Optional[str]]:
@@ -944,6 +1154,7 @@ class U115RiskControl(_PluginBase):
         finally:
             with self._retry_lock:
                 self._retry_in_progress = False
+                self._retry_current_history_id = ""
                 self._retry_threads = [thread for thread in self._retry_threads if thread.is_alive()]
 
         if self._retry_reschedule_reason:
@@ -1119,6 +1330,7 @@ class U115RiskControl(_PluginBase):
 
         for index, history in enumerate(candidates, 1):
             history_id = str(getattr(history, "id", ""))
+            self._retry_current_history_id = history_id
             history_summary = self._format_transfer_history_summary(history)
             retry_record = retry_records.get(history_id) if isinstance(retry_records, dict) else None
             if not isinstance(retry_record, dict):
@@ -2068,6 +2280,296 @@ class U115RiskControl(_PluginBase):
             )
         return "\n".join(rows)
 
+    def _get_pending_retry_tasks(self) -> Tuple[List[Dict[str, Any]], str]:
+        try:
+            from app.db.models.transferhistory import TransferHistory
+            from app.db.transferhistory_oper import TransferHistoryOper
+        except Exception:
+            return [], "MoviePilot 整理历史接口暂不可用"
+
+        try:
+            histories = self._list_failed_transfer_histories(TransferHistoryOper, TransferHistory)
+        except Exception:
+            return [], "无法读取失败整理历史"
+
+        retry_state = self._load_retry_state()
+        records = retry_state.get("records") if isinstance(retry_state, dict) else {}
+        records = records if isinstance(records, dict) else {}
+        now = time.time()
+        tasks: List[Dict[str, Any]] = []
+        for history in histories:
+            history_id = str(getattr(history, "id", "") or "").strip()
+            if not history_id:
+                continue
+            try:
+                existing_success, _ = self._verify_existing_success_history(
+                    history=history,
+                    TransferHistoryOper=TransferHistoryOper,
+                )
+                if existing_success or self._target_file_exists(history):
+                    continue
+            except Exception:
+                # A failed lookup must remain visible instead of silently hiding work.
+                pass
+
+            record = self._normalize_retry_record(records.get(history_id, {}), now)
+            attempt_timestamps = self._get_recent_attempt_timestamps(record, now)
+            next_retry_after = self._to_float(
+                record.get("next_retry_after"),
+                0.0,
+                minimum=0.0,
+                maximum=9999999999.0,
+            )
+            if len(attempt_timestamps) >= RETRY_HISTORY_MAX_ATTEMPTS_PER_WINDOW:
+                next_retry_after = min(attempt_timestamps) + RETRY_HISTORY_WINDOW_SECONDS
+
+            source_missing = self._source_file_missing(history)
+            if history_id == self._retry_current_history_id:
+                status = "正在重试"
+                status_type = "info"
+                can_retry = False
+            elif record.get("manual_required") is True or source_missing:
+                status = "需人工处理"
+                status_type = "warning"
+                can_retry = False
+            elif next_retry_after > now:
+                status = "冷却中"
+                status_type = "info"
+                can_retry = False
+            elif self._get_current_cooldown_remaining() > 0 or self._retry_scheduled_until > now:
+                status = "冷却中"
+                status_type = "warning"
+                can_retry = False
+            else:
+                status = "可重试"
+                status_type = "success"
+                can_retry = bool(self._enabled and not self._retry_in_progress)
+
+            source_payload = getattr(history, "src_fileitem", None)
+            source_path = self._history_value(history, ("src", "source", "source_path"))
+            if not source_path:
+                source_path = self._payload_value(source_payload, ("path", "file_path", "name"))
+            target_path = self._history_value(history, ("dest", "target", "target_path"))
+            title = self._history_value(history, ("title", "name", "media_name"))
+            if not title:
+                title = self._payload_value(source_payload, ("name", "file_name", "filename"))
+            if not title:
+                title = self._basename(source_path) or f"失败整理任务 #{history_id}"
+
+            size = self._history_value(history, ("size", "file_size", "total_size"))
+            if not size:
+                size = self._payload_value(source_payload, ("size", "file_size", "filesize"))
+            failed_at = self._history_value(
+                history,
+                ("time", "created_at", "updated_at", "date", "transfer_time"),
+            )
+            source_storage = self._history_value(history, ("src_storage", "source_storage", "storage"))
+            if not source_storage:
+                source_storage = self._payload_value(source_payload, ("storage", "storage_type"))
+            failure_reason = self._short_text(
+                record.get("message")
+                or ("源文件不存在或历史记录缺少源文件项" if source_missing else "MP 整理历史状态为失败"),
+                180,
+            )
+            tasks.append(
+                {
+                    "history_id": history_id,
+                    "title": self._short_text(title, 120),
+                    "source_storage": self._short_text(source_storage or "本地", 32),
+                    "source_path": self._short_text(source_path or "源路径未知", 240),
+                    "target_path": self._short_text(target_path or "目标路径未知", 240),
+                    "size": self._to_int(size, 0, minimum=0, maximum=999999999999999),
+                    "size_text": self._format_bytes(size),
+                    "failed_time": self._format_history_time(failed_at),
+                    "failure_reason": failure_reason,
+                    "retry_count": self._to_int(record.get("total_attempts"), 0, minimum=0, maximum=100000),
+                    "next_retry_at": self._format_history_time(next_retry_after) if next_retry_after > now else "",
+                    "status": status,
+                    "status_type": status_type,
+                    "can_retry": can_retry,
+                    "retry_url": f"/u115riskcontrol/retry?history_id={quote(history_id)}",
+                }
+            )
+
+        status_order = {"正在重试": 0, "可重试": 1, "冷却中": 2, "需人工处理": 3}
+        tasks.sort(key=lambda item: (status_order.get(item["status"], 9), item["failed_time"], item["history_id"]))
+        return tasks, ""
+
+    @staticmethod
+    def _history_value(history: Any, names: Tuple[str, ...]) -> Any:
+        for name in names:
+            value = getattr(history, name, None)
+            if value not in (None, ""):
+                return value
+        return ""
+
+    @staticmethod
+    def _payload_value(payload: Any, names: Tuple[str, ...]) -> Any:
+        if isinstance(payload, dict):
+            for name in names:
+                value = payload.get(name)
+                if value not in (None, ""):
+                    return value
+        else:
+            for name in names:
+                value = getattr(payload, name, None)
+                if value not in (None, ""):
+                    return value
+        return ""
+
+    @staticmethod
+    def _format_bytes(value: Any) -> str:
+        try:
+            size = max(float(value or 0), 0)
+        except (TypeError, ValueError):
+            size = 0
+        if not size:
+            return "大小未知"
+        units = ("B", "KB", "MB", "GB", "TB")
+        index = 0
+        while size >= 1024 and index < len(units) - 1:
+            size /= 1024
+            index += 1
+        return f"{size:.2f} {units[index]}" if index else f"{int(size)} {units[index]}"
+
+    @staticmethod
+    def _format_history_time(value: Any) -> str:
+        if value in (None, "", 0, "0"):
+            return "时间未知"
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M:%S")
+            except (OverflowError, OSError, ValueError):
+                return "时间未知"
+        return str(value)[:32]
+
+    def _build_pending_retry_section(
+        self,
+        tasks: List[Dict[str, Any]],
+        error: str,
+    ) -> Dict[str, Any]:
+        content: List[Dict[str, Any]] = [
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "density": "compact",
+                    "title": f"待重试任务（{len(tasks)}）",
+                    "text": "展示尚未完成的失败整理记录。已成功或目标文件已存在的历史不会出现在这里。",
+                },
+            }
+        ]
+        if error:
+            content.append(
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "warning",
+                        "variant": "tonal",
+                        "density": "compact",
+                        "text": error,
+                    },
+                }
+            )
+        elif not tasks:
+            content.append(
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "success",
+                        "variant": "tonal",
+                        "density": "compact",
+                        "text": "当前没有待重试的失败整理任务。",
+                    },
+                }
+            )
+        else:
+            content.append(
+                {
+                    "component": "VList",
+                    "props": {
+                        "density": "compact",
+                        "lines": "two",
+                        "class": "border rounded",
+                    },
+                    "content": [self._build_pending_retry_item(task) for task in tasks],
+                }
+            )
+        return {
+            "component": "VCol",
+            "props": {"cols": 12},
+            "content": content,
+        }
+
+    def _build_pending_retry_item(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = (
+            f"{task['source_storage']} · {task['size_text']} · 失败时间 {task['failed_time']} · "
+            f"已重试 {task['retry_count']} 次"
+        )
+        path_text = f"源：{task['source_path']}\n目标：{task['target_path']}"
+        action_props = {
+            "href": task["retry_url"],
+            "target": "_self",
+            "size": "small",
+            "variant": "text",
+            "color": "primary",
+            "text": "立即重试",
+            "disabled": not task["can_retry"],
+            "title": "立即重试",
+        }
+        return {
+            "component": "VListItem",
+            "props": {"class": "py-2", "lines": "three"},
+            "content": [
+                {
+                    "component": "VRow",
+                    "props": {"align": "center", "dense": True},
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 6, "class": "text-wrap"},
+                            "content": [
+                                {"component": "VListItemTitle", "content": [task["title"]]},
+                                {"component": "VListItemSubtitle", "content": [path_text]},
+                            ],
+                        },
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "sm": 7, "md": 4, "class": "text-medium-emphasis text-wrap"},
+                            "content": [{"component": "VListItemSubtitle", "content": [metadata]}],
+                        },
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 7, "sm": 3, "md": 1, "class": "d-flex align-center"},
+                            "content": [
+                                {
+                                    "component": "VChip",
+                                    "props": {
+                                        "color": task["status_type"],
+                                        "size": "small",
+                                        "text": task["status"],
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 5, "sm": 2, "md": 1, "class": "d-flex justify-end"},
+                            "content": [{"component": "VBtn", "props": action_props}],
+                        },
+                    ],
+                },
+                {
+                    "component": "VListItemSubtitle",
+                    "props": {"class": "text-warning text-wrap mt-1"},
+                    "content": [task["failure_reason"]],
+                },
+            ],
+        }
+
     def _build_live_status(self) -> Dict[str, Any]:
         now = time.time()
         snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2086,6 +2588,7 @@ class U115RiskControl(_PluginBase):
             scheduled_text = "无"
 
         overall_status = self._build_overall_status(scheduled_text=scheduled_text)
+        pending_tasks, pending_error = self._get_pending_retry_tasks()
         logs = self._event_logs[-self._max_event_log_count :]
         return {
             "snapshot_time": snapshot_time,
@@ -2125,6 +2628,9 @@ class U115RiskControl(_PluginBase):
                 "scheduled_remaining_seconds": retry_remaining,
                 "in_progress": self._retry_in_progress,
             },
+            "pending_tasks": pending_tasks,
+            "pending_task_count": len(pending_tasks),
+            "pending_tasks_error": pending_error,
             "events": list(reversed(logs[-10:])),
             "event_preview": self._format_event_preview(logs),
         }
