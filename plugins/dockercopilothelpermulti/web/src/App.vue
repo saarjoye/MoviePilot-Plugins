@@ -28,7 +28,7 @@ const tab = ref('config')
 const demoConfig = ref({
   enabled: true,
   interval: 10,
-  intervallimit: 6,
+  intervallimit: 60,
   sources: [],
   updatablelist: [],
   autoupdatelist: [],

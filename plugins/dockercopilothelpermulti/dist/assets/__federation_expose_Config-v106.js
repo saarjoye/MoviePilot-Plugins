@@ -43,7 +43,7 @@ const defaultConfig = {
   autoupdatecron: '',
   backupcron: '',
   interval: 10,
-  intervallimit: 6,
+  intervallimit: 60,
   sources: [],
   updatablelist: [],
   autoupdatelist: [],
@@ -459,7 +459,8 @@ return (_ctx, _cache) => {
                     "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.intervallimit) = $event)),
                     label: "检查次数",
                     variant: "outlined",
-                    density: "comfortable"
+                    density: "comfortable",
+                    placeholder: "60"
                   }, null, 8, ["modelValue"])
                 ]),
                 _: 1

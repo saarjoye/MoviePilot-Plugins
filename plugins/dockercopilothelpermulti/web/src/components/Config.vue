@@ -39,7 +39,7 @@
           <v-text-field v-model="config.interval" label="检查间隔（秒）" variant="outlined" density="comfortable" />
         </v-col>
         <v-col cols="12" md="3">
-          <v-text-field v-model="config.intervallimit" label="检查次数" variant="outlined" density="comfortable" />
+          <v-text-field v-model="config.intervallimit" label="检查次数" variant="outlined" density="comfortable" placeholder="60" />
         </v-col>
         <v-col cols="12" md="3">
           <v-text-field v-model="config.updatecron" label="更新通知 Cron" variant="outlined" density="comfortable" placeholder="15 8-23/2 * * *" />
@@ -253,7 +253,7 @@ const defaultConfig = {
   autoupdatecron: '',
   backupcron: '',
   interval: 10,
-  intervallimit: 6,
+  intervallimit: 60,
   sources: [],
   updatablelist: [],
   autoupdatelist: [],
