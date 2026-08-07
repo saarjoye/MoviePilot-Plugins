@@ -15,9 +15,9 @@ from app.schemas import Notification, NotificationType, MessageChannel
 from .sync_models import (
     DATETIME_FORMAT,
     MATCHER_VERSION,
+    DoubanActionResult,
     EpisodeMetadata,
     FailureKind,
-    RETRY_REOPEN_DELAY,
     SubjectCandidate,
     SubjectResolveResult,
     TERMINAL_FAILURES,
@@ -25,6 +25,7 @@ from .sync_models import (
     failure_is_suppressed,
     find_processed_record_key,
     normalize_wait_entry,
+    prepare_retry_attempt,
     record_retry_failure,
     resolve_subject_target,
     retry_is_due,
@@ -45,7 +46,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -250,12 +251,7 @@ class DoubanMediaFolio(_PluginBase):
         # 尝试同步之前同步失败的
         if sync_ret:
             logger.info(f"尝试同步之前同步失败的条目")
-            self._wait_process: Dict = self.get_data('wait') or {}
-            for key, value in list(self._wait_process.items()):
-                if not retry_is_due(value):
-                    continue
-                logger.info(f"尝试同步: {key}")
-                self._retry_waiting_item(key, value, processed_items)
+            self._run_due_waiting_items(processed_items)
 
     def _process_movie(self, event_info: WebhookEventInfo, processed_items: Dict, played: bool = False):
         title = event_info.item_name
@@ -460,6 +456,80 @@ class DoubanMediaFolio(_PluginBase):
             else:
                 logger.error(error_msg)
 
+    def retry_waiting_items(self):
+        """MoviePilot 公共服务入口：扫描并重试已到期的待同步条目。"""
+        if not self._enable:
+            return
+        if not hasattr(self, '_sync_lock'):
+            self._sync_lock = threading.Lock()
+        if not self._sync_lock.acquire(blocking=False):
+            logger.info("豆瓣待同步重试跳过：同步流程正在运行")
+            return
+        try:
+            self._run_due_waiting_items()
+        except Exception as err:
+            logger.error(f"豆瓣待同步重试服务异常: {DoubanApi._safe_message(err)}")
+        finally:
+            self._sync_lock.release()
+
+    def _run_due_waiting_items(self, processed_items: Optional[Dict] = None):
+        waiting_items = self.get_data('wait') or {}
+        if not isinstance(waiting_items, dict):
+            logger.error("豆瓣待同步数据格式无效，本次扫描已跳过")
+            return
+
+        self._wait_process = waiting_items
+        self._failed_process = self.get_data('failed') or {}
+        self._tv_mappings = self.get_data('tv_mappings') or {}
+        processed_items = processed_items if isinstance(processed_items, dict) else self.get_data('data') or {}
+
+        for title, value in list(waiting_items.items()):
+            if not retry_is_due(value):
+                continue
+            normalized = normalize_wait_entry(value)
+            prepared = prepare_retry_attempt(normalized)
+            if prepared != normalized:
+                self._wait_process[title] = prepared
+                self.save_data('wait', self._wait_process)
+            value = prepared
+            try:
+                logger.info(f"尝试自动重试待同步条目: {title}")
+                self._retry_waiting_item(title, value, processed_items)
+            except Exception as err:
+                logger.error(f"待同步条目自动重试异常: {DoubanApi._safe_message(err)}")
+                current = self._wait_process.get(title)
+                if current and retry_is_due(current):
+                    self._handle_retry_exception(title, current)
+
+    def _handle_retry_exception(self, title: str, value: Dict):
+        value = normalize_wait_entry(value)
+        subject_id = str(value.get("subject_id") or "")
+        candidate = SubjectCandidate(
+            subject_id=subject_id,
+            title=str(value.get("subject_name") or title),
+        ) if subject_id else None
+        self._handle_sync_failure(
+            title=title,
+            status=value.get("status", "do"),
+            media_type=value.get("type", "TV"),
+            poster_path=value.get("poster_path", ""),
+            year=value.get("year"),
+            season_id=value.get("season_id"),
+            episode_id=value.get("episode_id"),
+            episode_count=value.get("episode_count", 0),
+            tmdb_id=value.get("tmdb_id"),
+            season_name=value.get("season_name", ""),
+            candidate=candidate,
+            action_result=DoubanActionResult(
+                success=False,
+                kind=FailureKind.TRANSIENT,
+                message="待同步自动重试发生内部异常",
+                retryable=True,
+            ),
+            is_retry=True,
+            direct_douban_id=value.get("douban_id", ""),
+        )
+
     def _retry_waiting_item(self, title: str, value: Dict, processed_items: Dict) -> bool:
         value = normalize_wait_entry(value)
         media_type = value.get("type", "TV")
@@ -517,6 +587,11 @@ class DoubanMediaFolio(_PluginBase):
             elif not retry_is_due(waiting):
                 return False
             else:
+                prepared = prepare_retry_attempt(waiting)
+                if prepared != waiting:
+                    waiting = prepared
+                    self._wait_process[title] = waiting
+                    self.save_data('wait', self._wait_process)
                 is_retry = True
 
         if self._is_failure_suppressed(title, direct_id):
@@ -715,6 +790,7 @@ class DoubanMediaFolio(_PluginBase):
             "episode_count": episode_count,
             "tmdb_id": tmdb_id,
             "season_name": season_name,
+            "kind": kind.value,
             "last_error": message,
         }
         existing = normalize_wait_entry(self._wait_process.get(title)) if title in self._wait_process else None
@@ -722,13 +798,13 @@ class DoubanMediaFolio(_PluginBase):
             existing.update(queue_entry)
             updated, exhausted = record_retry_failure(existing)
             if exhausted:
-                self._wait_process.pop(title, None)
+                self._wait_process[title] = updated
                 self._failed_process[title] = {
                     "subject_id": subject_id,
                     "kind": kind.value,
                     "reason": message,
                     "timestamp": datetime.now().strftime(DATETIME_FORMAT),
-                    "blocked_until": (datetime.now() + RETRY_REOPEN_DELAY).strftime(DATETIME_FORMAT),
+                    "blocked_until": updated["next_retry_at"],
                     "matcher_version": MATCHER_VERSION,
                 }
                 self.save_data('wait', self._wait_process)
@@ -750,6 +826,11 @@ class DoubanMediaFolio(_PluginBase):
             logger.error(f"{title} 因可重试错误加入待同步列表：{message}")
             if kind == FailureKind.AUTH:
                 notice = f"《{title}》因豆瓣登录状态无效同步失败，已加入待同步列表；请检查 Cookie/CK 或账号验证状态。"
+            elif kind == FailureKind.RESTRICTED:
+                notice = (
+                    f"《{title}》因豆瓣访问限制同步失败：{message}；"
+                    "已加入待同步列表，将在冷却后自动重试。"
+                )
             else:
                 notice = f"《{title}》因网络或豆瓣服务临时异常同步失败，已加入待同步列表。"
             self._send_notification(False, notice)
@@ -1246,6 +1327,18 @@ class DoubanMediaFolio(_PluginBase):
 
     def get_state(self) -> bool:
         return self._enable
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        if not self._enable:
+            return []
+        return [{
+            "id": "DoubanMediaFolioRetry",
+            "name": "豆瓣影音档案待同步重试",
+            "trigger": "interval",
+            "func": self.retry_waiting_items,
+            "kwargs": {},
+            "seconds": 600,
+        }]
 
     def stop_service(self):
         pass

@@ -70,7 +70,7 @@ class DoubanApi:
 
         cookie_dict, msg = CookieCloudHelper().download()
         if cookie_dict is None:
-            logger.error(f"获取cookiecloud数据错误 {msg}")
+            logger.error(f"获取cookiecloud数据错误 {self._safe_message(msg)}")
             return {}
 
         cookie_string = cookie_dict.get("douban.com") or cookie_dict.get(".douban.com") or ""
@@ -137,11 +137,13 @@ class DoubanApi:
 
     @staticmethod
     def _looks_like_auth_failed(response: requests.Response, payload: Optional[dict] = None) -> bool:
-        if response.status_code in (401, 403):
+        if response.status_code == 401:
             return True
         text = response.text[:1000] if response.text else ""
         if "passport/login" in response.url or "登录豆瓣" in text:
             return True
+        if response.status_code == 403:
+            return False
         if payload:
             message = str(payload.get("message") or payload.get("msg") or payload.get("description") or "")
             if any(keyword in message for keyword in ("登录", "ck", "cookie", "captcha", "验证码")):
@@ -275,7 +277,7 @@ class DoubanApi:
                 timeout=15
             )
         except Exception as err:
-            logger.error(f"豆瓣账号密码登录请求失败: {err}")
+            logger.error(f"豆瓣账号密码登录请求失败: {self._safe_message(err)}")
             return False
 
         try:
@@ -332,6 +334,13 @@ class DoubanApi:
                 message=auth_result.message or "豆瓣登录状态无效，无法提交观影状态",
                 retryable=True,
             )
+        if auth_result.state == AuthState.RESTRICTED:
+            return DoubanActionResult(
+                success=False,
+                kind=FailureKind.RESTRICTED,
+                message=auth_result.message or "豆瓣登录状态检查遇到访问限制",
+                retryable=True,
+            )
         return DoubanActionResult(
             success=False,
             kind=FailureKind.TRANSIENT,
@@ -363,9 +372,18 @@ class DoubanApi:
         if response.status_code != 200 or is_login_page:
             status_code = response.status_code
             logger.error(f"搜索 {title} 失败 状态码：{status_code}")
+            if status_code == 401 or is_login_page:
+                kind = FailureKind.AUTH
+                message = "豆瓣登录状态无效，搜索条目失败"
+            elif status_code == 403:
+                kind = FailureKind.RESTRICTED
+                message = "豆瓣搜索请求被 HTTP 403 拒绝，可能触发访问限制"
+            else:
+                kind = FailureKind.TRANSIENT
+                message = f"豆瓣搜索服务返回 HTTP {status_code}"
             return SubjectSearchResult(
-                kind=FailureKind.TRANSIENT,
-                message="豆瓣搜索服务暂时不可用" if is_login_page else f"豆瓣搜索服务返回 HTTP {status_code}",
+                kind=kind,
+                message=message,
                 retryable=True,
             )
 
@@ -393,7 +411,7 @@ class DoubanApi:
                 season=extract_season(subject_title),
             ))
 
-        if not candidates and not silent:
+        if not candidates:
             logger.warning(f"找不到 {title} 相关条目，本条目不存在于豆瓣")
         return SubjectSearchResult(candidates=tuple(candidates))
 

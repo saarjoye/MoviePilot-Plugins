@@ -17,6 +17,7 @@ SEGMENT_GAP_DAYS = 60
 class FailureKind(str, Enum):
     NONE = "none"
     AUTH = "auth"
+    RESTRICTED = "restricted"
     TRANSIENT = "transient"
     NOT_ALLOWED = "not_allowed"
     NO_MATCH = "no_match"
@@ -148,20 +149,20 @@ def classify_auth_check(
             retryable=True,
         )
 
-    if status_code in (401, 403):
-        return AuthCheckResult(
-            state=AuthState.RESTRICTED,
-            message=f"豆瓣限制了登录状态检查请求（HTTP {status_code}）",
-            retryable=True,
-        )
-
     is_login_page = (
         host == "accounts.douban.com" and path.startswith("/passport/login")
     ) or title == "登录豆瓣"
-    if is_login_page:
+    if status_code == 401 or is_login_page:
         return AuthCheckResult(
             state=AuthState.LOGGED_OUT,
             message="豆瓣登录状态已失效",
+            retryable=True,
+        )
+
+    if status_code == 403:
+        return AuthCheckResult(
+            state=AuthState.RESTRICTED,
+            message=f"豆瓣限制了登录状态检查请求（HTTP {status_code}）",
             retryable=True,
         )
 
@@ -555,6 +556,13 @@ def classify_action_response(
             message=message or "豆瓣登录状态无效",
             retryable=True,
         )
+    if status_code == 403:
+        return DoubanActionResult(
+            success=False,
+            kind=FailureKind.RESTRICTED,
+            message=message or "豆瓣访问限制拒绝了标记请求（HTTP 403）",
+            retryable=True,
+        )
     if status_code == 200 and payload.get("r") is False:
         return DoubanActionResult(
             success=False,
@@ -613,8 +621,21 @@ def record_retry_failure(
     now = now or datetime.now()
     result = normalize_wait_entry(entry)
     result["retry_count"] += 1
-    result["next_retry_at"] = (now + RETRY_COOLDOWN).strftime(DATETIME_FORMAT)
-    return result, result["retry_count"] >= MAX_RETRY_COUNT
+    exhausted = result["retry_count"] >= MAX_RETRY_COUNT
+    delay = RETRY_REOPEN_DELAY if exhausted else RETRY_COOLDOWN
+    result["next_retry_at"] = (now + delay).strftime(DATETIME_FORMAT)
+    return result, exhausted
+
+
+def prepare_retry_attempt(
+        entry: Dict[str, Any],
+        now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Reset an exhausted retry counter when its 24-hour pause has elapsed."""
+    result = normalize_wait_entry(entry)
+    if result["retry_count"] >= MAX_RETRY_COUNT and retry_is_due(result, now):
+        result["retry_count"] = 0
+    return result
 
 
 def failure_is_suppressed(
