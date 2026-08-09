@@ -2,7 +2,7 @@ import re
 from dataclasses import replace
 from http.cookies import CookieError, SimpleCookie
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,6 +25,7 @@ from .sync_models import (
     classify_action_response,
     extract_season,
     extract_initial_release_dates,
+    extract_search_media_type,
     normalize_media_type,
     normalize_release_date,
     normalize_title,
@@ -440,12 +441,11 @@ class DoubanApi:
             result_node = div.find_parent("div", class_="result") or div.parent
             result_text = result_node.get_text(" ", strip=True) if result_node else div.get_text(" ", strip=True)
             year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", result_text)
-            type_match = re.search(r"[\[【]([^\]】]+)[\]】]", div.get_text(" ", strip=True))
             candidates.append(SubjectCandidate(
                 subject_id=match.group(1),
                 title=subject_title,
                 year=int(year_match.group(1)) if year_match else None,
-                media_type=type_match.group(1).strip() if type_match else None,
+                media_type=extract_search_media_type(result_text),
                 season=extract_season(subject_title),
             ))
 
@@ -494,15 +494,33 @@ class DoubanApi:
             and int(candidate.year) != int(year)
         ]
         if not mismatched:
+            title_matches = [
+                candidate for candidate in search_result.candidates
+                if normalize_title(candidate.title) == expected_title
+            ]
+            typed_matches = [
+                candidate for candidate in title_matches
+                if normalize_media_type(candidate.media_type) == "movie"
+            ]
+            logger.warning(
+                f"豆瓣年份冲突兜底无严格电影候选："
+                f"标题匹配 {len(title_matches)} 个，电影类型匹配 {len(typed_matches)} 个"
+            )
             return strict_result
 
         enriched = []
         detail_failure = None
+        logger.info(f"豆瓣年份冲突候选通过标题和类型校验: {len(mismatched)} 个")
         for candidate in mismatched:
             detail_result = self.get_subject_release_date(candidate.subject_id)
             if not detail_result.success:
+                logger.warning(detail_result.message or "读取豆瓣候选上映日期失败")
                 detail_failure = detail_result
                 continue
+            if detail_result.release_date:
+                logger.info(f"读取到豆瓣候选上映日期: {detail_result.release_date}")
+            else:
+                logger.warning("豆瓣候选详情未提供可识别的上映日期")
             enriched.append(replace(
                 candidate,
                 release_date=detail_result.release_date,
@@ -521,7 +539,17 @@ class DoubanApi:
                 message=detail_failure.message,
                 retryable=detail_failure.retryable,
             )
-        return strict_result
+        if any(candidate.release_date for candidate in enriched):
+            return SubjectResolveResult(
+                candidate=None,
+                kind=FailureKind.NO_MATCH,
+                message="豆瓣候选上映日期与 TMDB 不一致",
+            )
+        return SubjectResolveResult(
+            candidate=None,
+            kind=FailureKind.NO_MATCH,
+            message="豆瓣候选详情缺少可识别上映日期，且年份与 TMDB 不一致",
+        )
 
     def get_subject_release_date(self, subject_id: str) -> SubjectReleaseResult:
         try:
@@ -553,8 +581,46 @@ class DoubanApi:
         if response.status_code != 200:
             return SubjectReleaseResult()
 
+        final_url = urlparse(str(response.url or ""))
+        page_title = self._response_title(response)
+        if "passport/login" in str(response.url or "") or page_title == "登录豆瓣":
+            return SubjectReleaseResult(
+                kind=FailureKind.AUTH,
+                message="豆瓣条目详情请求被重定向到登录页",
+                retryable=True,
+            )
+        expected_path = f"/subject/{subject_id}"
+        if final_url.hostname != "movie.douban.com" or not final_url.path.startswith(expected_path):
+            return SubjectReleaseResult(
+                kind=FailureKind.RESTRICTED,
+                message="豆瓣条目详情请求被重定向，可能触发访问限制",
+                retryable=True,
+            )
+
         values = extract_initial_release_dates(response.text)
-        return SubjectReleaseResult(release_date=preferred_initial_release_date(values))
+        release_date = preferred_initial_release_date(values)
+        if release_date:
+            return SubjectReleaseResult(release_date=release_date)
+
+        page_text = str(response.text or "")[:8000]
+        if any(marker in page_text for marker in (
+                "检测到有异常请求", "异常请求", "访问受限", "访问被拒绝", "禁止访问",
+                "captcha", "Captcha",
+        )):
+            return SubjectReleaseResult(
+                kind=FailureKind.RESTRICTED,
+                message="豆瓣条目详情返回访问限制页面",
+                retryable=True,
+            )
+        if not any(marker in page_text for marker in (
+                "v:itemreviewed", "subjectwrap", "interest_sect_level",
+        )):
+            return SubjectReleaseResult(
+                kind=FailureKind.RESTRICTED,
+                message="豆瓣条目详情响应缺少正常条目结构，可能触发访问限制",
+                retryable=True,
+            )
+        return SubjectReleaseResult()
 
     def get_subject_id(self, title: str = None, meta: MetaBase = None) -> Tuple | None:
         if not title:

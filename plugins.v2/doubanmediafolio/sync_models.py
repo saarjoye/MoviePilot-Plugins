@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -11,7 +12,7 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 RETRY_COOLDOWN = timedelta(hours=6)
 MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
-MATCHER_VERSION = 4
+MATCHER_VERSION = 6
 SEGMENT_GAP_DAYS = 60
 
 
@@ -268,16 +269,27 @@ def normalize_media_type(value: Optional[str]) -> Optional[str]:
     return None
 
 
+def extract_search_media_type(value: Optional[str]) -> Optional[str]:
+    for match in re.finditer(r"[\[【]([^\]】]+)[\]】]", str(value or "")):
+        candidate = match.group(1).strip()
+        if normalize_media_type(candidate):
+            return candidate
+    return None
+
+
 def normalize_release_date(value: Any) -> Optional[str]:
     if isinstance(value, datetime):
         value = value.date()
     if isinstance(value, date):
         return value.isoformat()
-    match = re.search(r"(?<!\d)((?:19|20)\d{2}-\d{2}-\d{2})(?!\d)", str(value or ""))
+    match = re.search(
+        r"(?<!\d)((?:19|20)\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?(?!\d)",
+        str(value or ""),
+    )
     if not match:
         return None
     try:
-        return date.fromisoformat(match.group(1)).isoformat()
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
     except ValueError:
         return None
 
@@ -286,27 +298,52 @@ class _InitialReleaseDateParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.values: List[str] = []
+        self.json_ld_blocks: List[str] = []
         self._capture_depth = 0
         self._buffer: List[str] = []
+        self._json_ld_depth = 0
+        self._json_ld_buffer: List[str] = []
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
         if self._capture_depth:
             self._capture_depth += 1
             return
-        attributes = dict(attrs)
-        if attributes.get("property") != "v:initialReleaseDate":
+        if self._json_ld_depth:
+            self._json_ld_depth += 1
             return
-        content = str(attributes.get("content") or "").strip()
+        attributes = dict(attrs)
+        if tag.casefold() == "script" and str(attributes.get("type") or "").casefold() == "application/ld+json":
+            self._json_ld_depth = 1
+            self._json_ld_buffer = []
+            return
+        date_property = str(attributes.get("property") or attributes.get("itemprop") or "").casefold()
+        if date_property not in {"v:initialreleasedate", "datepublished"}:
+            return
+        content = str(
+            attributes.get("content") or attributes.get("datetime") or attributes.get("value") or ""
+        ).strip()
         if content:
             self.values.append(content)
+        if tag.casefold() in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            return
         self._capture_depth = 1
         self._buffer = []
 
     def handle_data(self, data: str):
         if self._capture_depth:
             self._buffer.append(data)
+        elif self._json_ld_depth:
+            self._json_ld_buffer.append(data)
 
     def handle_endtag(self, tag: str):
+        if self._json_ld_depth:
+            self._json_ld_depth -= 1
+            if self._json_ld_depth == 0:
+                text = "".join(self._json_ld_buffer).strip()
+                if text:
+                    self.json_ld_blocks.append(text)
+                self._json_ld_buffer = []
+            return
         if not self._capture_depth:
             return
         self._capture_depth -= 1
@@ -324,6 +361,22 @@ def extract_initial_release_dates(html: str) -> Tuple[str, ...]:
         parser.close()
     except Exception:
         return ()
+    for block in parser.json_ld_blocks:
+        try:
+            payload = json.loads(block)
+        except (TypeError, ValueError):
+            continue
+        stack = [payload]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if str(key).casefold() == "datepublished" and isinstance(item, (str, int, float)):
+                        parser.values.append(str(item))
+                    elif isinstance(item, (dict, list)):
+                        stack.append(item)
+            elif isinstance(value, list):
+                stack.extend(value)
     return tuple(dict.fromkeys(parser.values))
 
 
