@@ -25,6 +25,7 @@ from .sync_models import (
     failure_is_suppressed,
     find_processed_record_key,
     normalize_wait_entry,
+    normalize_release_date,
     prepare_retry_attempt,
     record_retry_failure,
     resolve_subject_target,
@@ -47,7 +48,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -285,6 +286,7 @@ class DoubanMediaFolio(_PluginBase):
             mediainfo.poster_path,
             direct_douban_id=getattr(mediainfo, "douban_id", None),
             year=getattr(mediainfo, "year", None),
+            release_date=getattr(mediainfo, "release_date", None),
         )
 
     def _recognize_media(self, meta: MetaInfo, tmdb_id: Optional[int]) -> Optional[MediaInfo]:
@@ -545,6 +547,7 @@ class DoubanMediaFolio(_PluginBase):
             media_type=value.get("type", "TV"),
             poster_path=value.get("poster_path", ""),
             year=value.get("year"),
+            release_date=value.get("release_date"),
             season_id=value.get("season_id"),
             episode_id=value.get("episode_id"),
             episode_count=value.get("episode_count", 0),
@@ -579,6 +582,7 @@ class DoubanMediaFolio(_PluginBase):
             poster_path=value.get("poster_path", ""),
             direct_douban_id=getattr(mediainfo, "douban_id", None) if mediainfo else None,
             year=getattr(mediainfo, "year", None) if mediainfo else value.get("year"),
+            release_date=(getattr(mediainfo, "release_date", None) if mediainfo else None) or value.get("release_date"),
             season_id=season_id,
             episode_id=value.get("episode_id"),
             episode_count=value.get("episode_count", 0),
@@ -596,6 +600,7 @@ class DoubanMediaFolio(_PluginBase):
             poster_path: str,
             direct_douban_id: Optional[str] = None,
             year: Optional[int] = None,
+            release_date=None,
             season_id: Optional[int] = None,
             episode_id: Optional[int] = None,
             episode_count: int = 0,
@@ -640,6 +645,7 @@ class DoubanMediaFolio(_PluginBase):
                 year=year,
                 media_type=mediaType,
                 season=season_id,
+                release_date=release_date,
             )
         else:
             cached = None
@@ -661,6 +667,7 @@ class DoubanMediaFolio(_PluginBase):
                     year=year,
                     media_type=mediaType,
                     season=season_id,
+                    release_date=release_date,
                 )
                 if should_use_segmented_fallback(mediaType, direct_id, resolve_result.kind):
                     resolve_result, segment_end = self._resolve_segmented_tv(
@@ -681,6 +688,7 @@ class DoubanMediaFolio(_PluginBase):
                 media_type=mediaType,
                 poster_path=poster_path,
                 year=year,
+                release_date=release_date,
                 season_id=season_id,
                 episode_id=episode_id,
                 episode_count=episode_count,
@@ -723,6 +731,7 @@ class DoubanMediaFolio(_PluginBase):
                 media_type=mediaType,
                 poster_path=poster_path,
                 year=year,
+                release_date=release_date,
                 season_id=season_id,
                 episode_id=episode_id,
                 episode_count=episode_count,
@@ -768,7 +777,8 @@ class DoubanMediaFolio(_PluginBase):
             media_type: str,
             poster_path: str,
             year: Optional[int],
-            season_id: Optional[int],
+            release_date=None,
+            season_id: Optional[int] = None,
             episode_id: Optional[int] = None,
             episode_count: int = 0,
             tmdb_id: Optional[int] = None,
@@ -817,6 +827,7 @@ class DoubanMediaFolio(_PluginBase):
             "poster_path": poster_path,
             "type": media_type,
             "year": year,
+            "release_date": normalize_release_date(release_date) if release_date else "",
             "season_id": season_id,
             "episode_id": episode_id,
             "episode_count": episode_count,

@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 from http.cookies import CookieError, SimpleCookie
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import unquote
@@ -17,11 +18,17 @@ from .sync_models import (
     FailureKind,
     SubjectCandidate,
     SubjectResolveResult,
+    SubjectReleaseResult,
     SubjectSearchResult,
     choose_refreshed_ck,
     classify_auth_check,
     classify_action_response,
     extract_season,
+    extract_initial_release_dates,
+    normalize_media_type,
+    normalize_release_date,
+    normalize_title,
+    preferred_initial_release_date,
     select_subject_candidate,
 )
 
@@ -33,6 +40,7 @@ class DoubanApi:
     LOGIN_API = "https://accounts.douban.com/j/mobile/login/basic"
     SEARCH_URL = "https://www.douban.com/search"
     INTEREST_URL = "https://movie.douban.com/j/subject/{subject_id}/interest"
+    SUBJECT_URL = "https://movie.douban.com/subject/{subject_id}/"
 
     def __init__(
             self,
@@ -450,6 +458,7 @@ class DoubanApi:
             year: Optional[int] = None,
             media_type: Optional[str] = None,
             season: Optional[int] = None,
+            release_date=None,
     ) -> SubjectResolveResult:
         """搜索并选择唯一高置信豆瓣条目。"""
         search_result = self.search_subject_candidates(title)
@@ -460,7 +469,88 @@ class DoubanApi:
                 message=search_result.message,
                 retryable=search_result.retryable,
             )
-        return select_subject_candidate(title, search_result.candidates, year, media_type, season)
+        strict_result = select_subject_candidate(
+            title, search_result.candidates, year, media_type, season, release_date
+        )
+        expected_release_date = normalize_release_date(release_date)
+        if (
+                strict_result.kind != FailureKind.NO_MATCH
+                or normalize_media_type(media_type) != "movie"
+                or not expected_release_date
+                or not year
+        ):
+            return strict_result
+
+        expected_title = normalize_title(title)
+        mismatched = [
+            candidate for candidate in search_result.candidates
+            if normalize_title(candidate.title) == expected_title
+            and normalize_media_type(candidate.media_type) == "movie"
+            and candidate.year
+            and int(candidate.year) != int(year)
+        ]
+        if not mismatched:
+            return strict_result
+
+        enriched = []
+        detail_failure = None
+        for candidate in mismatched:
+            detail_result = self.get_subject_release_date(candidate.subject_id)
+            if not detail_result.success:
+                detail_failure = detail_result
+                continue
+            enriched.append(replace(
+                candidate,
+                release_date=detail_result.release_date,
+                source="search_release_date" if detail_result.release_date else candidate.source,
+            ))
+
+        resolved = select_subject_candidate(
+            title, enriched, year, media_type, season, expected_release_date
+        )
+        if resolved.success or resolved.kind == FailureKind.AMBIGUOUS:
+            return resolved
+        if detail_failure:
+            return SubjectResolveResult(
+                candidate=None,
+                kind=detail_failure.kind,
+                message=detail_failure.message,
+                retryable=detail_failure.retryable,
+            )
+        return strict_result
+
+    def get_subject_release_date(self, subject_id: str) -> SubjectReleaseResult:
+        try:
+            response = self.session.get(
+                self.SUBJECT_URL.format(subject_id=subject_id),
+                headers={**self.headers, "Host": "movie.douban.com", "Cookie": self._cookie_header()},
+                timeout=15,
+            )
+        except Exception as err:
+            logger.warning(f"读取豆瓣条目上映日期失败: {self._safe_message(err)}")
+            return SubjectReleaseResult(
+                kind=FailureKind.TRANSIENT,
+                message="连接豆瓣条目详情服务失败",
+                retryable=True,
+            )
+
+        if response.status_code == 403:
+            return SubjectReleaseResult(
+                kind=FailureKind.RESTRICTED,
+                message="豆瓣限制了条目上映日期查询（HTTP 403）",
+                retryable=True,
+            )
+        if response.status_code == 429 or response.status_code >= 500:
+            return SubjectReleaseResult(
+                kind=FailureKind.TRANSIENT,
+                message=f"豆瓣条目详情暂时不可用（HTTP {response.status_code}）",
+                retryable=True,
+            )
+        if response.status_code != 200:
+            return SubjectReleaseResult()
+
+        values = extract_initial_release_dates(response.text)
+        return SubjectReleaseResult(release_date=preferred_initial_release_date(values))
 
     def get_subject_id(self, title: str = None, meta: MetaBase = None) -> Tuple | None:
         if not title:
@@ -470,6 +560,7 @@ class DoubanApi:
             year=getattr(meta, "year", None) if meta else None,
             media_type=str(getattr(meta, "type", "")) if meta else None,
             season=getattr(meta, "begin_season", None) if meta else None,
+            release_date=getattr(meta, "release_date", None) if meta else None,
         )
         if result.candidate:
             return result.candidate.title, result.candidate.subject_id

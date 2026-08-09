@@ -1,7 +1,8 @@
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
@@ -10,7 +11,7 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 RETRY_COOLDOWN = timedelta(hours=6)
 MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
-MATCHER_VERSION = 2
+MATCHER_VERSION = 3
 SEGMENT_GAP_DAYS = 60
 
 
@@ -47,6 +48,7 @@ class SubjectCandidate:
     media_type: Optional[str] = None
     season: Optional[int] = None
     source: str = "search"
+    release_date: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,18 @@ class SubjectSearchResult:
     @property
     def success(self) -> bool:
         return bool(self.candidates)
+
+
+@dataclass(frozen=True)
+class SubjectReleaseResult:
+    release_date: Optional[str] = None
+    kind: FailureKind = FailureKind.NONE
+    message: str = ""
+    retryable: bool = False
+
+    @property
+    def success(self) -> bool:
+        return self.kind == FailureKind.NONE
 
 
 @dataclass(frozen=True)
@@ -242,6 +256,76 @@ def normalize_media_type(value: Optional[str]) -> Optional[str]:
     if value in {"tv", "电视剧", "电视", "剧集", "动画", "动漫", "综艺", "纪录片"}:
         return "tv"
     return None
+
+
+def normalize_release_date(value: Any) -> Optional[str]:
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return value.isoformat()
+    match = re.search(r"(?<!\d)((?:19|20)\d{2}-\d{2}-\d{2})(?!\d)", str(value or ""))
+    if not match:
+        return None
+    try:
+        return date.fromisoformat(match.group(1)).isoformat()
+    except ValueError:
+        return None
+
+
+class _InitialReleaseDateParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.values: List[str] = []
+        self._capture_depth = 0
+        self._buffer: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        if self._capture_depth:
+            self._capture_depth += 1
+            return
+        attributes = dict(attrs)
+        if attributes.get("property") != "v:initialReleaseDate":
+            return
+        content = str(attributes.get("content") or "").strip()
+        if content:
+            self.values.append(content)
+        self._capture_depth = 1
+        self._buffer = []
+
+    def handle_data(self, data: str):
+        if self._capture_depth:
+            self._buffer.append(data)
+
+    def handle_endtag(self, tag: str):
+        if not self._capture_depth:
+            return
+        self._capture_depth -= 1
+        if self._capture_depth == 0:
+            text = "".join(self._buffer).strip()
+            if text:
+                self.values.append(text)
+            self._buffer = []
+
+
+def extract_initial_release_dates(html: str) -> Tuple[str, ...]:
+    parser = _InitialReleaseDateParser()
+    try:
+        parser.feed(str(html or ""))
+        parser.close()
+    except Exception:
+        return ()
+    return tuple(dict.fromkeys(parser.values))
+
+
+def preferred_initial_release_date(values: Iterable[str]) -> Optional[str]:
+    parsed = [(str(value or ""), normalize_release_date(value)) for value in values]
+    valid = [(raw, value) for raw, value in parsed if value]
+    if not valid:
+        return None
+    for raw, value in valid:
+        if "中国大陆" in raw:
+            return value
+    return valid[0][1]
 
 
 def _season_label_key(season_name: Optional[str], base_title: str) -> str:
@@ -468,10 +552,12 @@ def select_subject_candidate(
         year: Optional[int] = None,
         media_type: Optional[str] = None,
         season: Optional[int] = None,
+        release_date: Any = None,
 ) -> SubjectResolveResult:
     expected_title = normalize_title(title)
     expected_type = normalize_media_type(media_type)
     expected_season = season or extract_season(title)
+    expected_release_date = normalize_release_date(release_date)
     scored = []
     seen_ids = set()
 
@@ -480,8 +566,6 @@ def select_subject_candidate(
             continue
         seen_ids.add(candidate.subject_id)
         if normalize_title(candidate.title) != expected_title:
-            continue
-        if year and candidate.year and int(candidate.year) != int(year):
             continue
         candidate_type = normalize_media_type(candidate.media_type)
         if expected_type and candidate_type and candidate_type != expected_type:
@@ -492,7 +576,16 @@ def select_subject_candidate(
         if candidate_season and expected_season and candidate_season != expected_season:
             continue
 
+        candidate_release_date = normalize_release_date(candidate.release_date)
+        if expected_release_date and candidate_release_date:
+            if candidate_release_date != expected_release_date:
+                continue
+        elif year and candidate.year and int(candidate.year) != int(year):
+            continue
+
         score = 100
+        if expected_release_date and candidate_release_date == expected_release_date:
+            score += 30
         if year and candidate.year and int(candidate.year) == int(year):
             score += 20
         if expected_type and candidate_type == expected_type:
@@ -502,10 +595,11 @@ def select_subject_candidate(
         scored.append((score, candidate))
 
     if not scored:
+        criteria = "标题、年份或上映日期、类型和季号" if expected_release_date else "标题、年份、类型和季号"
         return SubjectResolveResult(
             candidate=None,
             kind=FailureKind.NO_MATCH,
-            message="未找到与标题、年份、类型和季号一致的豆瓣条目",
+            message=f"未找到与{criteria}一致的豆瓣条目",
         )
 
     best_score = max(item[0] for item in scored)
@@ -526,6 +620,7 @@ def resolve_subject_target(
         year: Optional[int] = None,
         media_type: Optional[str] = None,
         season: Optional[int] = None,
+        release_date: Any = None,
 ) -> SubjectResolveResult:
     direct_id = str(direct_douban_id or "").strip()
     if direct_id:
@@ -536,8 +631,9 @@ def resolve_subject_target(
             media_type=media_type,
             season=season,
             source="media_info",
+            release_date=normalize_release_date(release_date),
         ))
-    return select_subject_candidate(title, candidates, year, media_type, season)
+    return select_subject_candidate(title, candidates, year, media_type, season, release_date)
 
 
 def classify_action_response(
@@ -592,6 +688,7 @@ def normalize_wait_entry(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized.setdefault("next_retry_at", "")
     normalized.setdefault("last_error", "")
     normalized.setdefault("douban_id", "")
+    normalized.setdefault("release_date", "")
     return normalized
 
 
