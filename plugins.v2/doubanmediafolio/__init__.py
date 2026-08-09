@@ -48,7 +48,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.11"
+    plugin_version = "1.0.12"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -250,6 +250,7 @@ class DoubanMediaFolio(_PluginBase):
             episode_count=len(episodes),
             tmdb_id=getattr(mediainfo, "tmdb_id", None) or tmdb_id,
             season_name=self._get_season_name(mediainfo, season_id),
+            force_auth_login=not played,
         )
         # 尝试同步之前同步失败的
         if sync_ret:
@@ -287,6 +288,7 @@ class DoubanMediaFolio(_PluginBase):
             direct_douban_id=getattr(mediainfo, "douban_id", None),
             year=getattr(mediainfo, "year", None),
             release_date=getattr(mediainfo, "release_date", None),
+            force_auth_login=not played,
         )
 
     def _recognize_media(self, meta: MetaInfo, tmdb_id: Optional[int]) -> Optional[MediaInfo]:
@@ -607,6 +609,7 @@ class DoubanMediaFolio(_PluginBase):
             tmdb_id: Optional[int] = None,
             season_name: str = "",
             is_retry: bool = False,
+            force_auth_login: bool = False,
     ) -> bool:
         self._wait_process = self._wait_process or self.get_data('wait') or {}
         self._failed_process = self._failed_process or self.get_data('failed') or {}
@@ -722,6 +725,7 @@ class DoubanMediaFolio(_PluginBase):
             subject_id=candidate.subject_id,
             status=effective_status,
             private=self._private,
+            force_login=force_auth_login,
         )
         self._update_auth_retry_state(douban_helper, auth_valid=action_result.success)
         if not action_result.success:
@@ -768,6 +772,9 @@ class DoubanMediaFolio(_PluginBase):
         if should_remove:
             self._failed_process.pop(title, None)
             self.save_data('failed', self._failed_process)
+            logger.info(f"{title} 清除已失效的失败抑制记录，允许重新解析豆瓣条目")
+        elif suppressed:
+            logger.info(f"{title} 当前被失败记录抑制，跳过豆瓣条目解析")
         return suppressed
 
     def _handle_sync_failure(

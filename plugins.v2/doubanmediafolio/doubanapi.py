@@ -258,6 +258,12 @@ class DoubanApi:
             self.restricted_login_succeeded = True
             verified = self._check_auth_once()
             self.restricted_login_verified = verified.success
+            if self.ck and verified.state == AuthState.RESTRICTED:
+                return AuthCheckResult(
+                    state=AuthState.VALID,
+                    message="豆瓣账号密码登录成功并获得CK；登录状态复查仍受访问限制，将直接尝试提交",
+                    login_attempted=True,
+                )
             return AuthCheckResult(
                 state=verified.state,
                 message=verified.message,
@@ -350,13 +356,29 @@ class DoubanApi:
             logger.error(f"豆瓣账号密码登录失败: {safe_message}")
         return False
 
-    def _ensure_ck_result(self) -> DoubanActionResult:
+    def _ensure_ck_result(self, force_login: bool = False) -> DoubanActionResult:
         if self.ck:
             return DoubanActionResult(success=True)
         if self.set_ck():
             return DoubanActionResult(success=True)
 
         auth_result = self.check_auth_status(allow_login=True)
+        if (
+                force_login
+                and auth_result.state == AuthState.RESTRICTED
+                and self.auto_login
+                and self.username
+                and self.password
+                and not self.ck
+                and not self.restricted_login_attempted
+        ):
+            self.restricted_login_attempted = True
+            if self.login() and self.ck:
+                self.restricted_login_succeeded = True
+                return DoubanActionResult(
+                    success=True,
+                    message="豆瓣账号密码登录成功并获得CK，将直接尝试提交",
+                )
         if auth_result.success:
             if self.ck or self.set_ck():
                 return DoubanActionResult(success=True)
@@ -387,8 +409,8 @@ class DoubanApi:
             retryable=True,
         )
 
-    def _ensure_ck(self) -> bool:
-        return self._ensure_ck_result().success
+    def _ensure_ck(self, force_login: bool = False) -> bool:
+        return self._ensure_ck_result(force_login=force_login).success
 
     def search_subject_candidates(self, title: str) -> SubjectSearchResult:
         """搜索豆瓣条目并返回候选列表，不执行目标选择。"""
@@ -641,9 +663,10 @@ class DoubanApi:
             subject_id: str,
             status: str = "do",
             private: bool = True,
+            force_login: bool = False,
     ) -> DoubanActionResult:
         for retry in range(2):
-            ck_result = self._ensure_ck_result()
+            ck_result = self._ensure_ck_result(force_login=force_login)
             if not ck_result.success:
                 return ck_result
 
