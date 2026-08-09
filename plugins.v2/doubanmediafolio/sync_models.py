@@ -11,7 +11,7 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 RETRY_COOLDOWN = timedelta(hours=6)
 MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
-MATCHER_VERSION = 3
+MATCHER_VERSION = 4
 SEGMENT_GAP_DAYS = 60
 
 
@@ -240,8 +240,18 @@ def extract_season(value: Optional[str]) -> Optional[int]:
     return None
 
 
+def strip_title_year_suffix(value: Optional[str], year: Optional[int] = None) -> str:
+    value = str(value or "").strip()
+    match = re.search(r"\s*[\(（\[【]\s*((?:19|20)\d{2})\s*[\)）\]】]\s*$", value)
+    if not match:
+        return value
+    if year and int(match.group(1)) != int(year):
+        return value
+    return value[:match.start()].strip()
+
+
 def normalize_title(value: Optional[str]) -> str:
-    value = str(value or "")
+    value = strip_title_year_suffix(value)
     value = re.sub(r"第\s*[0-9一二三四五六七八九十]+\s*季", "", value, flags=re.IGNORECASE)
     value = re.sub(r"(?:^|\s)S(?:eason)?\s*0*[0-9]{1,3}(?:\s|$)", "", value, flags=re.IGNORECASE)
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()

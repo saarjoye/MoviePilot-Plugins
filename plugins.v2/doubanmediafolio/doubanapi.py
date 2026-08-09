@@ -30,6 +30,7 @@ from .sync_models import (
     normalize_title,
     preferred_initial_release_date,
     select_subject_candidate,
+    strip_title_year_suffix,
 )
 
 
@@ -461,7 +462,10 @@ class DoubanApi:
             release_date=None,
     ) -> SubjectResolveResult:
         """搜索并选择唯一高置信豆瓣条目。"""
-        search_result = self.search_subject_candidates(title)
+        search_title = strip_title_year_suffix(title, year)
+        if search_title != title:
+            logger.info(f"豆瓣搜索使用去除年份后的标题: {search_title}")
+        search_result = self.search_subject_candidates(search_title)
         if not search_result.success and search_result.kind != FailureKind.NONE:
             return SubjectResolveResult(
                 candidate=None,
