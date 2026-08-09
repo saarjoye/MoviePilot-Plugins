@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple, List
 
 from app.chain.media import MediaChain
@@ -36,6 +36,7 @@ from .sync_models import (
 )
 
 lock = threading.Lock()
+AUTH_RETRY_COOLDOWN = timedelta(hours=6)
 
 
 class DoubanMediaFolio(_PluginBase):
@@ -46,7 +47,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -129,6 +130,7 @@ class DoubanMediaFolio(_PluginBase):
                 try:
                     douban_helper = self._get_douban_helper()
                     auth_result = douban_helper.check_auth_status(allow_login=True)
+                    self._update_auth_retry_state(douban_helper, auth_valid=auth_result.success)
                 except Exception as err:
                     auth_result = None
                     logger.warning(f"检查豆瓣登录状态异常: {DoubanApi._safe_message(err)}")
@@ -293,8 +295,37 @@ class DoubanMediaFolio(_PluginBase):
             user_cookie=self._cookie,
             username=self._douban_username,
             password=self._douban_password,
-            auto_login=self._auto_login
+            auto_login=self._auto_login,
+            allow_restricted_login=self._restricted_login_is_due(),
         )
+
+    def _restricted_login_is_due(self, now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now()
+        state = self.get_data('auth_retry') or {}
+        if not isinstance(state, dict):
+            return True
+        next_attempt_at = state.get("next_attempt_at")
+        if not next_attempt_at:
+            return True
+        try:
+            return now >= datetime.strptime(next_attempt_at, DATETIME_FORMAT)
+        except (TypeError, ValueError):
+            return True
+
+    def _update_auth_retry_state(self, douban_helper: DoubanApi, auth_valid: bool = False):
+        if getattr(douban_helper, 'restricted_login_succeeded', False) and douban_helper.ck:
+            self._cookie = douban_helper.get_cookie_string()
+        if auth_valid or getattr(douban_helper, 'restricted_login_verified', False):
+            if self.get_data('auth_retry'):
+                self.save_data('auth_retry', {})
+            return
+        if not getattr(douban_helper, 'restricted_login_attempted', False):
+            return
+        now = datetime.now()
+        self.save_data('auth_retry', {
+            "last_attempt_at": now.strftime(DATETIME_FORMAT),
+            "next_attempt_at": (now + AUTH_RETRY_COOLDOWN).strftime(DATETIME_FORMAT),
+        })
 
     @staticmethod
     def _item_value(item, key: str, default=None):
@@ -684,6 +715,7 @@ class DoubanMediaFolio(_PluginBase):
             status=effective_status,
             private=self._private,
         )
+        self._update_auth_retry_state(douban_helper, auth_valid=action_result.success)
         if not action_result.success:
             self._handle_sync_failure(
                 title=title,
@@ -1336,8 +1368,7 @@ class DoubanMediaFolio(_PluginBase):
             "name": "豆瓣影音档案待同步重试",
             "trigger": "interval",
             "func": self.retry_waiting_items,
-            "kwargs": {},
-            "seconds": 600,
+            "kwargs": {"seconds": 600},
         }]
 
     def stop_service(self):

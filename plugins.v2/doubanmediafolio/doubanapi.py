@@ -39,11 +39,16 @@ class DoubanApi:
             user_cookie: str = None,
             username: str = None,
             password: str = None,
-            auto_login: bool = True
+            auto_login: bool = True,
+            allow_restricted_login: bool = False,
     ):
         self.username = (username or "").strip()
         self.password = password or ""
         self.auto_login = bool(auto_login)
+        self.allow_restricted_login = bool(allow_restricted_login)
+        self.restricted_login_attempted = False
+        self.restricted_login_succeeded = False
+        self.restricted_login_verified = False
         self.session = requests.Session()
         self.cookies: Dict[str, str] = self._load_cookies(user_cookie)
         self.ck: str = self.cookies.get("ck", "")
@@ -222,11 +227,35 @@ class DoubanApi:
 
     def check_auth_status(self, allow_login: bool = True) -> AuthCheckResult:
         result = self._check_auth_once()
-        if not result.explicitly_logged_out or not allow_login:
+        if not allow_login:
             return result
 
         can_login = self.auto_login and bool(self.username and self.password)
         if not can_login:
+            return result
+
+        if result.state == AuthState.RESTRICTED:
+            if not self.allow_restricted_login or self.ck:
+                return result
+            self.restricted_login_attempted = True
+            if not self.login():
+                return AuthCheckResult(
+                    state=AuthState.RESTRICTED,
+                    message=(result.message or "豆瓣登录状态检查遇到访问限制") + "；受限状态下自动登录未成功",
+                    retryable=True,
+                    login_attempted=True,
+                )
+            self.restricted_login_succeeded = True
+            verified = self._check_auth_once()
+            self.restricted_login_verified = verified.success
+            return AuthCheckResult(
+                state=verified.state,
+                message=verified.message,
+                retryable=verified.retryable,
+                login_attempted=True,
+            )
+
+        if not result.explicitly_logged_out:
             return result
 
         if not self.login():
