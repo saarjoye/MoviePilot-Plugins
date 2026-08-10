@@ -848,8 +848,17 @@ class DockerCopilotHelperMulti(_PluginBase):
             return None, "更新后未找到目标容器，无法确认结果"
         have_update = target.get("haveUpdate")
         if isinstance(have_update, str):
-            return have_update.strip().lower() in {"false", "0", "no", "否"}, ""
-        return have_update is False or have_update == 0, ""
+            normalized = have_update.strip().lower()
+            if normalized in {"false", "0", "no", "否"}:
+                return True, ""
+            if normalized in {"true", "1", "yes", "是"}:
+                return False, ""
+            return None, "容器返回的 haveUpdate 状态未知"
+        if have_update is False or have_update == 0:
+            return True, ""
+        if have_update is True or have_update == 1:
+            return False, ""
+        return None, "容器未返回 haveUpdate，无法确认结果"
 
     def _is_update_confirmed_after_tracking(self, source: Dict[str, Any], container_name: str) -> bool:
         confirmed, _reason = self._query_update_confirmation(source, container_name)
