@@ -534,7 +534,7 @@ const Page = {
     }
 
     function containerTable() {
-      return h(C('v-table'), { density: 'comfortable', class: 'container-table' }, {
+      return h(C('v-table'), { density: 'compact', class: 'container-table' }, {
         default: () => [
           h('thead', null, [h('tr', null, [
             h('th', null, '容器'),
@@ -846,8 +846,8 @@ const Page = {
             h(C('v-row'), { dense: true }, { default: () => metrics.value.map(metricCard) }),
             h(C('v-row'), { class: 'mt-2', align: 'stretch' }, {
               default: () => [
-                h(C('v-col'), { cols: 12, md: 2 }, { default: () => sourceOverview() }),
-                h(C('v-col'), { cols: 12, md: 10 }, {
+                h(C('v-col'), { cols: 12, md: 3 }, { default: () => sourceOverview() }),
+                h(C('v-col'), { cols: 12, md: 9 }, {
                   default: () => [
                     operationPanel(),
                     h(C('v-row'), { class: 'mt-3' }, {

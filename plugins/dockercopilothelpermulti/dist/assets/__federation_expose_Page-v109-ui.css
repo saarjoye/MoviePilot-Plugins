@@ -1,5 +1,11 @@
 .task-center-page {
   background: transparent;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
 }
 .task-center-page .v-card-title {
   font-size: 18px;
@@ -13,6 +19,10 @@
 }
 .task-center-page .v-card-text {
   font-size: 14px;
+  min-width: 0;
+}
+.task-center-page .v-col {
+  min-width: 0;
 }
 .task-center-page .gap-2 {
   gap: 8px;
@@ -21,11 +31,11 @@
   height: 100%;
 }
 .task-center-page .metric-card .v-card-text {
-  min-height: 72px;
-  padding: 8px 14px;
+  min-height: 60px;
+  padding: 7px 12px;
 }
 .task-center-page .metric-card .text-h4 {
-  font-size: 2rem !important;
+  font-size: 1.6rem !important;
   line-height: 1.05;
 }
 .task-center-page .source-panel,
@@ -36,7 +46,7 @@
 .task-center-page .source-panel .v-card-text,
 .task-center-page .ops-panel .v-card-text,
 .task-center-page .progress-panel .v-card-text {
-  padding: 12px 16px;
+  padding: 10px 12px;
 }
 .task-center-page .table-shell {
   border: 1px solid rgba(var(--v-border-color), 0.12);
@@ -44,13 +54,13 @@
   overflow: auto;
 }
 .task-center-page .table-shell-sm {
-  max-height: 300px;
+  max-height: 210px;
 }
 .task-center-page .table-shell-md {
-  max-height: 220px;
+  max-height: 160px;
 }
 .task-center-page .table-shell-lg {
-  max-height: 300px;
+  max-height: 220px;
 }
 .task-center-page .source-table,
 .task-center-page .container-table {
@@ -149,7 +159,7 @@
   line-height: 1.65;
 }
 .task-center-page .summary-title {
-  font-size: 1.5rem;
+  font-size: 1.2rem;
   font-weight: 800;
   line-height: 1.2;
   margin-bottom: 12px;
@@ -167,7 +177,7 @@
 .task-center-page .progress-list {
   display: grid;
   gap: 12px;
-  max-height: 220px;
+  max-height: 150px;
   overflow: auto;
 }
 .task-center-page .progress-item {

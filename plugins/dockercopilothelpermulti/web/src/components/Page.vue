@@ -37,7 +37,7 @@
       </v-row>
 
       <v-row class="mt-2" align="stretch">
-        <v-col cols="12" md="2">
+        <v-col cols="12" md="3">
           <v-card variant="outlined" class="source-panel fill-height">
             <v-card-title>源概览</v-card-title>
             <v-card-subtitle>选中一个源后，右侧容器与日志同步联动</v-card-subtitle>
@@ -112,7 +112,7 @@
           </v-card>
         </v-col>
 
-        <v-col cols="12" md="10">
+        <v-col cols="12" md="9">
           <v-card variant="outlined" class="ops-panel">
             <v-card-title>容器操作台</v-card-title>
             <v-card-subtitle>通知列 = 收到更新提醒；自动列 = 进入自动升级队列</v-card-subtitle>
@@ -211,7 +211,7 @@
               </v-card>
 
               <div class="table-shell table-shell-lg">
-                <v-table density="comfortable" class="container-table">
+                <v-table density="compact" class="container-table">
                   <thead>
                     <tr>
                       <th>容器</th>
@@ -817,6 +817,12 @@ onBeforeUnmount(stopProgressAutoRefresh)
 <style scoped>
 .task-center-page {
   background: transparent;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
 }
 .task-center-page :deep(.v-card-title) {
   font-size: 18px;
@@ -830,6 +836,10 @@ onBeforeUnmount(stopProgressAutoRefresh)
 }
 .task-center-page :deep(.v-card-text) {
   font-size: 14px;
+  min-width: 0;
+}
+.task-center-page :deep(.v-col) {
+  min-width: 0;
 }
 .gap-2 {
   gap: 8px;
@@ -838,11 +848,11 @@ onBeforeUnmount(stopProgressAutoRefresh)
   height: 100%;
 }
 .metric-card :deep(.v-card-text) {
-  min-height: 72px;
-  padding: 8px 14px;
+  min-height: 60px;
+  padding: 7px 12px;
 }
 .metric-card :deep(.text-h4) {
-  font-size: 2rem !important;
+  font-size: 1.6rem !important;
   line-height: 1.05;
 }
 .source-panel,
@@ -853,7 +863,7 @@ onBeforeUnmount(stopProgressAutoRefresh)
 .source-panel :deep(.v-card-text),
 .ops-panel :deep(.v-card-text),
 .progress-panel :deep(.v-card-text) {
-  padding: 12px 16px;
+  padding: 10px 12px;
 }
 .table-shell {
   border: 1px solid rgba(var(--v-border-color), 0.12);
@@ -868,13 +878,13 @@ onBeforeUnmount(stopProgressAutoRefresh)
   min-width: 780px;
 }
 .table-shell-sm {
-  max-height: 300px;
+  max-height: 210px;
 }
 .table-shell-md {
-  max-height: 220px;
+  max-height: 160px;
 }
 .table-shell-lg {
-  max-height: 300px;
+  max-height: 220px;
 }
 .source-panel .source-table {
   font-size: 12px;
@@ -966,7 +976,7 @@ onBeforeUnmount(stopProgressAutoRefresh)
   line-height: 1.65;
 }
 .summary-title {
-  font-size: 1.5rem;
+  font-size: 1.2rem;
   font-weight: 800;
   line-height: 1.2;
   margin-bottom: 12px;
@@ -984,7 +994,7 @@ onBeforeUnmount(stopProgressAutoRefresh)
 .progress-list {
   display: grid;
   gap: 12px;
-  max-height: 220px;
+  max-height: 150px;
   overflow: auto;
 }
 .progress-item {
