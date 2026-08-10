@@ -180,19 +180,19 @@ const Page = {
     }
 
     function isProgressRunning(task) {
-      return ['已提交', '执行中', '等待确认'].includes(task?.status)
+      return ['已提交', '执行中'].includes(task?.status)
     }
 
     function isProgressFailed(task) {
-      return task?.status === '失败'
+      return task?.status === '更新失败'
     }
 
     function progressColor(task) {
-      if (task?.status === '成功')
+      if (task?.status === '更新成功')
         return 'success';
-      if (task?.status === '失败')
+      if (task?.status === '更新失败')
         return 'error';
-      if (['超时', '等待确认'].includes(task?.status))
+      if (['超时待确认', '远程源无法确认'].includes(task?.status))
         return 'warning';
       return 'primary'
     }

@@ -23,7 +23,7 @@ class DockerCopilotHelperMulti(_PluginBase):
     plugin_name = "DC助手多源版"
     plugin_desc = "配合 DockerCopilot 管理多个 DC 源，支持跨源更新通知、自动更新、镜像清理和自动备份"
     plugin_icon = "Docker_Copilot.png"
-    plugin_version = "1.0.10"
+    plugin_version = "1.0.11"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "dockercopilothelpermulti_"
@@ -49,7 +49,9 @@ class DockerCopilotHelperMulti(_PluginBase):
     _sources_text = ""
     _task_logs: List[Dict[str, Any]] = []
     _progress_tasks: List[Dict[str, Any]] = []
+    _pending_update_keys = set()
     _progress_lock = threading.RLock()
+    _update_submission_lock = threading.RLock()
     _scheduler: Optional[BackgroundScheduler] = None
 
     def init_plugin(self, config: dict = None):
@@ -74,6 +76,9 @@ class DockerCopilotHelperMulti(_PluginBase):
         self._interval = config.get("interval") or 10
         self._sources = self._load_sources(config)
         self._sources_text = json.dumps(self._sources, ensure_ascii=False, indent=2) if self._sources else ""
+        saved_tasks = config.get("progress_tasks")
+        if isinstance(saved_tasks, list):
+            self._progress_tasks = [item for item in saved_tasks if isinstance(item, dict)][:50]
         self.__update_config()
 
         if not self._sources:
@@ -118,7 +123,8 @@ class DockerCopilotHelperMulti(_PluginBase):
             "sources_text": self._sources_text,
             "sources": self._sources,
             "intervallimit": self._intervallimit,
-            "interval": self._interval
+            "interval": self._interval,
+            "progress_tasks": self._progress_task_snapshot()
         }
         self.update_config(config)
 
@@ -178,6 +184,9 @@ class DockerCopilotHelperMulti(_PluginBase):
         self._interval = config.get("interval") or 10
         self._sources = self._load_sources(config) if config else []
         self._sources_text = json.dumps(self._sources, ensure_ascii=False, indent=2) if self._sources else ""
+        saved_tasks = config.get("progress_tasks") if config else None
+        if isinstance(saved_tasks, list):
+            self._progress_tasks = [item for item in saved_tasks if isinstance(item, dict)][:50]
 
     def _load_sources(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
         sources = self._parse_source_slots(config)
@@ -302,15 +311,25 @@ class DockerCopilotHelperMulti(_PluginBase):
     def _is_success(data: Optional[Dict[str, Any]], accepted_codes=(0, 200)) -> bool:
         return isinstance(data, dict) and data.get("code") in accepted_codes
 
-    def get_docker_list(self, source: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _get_docker_list_status(self, source: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any]], str]:
         try:
             data = self._get_json(source, "/api/containers")
             if self._is_success(data):
-                return data.get("data") or []
-            logger.error(f"DC助手多源版[{source['name']}] 获取容器列表异常：{self._safe_reason(data)}")
+                containers = data.get("data") or []
+                if not isinstance(containers, list):
+                    return False, [], "容器列表格式异常"
+                return True, containers, ""
+            reason = self._format_dc_error(data)
+            logger.error(f"DC助手多源版[{source['name']}] 获取容器列表异常：{reason}")
+            return False, [], reason
         except Exception as err:
-            logger.error(f"DC助手多源版[{source['name']}] 请求容器列表网络异常：{self._safe_reason(err)}")
-        return []
+            reason = self._safe_reason(err)
+            logger.error(f"DC助手多源版[{source['name']}] 请求容器列表网络异常：{reason}")
+            return False, [], reason
+
+    def get_docker_list(self, source: Dict[str, Any]) -> List[Dict[str, Any]]:
+        _available, containers, _reason = self._get_docker_list_status(source)
+        return containers
 
     def get_all_docker_list(self) -> List[Dict[str, Any]]:
         containers = []
@@ -370,6 +389,11 @@ class DockerCopilotHelperMulti(_PluginBase):
         selected = set(self._auto_update_list)
         if not selected:
             logger.info("DC助手多源版-自动更新-未选择容器")
+            for source in self._enabled_sources():
+                self._record_task_log(
+                    "自动更新", source, "-", "-", False,
+                    "跳过：未选中容器", result="已跳过"
+                )
             return
 
         for source in self._enabled_sources():
@@ -383,37 +407,134 @@ class DockerCopilotHelperMulti(_PluginBase):
                             container_name="unknown",
                             reason="unused"
                         )
-            containers = self.get_docker_list(source)
+            available, containers, source_reason = self._get_docker_list_status(source)
+            if not available:
+                self._record_task_log(
+                    "自动更新", source, "-", "-", False,
+                    f"跳过：源不可用，无法确认容器状态：{source_reason}",
+                    result="远程源无法确认"
+                )
+                continue
+            selected_in_source = False
             for container in containers:
                 name = container.get("name")
                 key = self._container_key(source, name)
                 legacy_selected = name in selected and not self._has_key_for_source(selected, source["id"])
                 if key not in selected and not legacy_selected:
                     continue
+                selected_in_source = True
                 if not container.get("haveUpdate"):
+                    if self._reconcile_confirmed_task(
+                        source, container, notify=self._auto_update_notify
+                    ):
+                        continue
+                    self._record_task_log(
+                        "自动更新", source, name, container.get("usingImage") or "unknown", True,
+                        "跳过：未检测到新版本", result="无需更新"
+                    )
                     continue
                 if not container.get("usingImage") or str(container.get("usingImage")).startswith("sha256:"):
-                    self._notify_tag_error(source, container, "自动更新")
+                    if self._auto_update_notify:
+                        self._notify_tag_error(source, container, "自动更新")
                     self._record_task_log(
                         "自动更新",
                         source,
                         name,
                         container.get("usingImage") or "unknown",
                         False,
-                        "镜像 TAG 不正确，无法自动更新"
+                        "跳过：镜像 TAG 无效，无法自动更新",
+                        result="失败"
                     )
                     continue
                 self._update_container(source, container, scene="自动更新", notify=self._auto_update_notify)
+            if not selected_in_source:
+                self._record_task_log(
+                    "自动更新", source, "-", "-", False,
+                    "跳过：未找到该源中选中的容器", result="已跳过"
+                )
 
     @staticmethod
     def _has_key_for_source(selected: set, source_id: str) -> bool:
         prefix = f"{source_id}::"
         return any(str(item).startswith(prefix) for item in selected)
 
+    @staticmethod
+    def _update_task_key(source: Dict[str, Any], container_name: str) -> str:
+        return f"{source.get('id') or '-'}::{container_name or '-'}"
+
+    def _find_update_task(self, source: Dict[str, Any], container_name: str) -> Optional[Dict[str, Any]]:
+        task_key = self._update_task_key(source, container_name)
+        with self._progress_lock:
+            tasks = list(getattr(self, "_progress_tasks", []) or [])
+            return next((dict(item) for item in tasks if item.get("container_key") == task_key), None)
+
+    def _submission_guard(self, source: Dict[str, Any], container_name: str) -> Tuple[bool, str]:
+        task_key = self._update_task_key(source, container_name)
+        if task_key in getattr(self, "_pending_update_keys", set()):
+            return False, "跳过：已有更新任务正在提交，禁止重复提交"
+        task = self._find_update_task(source, container_name)
+        if not task:
+            return True, ""
+        status = str(task.get("status") or "")
+        if status in {"已提交", "执行中", "超时待确认", "远程源无法确认"}:
+            return False, f"跳过：已有更新任务处于{status}状态，禁止重复提交"
+        submitted_ts = task.get("submitted_ts")
+        try:
+            elapsed = time.time() - float(submitted_ts)
+        except (TypeError, ValueError):
+            elapsed = self._intervallimit
+        cooldown = max(60, int(self._intervallimit or 60))
+        if elapsed < cooldown:
+            return False, f"跳过：更新任务仍在冷却期（{cooldown}秒）"
+        self._pending_update_keys.add(task_key)
+        return True, ""
+
+    def _release_submission(self, source: Dict[str, Any], container_name: str):
+        with self._update_submission_lock:
+            self._pending_update_keys.discard(self._update_task_key(source, container_name))
+
+    def _reconcile_confirmed_task(self, source: Dict[str, Any], container: Dict[str, Any],
+                                  notify: bool = False) -> bool:
+        task = self._find_update_task(source, container.get("name"))
+        if not task or task.get("status") in {"更新成功", "更新失败"}:
+            return False
+        name = container.get("name") or "unknown"
+        image = container.get("usingImage") or task.get("image") or "unknown"
+        message = "后续容器状态确认成功，haveUpdate 已清除"
+        self._record_progress_task(
+            task_id=task.get("task_id"),
+            source=source,
+            container_name=name,
+            image=image,
+            scene=task.get("scene") or "自动更新",
+            status="更新成功",
+            percent=100,
+            message=message,
+            reason=""
+        )
+        self._record_task_log(
+            task.get("scene") or "自动更新", source, name, image, True, message
+        )
+        if notify:
+            self._notify_update_success(
+                source, name, image, task.get("scene") or "自动更新", message
+            )
+        return True
+
     def _update_container(self, source: Dict[str, Any], container: Dict[str, Any],
                           scene: str = "自动更新", notify: bool = False) -> Dict[str, Any]:
         name = container.get("name")
         image = container.get("usingImage") or "unknown"
+        with self._update_submission_lock:
+            allowed, guard_reason = self._submission_guard(source, name)
+            if not allowed:
+                self._record_task_log(scene, source, name, image, False, guard_reason, result="已跳过")
+                logger.info(
+                    f"DC助手多源版 更新任务跳过 source={source['name']} "
+                    f"container={name} image={image} reason={guard_reason}"
+                )
+                return {"success": False, "message": guard_reason, "skipped": True}
+
         path = f"/api/container/{container.get('id')}/update"
         payload = {
             "containerName": name,
@@ -438,13 +559,32 @@ class DockerCopilotHelperMulti(_PluginBase):
                     status="已提交",
                     percent=5,
                     message=message,
-                    reason="" if task_id else "DockerCopilot 未返回 taskID，无法继续追踪进度"
+                    reason="" if task_id else "DockerCopilot 未返回 taskID，无法继续追踪进度",
+                    submitted_at=self._now_text(),
+                    submitted_ts=time.time(),
+                    remote_task_id=task_id or ""
                 )
                 self._record_task_log(scene, source, name, image, True, message)
                 if notify:
                     self._notify_update_started(source, name, image, scene)
                 if task_id:
                     self._start_progress_tracker(source, name, image, scene, task_id, notify=notify)
+                else:
+                    self._record_progress_task(
+                        task_id=progress_id,
+                        source=source,
+                        container_name=name,
+                        image=image,
+                        scene=scene,
+                        status="远程源无法确认",
+                        percent=5,
+                        message="更新任务已提交，但 DockerCopilot 未返回 taskID",
+                        reason="无法轮询远程任务",
+                        submitted_at=self._now_text(),
+                        submitted_ts=time.time(),
+                        remote_task_id=""
+                    )
+                self._release_submission(source, name)
                 return {"success": True, "message": message, "task_id": task_id}
             else:
                 message = self._format_dc_error(data)
@@ -452,9 +592,11 @@ class DockerCopilotHelperMulti(_PluginBase):
                     f"DC助手多源版 更新任务创建失败 "
                     f"source={source['name']} container={name} image={image} reason={message}"
                 )
-                self._record_task_log(scene, source, name, image, False, message)
+                self._record_task_log(scene, source, name, image, False, message, result="失败")
                 if notify:
-                    self._notify_auto_update_failed(source, container, f"创建更新任务失败：{message}")
+                    self._notify_update_failed(
+                        source, name, image, scene, f"创建更新任务失败：{message}"
+                    )
         except Exception as err:
             safe_reason = self._safe_reason(err)
             message = f"请求 DockerCopilot 更新接口异常：{safe_reason}"
@@ -462,9 +604,10 @@ class DockerCopilotHelperMulti(_PluginBase):
                 f"DC助手多源版 更新任务网络异常 "
                 f"source={source['name']} container={name} image={image} reason={safe_reason}"
             )
-            self._record_task_log(scene, source, name, image, False, message)
+            self._record_task_log(scene, source, name, image, False, message, result="失败")
             if notify:
-                self._notify_auto_update_failed(source, container, message)
+                self._notify_update_failed(source, name, image, scene, message)
+        self._release_submission(source, name)
         return {"success": False, "message": message}
 
     @staticmethod
@@ -540,26 +683,88 @@ class DockerCopilotHelperMulti(_PluginBase):
                 data = self._get_json(source, f"/api/progress/{task_id}")
                 if not self._is_success(data, accepted_codes=(200,)):
                     message = self._format_dc_error(data)
+                    raw_message = str((data or {}).get("msg") or (data or {}).get("message") or "") if isinstance(data, dict) else ""
+                    explicit_failure = bool(re.search(r"失败|异常|错误|超时", raw_message))
+                    status = "更新失败" if explicit_failure else "远程源无法确认"
                     self._record_progress_task(
                         task_id=task_id,
                         source=source,
                         container_name=name,
                         image=image,
                         scene=scene,
-                        status="失败",
+                        status=status,
                         percent=self._estimate_progress_percent(iteration, limit),
-                        message="更新进度查询失败",
+                        message="更新进度查询失败" if explicit_failure else "无法确认远程更新进度",
                         reason=message
                     )
-                    self._record_task_log(scene, source, name, image, False, f"更新进度查询失败：{message}")
-                    if notify:
+                    self._record_task_log(
+                        scene, source, name, image, False,
+                        f"更新进度查询失败：{message}", result=status
+                    )
+                    if notify and explicit_failure:
                         self._notify_update_failed(source, name, image, scene, message)
                     return
 
                 raw_message = data.get("msg") or data.get("message") or data.get("detail") or "更新任务执行中"
                 safe_message = self._safe_reason(raw_message)
                 status = self._progress_status_from_message(safe_message)
-                percent = 100 if status == "成功" else self._estimate_progress_percent(iteration, limit)
+                if status == "更新失败":
+                    self._record_progress_task(
+                        task_id=task_id,
+                        source=source,
+                        container_name=name,
+                        image=image,
+                        scene=scene,
+                        status=status,
+                        percent=self._estimate_progress_percent(iteration, limit),
+                        message=safe_message,
+                        reason=safe_message
+                    )
+                    self._record_task_log(scene, source, name, image, False, safe_message, result=status)
+                    if notify:
+                        self._notify_update_failed(source, name, image, scene, safe_message)
+                    return
+
+                if status == "更新成功":
+                    confirmed, confirmation_reason = self._query_update_confirmation(source, name)
+                    if confirmed is True:
+                        self._record_progress_task(
+                            task_id=task_id,
+                            source=source,
+                            container_name=name,
+                            image=image,
+                            scene=scene,
+                            status="更新成功",
+                            percent=100,
+                            message="进度完成且容器已无可更新标记",
+                            reason=""
+                        )
+                        self._record_task_log(scene, source, name, image, True, "容器更新完成")
+                        if notify:
+                            self._notify_update_success(source, name, image, scene, "容器更新完成")
+                    else:
+                        result_status = "超时待确认" if confirmed is False else "远程源无法确认"
+                        reason = (
+                            "进度接口已完成，但容器仍报告 haveUpdate=true"
+                            if confirmed is False else confirmation_reason
+                        )
+                        self._record_progress_task(
+                            task_id=task_id,
+                            source=source,
+                            container_name=name,
+                            image=image,
+                            scene=scene,
+                            status=result_status,
+                            percent=95,
+                            message="更新完成但最终容器状态无法确认",
+                            reason=reason
+                        )
+                        self._record_task_log(
+                            scene, source, name, image, False,
+                            f"更新完成但结果无法确认：{reason}", result=result_status
+                        )
+                    return
+
                 self._record_progress_task(
                     task_id=task_id,
                     source=source,
@@ -567,20 +772,10 @@ class DockerCopilotHelperMulti(_PluginBase):
                     image=image,
                     scene=scene,
                     status=status,
-                    percent=percent,
+                    percent=self._estimate_progress_percent(iteration, limit),
                     message=safe_message,
-                    reason="" if status != "失败" else safe_message
+                    reason=""
                 )
-                if status == "成功":
-                    self._record_task_log(scene, source, name, image, True, "容器更新完成")
-                    if notify:
-                        self._notify_update_success(source, name, image, scene, safe_message)
-                    return
-                if status == "失败":
-                    self._record_task_log(scene, source, name, image, False, safe_message)
-                    if notify:
-                        self._notify_update_failed(source, name, image, scene, safe_message)
-                    return
                 time.sleep(interval)
             except Exception as err:
                 safe_reason = self._safe_reason(err)
@@ -590,18 +785,20 @@ class DockerCopilotHelperMulti(_PluginBase):
                     container_name=name,
                     image=image,
                     scene=scene,
-                    status="失败",
+                    status="远程源无法确认",
                     percent=self._estimate_progress_percent(iteration, limit),
-                    message="更新进度查询异常",
+                    message="无法确认远程更新进度",
                     reason=safe_reason
                 )
                 logger.error(f"DC助手多源版[{source['name']}] 进度追踪异常：{safe_reason}")
-                self._record_task_log(scene, source, name, image, False, f"更新进度查询异常：{safe_reason}")
-                if notify:
-                    self._notify_update_failed(source, name, image, scene, safe_reason)
+                self._record_task_log(
+                    scene, source, name, image, False,
+                    f"更新结果无法确认：{safe_reason}", result="远程源无法确认"
+                )
                 return
 
-        if self._is_update_confirmed_after_tracking(source, name):
+        confirmed, confirmation_reason = self._query_update_confirmation(source, name)
+        if confirmed is True:
             message = "追踪结束后容器状态校验通过，容器已无可更新标记"
             self._record_progress_task(
                 task_id=task_id,
@@ -609,7 +806,7 @@ class DockerCopilotHelperMulti(_PluginBase):
                 container_name=name,
                 image=image,
                 scene=scene,
-                status="成功",
+                status="更新成功",
                 percent=100,
                 message=message,
                 reason=""
@@ -619,29 +816,44 @@ class DockerCopilotHelperMulti(_PluginBase):
                 self._notify_update_success(source, name, image, scene, message)
             return
 
+        status = "超时待确认" if confirmed is False else "远程源无法确认"
         message = "等待最终结果，DockerCopilot 可能仍在后台执行，请稍后刷新"
+        reason = (
+            "追踪结束时容器仍报告 haveUpdate=true"
+            if confirmed is False else confirmation_reason
+        )
         self._record_progress_task(
             task_id=task_id,
             source=source,
             container_name=name,
             image=image,
             scene=scene,
-            status="等待确认",
+            status=status,
             percent=95,
             message=message,
-            reason=""
+            reason=reason
+        )
+        self._record_task_log(
+            scene, source, name, image, False,
+            f"更新完成但结果无法确认：{reason}", result=status
         )
         logger.info(f"DC助手多源版[{source['name']}] 等待更新最终结果：{name}")
 
-    def _is_update_confirmed_after_tracking(self, source: Dict[str, Any], container_name: str) -> bool:
-        containers = self.get_docker_list(source)
+    def _query_update_confirmation(self, source: Dict[str, Any], container_name: str) -> Tuple[Optional[bool], str]:
+        available, containers, reason = self._get_docker_list_status(source)
+        if not available:
+            return None, reason or "远程源不可用"
         target = next((item for item in containers if item.get("name") == container_name), None)
         if not target:
-            return False
+            return None, "更新后未找到目标容器，无法确认结果"
         have_update = target.get("haveUpdate")
         if isinstance(have_update, str):
-            return have_update.strip().lower() in {"false", "0", "no", "否"}
-        return have_update is False or have_update == 0
+            return have_update.strip().lower() in {"false", "0", "no", "否"}, ""
+        return have_update is False or have_update == 0, ""
+
+    def _is_update_confirmed_after_tracking(self, source: Dict[str, Any], container_name: str) -> bool:
+        confirmed, _reason = self._query_update_confirmation(source, container_name)
+        return confirmed is True
 
     @staticmethod
     def _estimate_progress_percent(iteration: int, limit: int) -> int:
@@ -653,14 +865,15 @@ class DockerCopilotHelperMulti(_PluginBase):
     def _progress_status_from_message(message: str) -> str:
         text = str(message or "")
         if any(keyword in text for keyword in ["更新成功", "更新完成", "任务完成"]):
-            return "成功"
+            return "更新成功"
         if any(keyword in text for keyword in ["失败", "异常", "错误", "超时"]):
-            return "失败"
+            return "更新失败"
         return "执行中"
 
     def _record_progress_task(self, task_id: str, source: Dict[str, Any], container_name: str,
                               image: str, scene: str, status: str, percent: int,
-                              message: str, reason: str = ""):
+                              message: str, reason: str = "", submitted_at: str = None,
+                              submitted_ts: float = None, remote_task_id: str = None):
         safe_message = self._safe_reason(message)
         safe_reason = self._safe_reason(reason)
         now_text = self._now_text()
@@ -682,6 +895,12 @@ class DockerCopilotHelperMulti(_PluginBase):
                     "reason": safe_reason,
                     "updated_at": now_text
                 })
+                if submitted_at:
+                    existing["submitted_at"] = submitted_at
+                if submitted_ts is not None:
+                    existing["submitted_ts"] = submitted_ts
+                if remote_task_id is not None:
+                    existing["remote_task_id"] = remote_task_id
                 logs = list(existing.get("logs") or [])
                 logs.insert(0, log_item)
                 existing["logs"] = logs[:20]
@@ -693,8 +912,12 @@ class DockerCopilotHelperMulti(_PluginBase):
                     "source_id": source.get("id"),
                     "source": source.get("name") or source.get("id") or "-",
                     "container": container_name or "unknown",
+                    "container_key": self._update_task_key(source, container_name),
                     "image": image or "unknown",
                     "scene": scene or "-",
+                    "submitted_at": submitted_at or now_text,
+                    "submitted_ts": submitted_ts if submitted_ts is not None else time.time(),
+                    "remote_task_id": remote_task_id if remote_task_id is not None else task_key,
                     "status": status,
                     "percent": max(0, min(100, int(percent or 0))),
                     "message": safe_message,
@@ -703,6 +926,16 @@ class DockerCopilotHelperMulti(_PluginBase):
                     "logs": [log_item]
                 })
             self._progress_tasks = tasks[:50]
+        self._persist_progress_tasks()
+
+    def _persist_progress_tasks(self):
+        updater = getattr(self, "update_config", None)
+        if not callable(updater):
+            return
+        try:
+            self.__update_config()
+        except Exception as err:
+            logger.warning(f"DC助手多源版保存更新任务状态失败：{self._safe_reason(err)}")
 
     def _progress_task_snapshot(self) -> List[Dict[str, Any]]:
         with self._progress_lock:
@@ -758,22 +991,25 @@ class DockerCopilotHelperMulti(_PluginBase):
         return datetime.now(pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
 
     def _record_task_log(self, action: str, source: Dict[str, Any], container_name: str,
-                         image: str, success: bool, message: str):
-        if success:
+                         image: str, success: bool, message: str, result: str = None):
+        message = self._safe_reason(message)
+        if result:
+            log_result = result
+        elif success:
             if "更新完成" in str(message or "") or "更新成功" in str(message or ""):
-                result = "成功"
+                log_result = "成功"
             elif action in {"手动升级", "自动更新"}:
-                result = "已提交"
+                log_result = "已提交"
             elif action == "更新通知":
-                result = "已记录"
+                log_result = "已记录"
             elif action.endswith("通知"):
-                result = "已发送"
+                log_result = "已发送"
             elif action in {"镜像清理", "备份"}:
-                result = "已完成"
+                log_result = "已完成"
             else:
-                result = "成功"
+                log_result = "成功"
         else:
-            result = "失败"
+            log_result = "失败"
         log_item = {
             "time": self._now_text(),
             "type": action,
@@ -782,7 +1018,7 @@ class DockerCopilotHelperMulti(_PluginBase):
             "container": container_name or "unknown",
             "image": image or "unknown",
             "success": bool(success),
-            "result": result,
+            "result": log_result,
             "message": message or "-"
         }
         logs = list(getattr(self, "_task_logs", []) or [])
@@ -864,10 +1100,10 @@ class DockerCopilotHelperMulti(_PluginBase):
         task_logs = list(getattr(self, "_task_logs", []) or [])
         progress_tasks = self._progress_task_snapshot()
         logs_success = len([item for item in task_logs if item.get("result") == "成功"])
-        logs_failed = len([item for item in task_logs if not item.get("success")])
+        logs_failed = len([item for item in task_logs if item.get("result") in {"失败", "更新失败"}])
         auto_updatable_count = len([item for item in containers if item.get("_selected_auto") and item.get("haveUpdate")])
-        progress_running = len([item for item in progress_tasks if item.get("status") in {"已提交", "执行中", "等待确认"}])
-        progress_failed = len([item for item in progress_tasks if item.get("status") == "失败"])
+        progress_running = len([item for item in progress_tasks if item.get("status") in {"已提交", "执行中"}])
+        progress_failed = len([item for item in progress_tasks if item.get("status") == "更新失败"])
         return {
             "enabled": self._enabled,
             "sources": [self._public_source(source) for source in self._sources],
@@ -930,7 +1166,7 @@ class DockerCopilotHelperMulti(_PluginBase):
             self._record_task_log("手动升级", source, target.get("name"), image or "unknown", False, message)
             return {"success": False, "message": message}
 
-        return self._update_container(source, target, scene="手动升级", notify=False)
+        return self._update_container(source, target, scene="手动升级", notify=True)
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         config = self.get_config() or {}
