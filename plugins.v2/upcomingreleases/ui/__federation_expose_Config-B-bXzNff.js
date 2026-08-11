@@ -124,6 +124,7 @@ const TIME_OPTIONS = [
 const TYPE_OPTIONS = [
   { value: 'movie', label: '电影' },
   { value: 'tv', label: '电视剧' },
+  { value: 'short', label: '短剧' },
   { value: 'anime', label: '动漫' },
   { value: 'variety', label: '综艺' },
 ];
