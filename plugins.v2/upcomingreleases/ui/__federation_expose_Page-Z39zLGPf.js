@@ -62,6 +62,7 @@ function useUpcomingBrowser(api, options = {}) {
   const busyMediaId = ref$1('');
   const notice = reactive({ type: 'info', text: '' });
   const limit = options.limit || 24;
+  let loaded = false;
 
   function setNotice(type, text) {
     notice.type = type || 'info';
@@ -73,7 +74,7 @@ function useUpcomingBrowser(api, options = {}) {
     try {
       const result = await api.get(`${PLUGIN_API_BASE}/config_state`, {
         params: {
-          ...cloneConfig(filters),
+          ...(loaded ? cloneConfig(filters) : {}),
           limit,
           force_refresh: forceRefresh ? 1 : 0,
         },
@@ -83,6 +84,7 @@ function useUpcomingBrowser(api, options = {}) {
         ...(result || {}),
       };
       Object.assign(filters, state.value.filters || createDefaultFilters());
+      loaded = true;
       if (result?.message) {
         setNotice(result?.success === false ? 'error' : 'info', result.message);
       } else {

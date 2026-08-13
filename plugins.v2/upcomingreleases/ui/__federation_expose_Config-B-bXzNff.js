@@ -108,6 +108,7 @@ const defaults = {
   enable_youku: true,
   enable_mgtv: true,
   enable_netflix: true,
+  netflix_regions: 'us,jp,kr,gb,ca,au,fr,de,it,es,in,br',
   auto_subscribe_rules: '[]',
 };
 
@@ -137,16 +138,17 @@ const PLATFORM_OPTIONS = [
   { value: 'netflix', label: 'Netflix' },
 ];
 
-const REGION_OPTIONS = [
-  { value: '国产', label: '国产' },
-  { value: '华语', label: '华语' },
-  { value: '韩国', label: '韩国' },
-  { value: '日本', label: '日本' },
-  { value: '美国', label: '美国' },
-  { value: '英国', label: '英国' },
-  { value: '香港', label: '香港' },
-  { value: '台湾', label: '台湾' },
-];
+const REGION_ALIASES = {
+  '国产': 'CN', '中国': 'CN', '中国大陆': 'CN',
+  '韩国': 'KR', '日本': 'JP', '美国': 'US', '英国': 'GB',
+  '香港': 'HK', '中国香港': 'HK', '台湾': 'TW', '中国台湾': 'TW',
+};
+const REGION_OPTIONS = reactive([
+  { value: 'CN', label: '中国大陆' }, { value: 'HK', label: '中国香港' },
+  { value: 'TW', label: '中国台湾' }, { value: 'KR', label: '韩国' },
+  { value: 'JP', label: '日本' }, { value: 'US', label: '美国' },
+  { value: 'GB', label: '英国' },
+]);
 
 const GENRE_OPTIONS = [
   { value: '喜剧', label: '喜剧' },
@@ -243,6 +245,13 @@ function normalizeOptionValues(values, options) {
     .filter(item => item && item !== 'all' && allowedValues.has(item))
 }
 
+function normalizeRegionValues(values) {
+  return splitToList(values)
+    .map(item => String(item || '').trim())
+    .map(item => REGION_ALIASES[item] || (item === '华语' ? '华语' : item.toUpperCase()))
+    .filter((item, index, all) => item && item !== 'all' && all.indexOf(item) === index)
+}
+
 function createRule(raw = {}) {
   return {
     id: nextRuleId(),
@@ -251,7 +260,7 @@ function createRule(raw = {}) {
     time_range: inferTimeRange(raw),
     types: normalizeOptionValues(raw.types ?? raw.type ?? raw.mtype, TYPE_OPTIONS),
     platforms: normalizeOptionValues(raw.platforms ?? raw.platform, PLATFORM_OPTIONS),
-    regions: normalizeOptionValues(raw.regions ?? raw.region ?? raw.countries, REGION_OPTIONS),
+    regions: normalizeRegionValues(raw.regions ?? raw.region ?? raw.countries),
     genres: normalizeOptionValues(raw.genres ?? raw.genre ?? raw.tags, GENRE_OPTIONS),
     exclude_genres: normalizeOptionValues(raw.exclude_genres ?? raw.exclude_genre, GENRE_OPTIONS),
     include_pending: Boolean(raw.include_pending),
@@ -289,6 +298,23 @@ function applyInitialConfig(value) {
   rules.value = parseRules((value || {}).auto_subscribe_rules ?? defaults.auto_subscribe_rules);
 }
 
+async function loadRegionOptions() {
+  try {
+    const result = await props.api.get('plugin/UpcomingReleases/config_state', { params: { limit: 1 } });
+    const options = result?.options?.rule_regions;
+    if (Array.isArray(options) && options.length) {
+      const existingValues = new Set(options.map(option => option.value));
+      const preserved = rules.value
+        .flatMap(rule => rule.regions || [])
+        .filter((value, index, all) => value && !existingValues.has(value) && all.indexOf(value) === index)
+        .map(value => ({ value, label: value }));
+      REGION_OPTIONS.splice(0, REGION_OPTIONS.length, ...options, ...preserved)
+    }
+  } catch (error) {
+    // Keep the common static regions when the state endpoint is unavailable.
+  }
+}
+
 watch(
   () => props.initialConfig,
   value => {
@@ -296,6 +322,8 @@ watch(
   },
   { deep: true, immediate: true }
 );
+
+loadRegionOptions();
 
 function getOptionLabel(options, value) {
   return options.find(option => option.value === value)?.label || ''
@@ -444,6 +472,11 @@ async function runAutoSubscribeOnce() {
 
 function saveConfig() {
   const nextConfig = JSON.parse(JSON.stringify(config));
+  nextConfig.netflix_regions = splitToList(nextConfig.netflix_regions)
+    .map(item => String(item || '').trim().toLowerCase())
+    .filter((item, index, all) => /^[a-z]{2}$/.test(item) && all.indexOf(item) === index)
+    .slice(0, 12)
+    .join(',');
   nextConfig.auto_subscribe_rules = JSON.stringify(rules.value.map((rule, index) => serializeRule(rule, index)), null, 2);
   emit('save', nextConfig);
   setActionNotice('info', '配置已发送保存。若刚修改了规则，请保存完成后再点击“立即执行已保存规则”。');
@@ -550,6 +583,16 @@ return (_ctx, _cache) => {
             min: "1"
           }, null, 512), [
             [_vModelText, config.push_limit]
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field field-span-2" }, [
+          _createElementVNode("span", null, "Netflix 国家代码（最多 12 个）"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.netflix_regions) = $event),
+            type: "text",
+            placeholder: "us,jp,kr,gb,ca,au,fr,de,it,es,in,br"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.netflix_regions]
           ])
         ])
       ])
