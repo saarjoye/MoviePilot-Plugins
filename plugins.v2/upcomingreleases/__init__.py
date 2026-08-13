@@ -316,8 +316,18 @@ REGION_CODE_LABELS = {
     "KR": "韩国",
     "JP": "日本",
     "US": "美国",
-    "GB": "英国",
-}
+    "GB": "英国",
+}
+
+REGION_ENGLISH_NAME_CODES = {
+    "UNITED ARAB EMIRATES": "AE", "ARGENTINA": "AR", "AUSTRALIA": "AU", "BELGIUM": "BE",
+    "BRAZIL": "BR", "CANADA": "CA", "CHILE": "CL", "CHINA": "CN", "COLOMBIA": "CO",
+    "GERMANY": "DE", "DENMARK": "DK", "SPAIN": "ES", "FRANCE": "FR", "UNITED KINGDOM": "GB",
+    "HONG KONG": "HK", "INDIA": "IN", "ITALY": "IT", "JAPAN": "JP", "SOUTH KOREA": "KR",
+    "KOREA": "KR", "MEXICO": "MX", "NORWAY": "NO", "PHILIPPINES": "PH", "RUSSIA": "RU",
+    "SWEDEN": "SE", "THAILAND": "TH", "TURKEY": "TR", "TAIWAN": "TW", "UNITED STATES": "US",
+    "UNITED STATES OF AMERICA": "US",
+}
 
 PAGE_TYPE_LABELS = {
     "all": "全部类型",
@@ -447,7 +457,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.29"
+    plugin_version = "0.6.32"
     plugin_release_date = "2026-08-13"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -1406,10 +1416,10 @@ class UpcomingReleases(_PluginBase):
                 continue
             if not self._match_time_filter(item, filters.get("time_range") or "all"):
                 continue
-            if filters.get("region") not in {None, "", "all"} and not self._match_rule_regions(item, [filters.get("region")]):
-                continue
-            if filters.get("genre") not in {None, "", "all"} and not self._match_rule_genres(item, [filters.get("genre")]):
-                continue
+            if filters.get("region") not in {None, "", "all"} and not self._match_page_regions(item, [filters.get("region")]):
+                continue
+            if filters.get("genre") not in {None, "", "all"} and not self._match_page_genres(item, [filters.get("genre")]):
+                continue
             filtered.append(item)
         return filtered
 
@@ -1700,7 +1710,8 @@ class UpcomingReleases(_PluginBase):
     ) -> Dict[str, str]:
         codes = set(PRESET_PAGE_REGION_CODES)
         for item in self._sanitize_items(items or []):
-            codes.update(self._normalize_region_values(item.get("region_codes") or []))
+            if item.get("region_source") != "netflix_catalog":
+                codes.update(self._normalize_region_values(item.get("region_codes") or []))
             for key in (
                 item.get("media_id"),
                 self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key")),
@@ -1993,33 +2004,34 @@ class UpcomingReleases(_PluginBase):
         return "??"
 
     def _get_item_region_text(self, item: Dict[str, Any]) -> str:
-        direct_codes = item.get("region_codes") or []
-        source_labels = []
-        if direct_codes:
-            for code in direct_codes:
-                label = REGION_CODE_LABELS.get(str(code).upper(), str(code).upper())
-                if label not in source_labels:
-                    source_labels.append(label)
+        source_labels = [self._region_label(code) for code in self._normalize_source_region_codes(item.get("region_codes"))]
+        record = self._get_cached_recognition_record(item)
+        country_labels = [
+            self._region_label(code)
+            for code in self._normalize_source_region_codes((record or {}).get("country_codes"))
+        ]
 
-        record = self._get_cached_recognition(item, populate=True, require_ids=False)
-        country_labels = []
-        for code in record.get("country_codes") or []:
-            label = REGION_CODE_LABELS.get(str(code).upper(), str(code).upper())
-            if label not in country_labels:
-                country_labels.append(label)
+        if country_labels:
+            country_text = " / ".join(country_labels[:3])
+        elif record is None:
+            country_text = "待识别"
+        elif record.get("recognition_failed"):
+            country_text = "识别失败"
+        else:
+            country_text = "未提供国家信息"
         if item.get("region_source") == "netflix_catalog":
-            catalog_text = " / ".join(source_labels[:6]) if source_labels else "待识别"
-            country_text = " / ".join(country_labels[:3]) if country_labels else "待识别"
+            catalog_text = " / ".join(source_labels[:6]) if source_labels else "未提供区域信息"
             return f"Netflix区域：{catalog_text}；制作国家：{country_text}"
-        labels = country_labels or source_labels
-        return " / ".join(labels[:3]) if labels else "待识别"
+        if source_labels:
+            return " / ".join(source_labels[:3])
+        return country_text
 
     def _get_item_genre_text(self, item: Dict[str, Any]) -> str:
         direct_genres = [self._clean_text(value) for value in item.get("genre_names") or [] if self._clean_text(value)]
         if direct_genres:
             return " / ".join(direct_genres[:4])
 
-        record = self._get_cached_recognition(item, populate=True, require_ids=False)
+        record = self._get_cached_recognition(item, populate=False, require_ids=False)
         labels = []
         for genre_name in record.get("genre_names") or []:
             text_value = self._clean_text(genre_name)
@@ -2072,15 +2084,17 @@ class UpcomingReleases(_PluginBase):
         primary = copy.deepcopy(ranked_items[0])
         platform_values = []
         platform_labels = []
-        detail_links = []
-        stories = []
-        reserve_count = 0
-        for item in group_items:
+        detail_links = []
+        stories = []
+        region_codes = set()
+        reserve_count = 0
+        for item in group_items:
             platform = self._clean_text(item.get("platform"))
             platform_label = self._clean_text(item.get("platform_label"))
             detail_link = self._clean_text(item.get("detail_link"))
-            story_text = self._clean_text(item.get("story"))
-            reserve_count = max(reserve_count, safe_int(item.get("reserve_count"), 0))
+            story_text = self._clean_text(item.get("story"))
+            region_codes.update(self._normalize_source_region_codes(item.get("region_codes")))
+            reserve_count = max(reserve_count, safe_int(item.get("reserve_count"), 0))
             if platform and platform not in platform_values:
                 platform_values.append(platform)
             if platform_label and platform_label not in platform_labels:
@@ -2094,8 +2108,9 @@ class UpcomingReleases(_PluginBase):
         primary["platforms"] = platform_values
         primary["platform_labels"] = platform_labels
         primary["detail_link"] = detail_links[0] if detail_links else primary.get("detail_link")
-        primary["detail_links"] = detail_links
+        primary["detail_links"] = detail_links
         primary["reserve_count"] = reserve_count
+        primary["region_codes"] = sorted(region_codes)
         for item in group_items:
             target_season = safe_int(item.get("target_season"), 0)
             if target_season > 0:
@@ -2164,7 +2179,7 @@ class UpcomingReleases(_PluginBase):
         if len(story_text) > 140:
             story_text = f"{story_text[:140].rstrip()}..."
         time_key = item.get("time_key")
-        recognition = self._get_cached_recognition(item, populate=True, require_ids=False) or {}
+        recognition = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
         display_title = self._get_display_title(item, recognition=recognition)
         subscription_status = self._get_item_subscription_status(
             item,
@@ -2431,16 +2446,16 @@ class UpcomingReleases(_PluginBase):
     ) -> List[Dict[str, Any]]:
         filtered = []
         for item in items:
-            if platform != "all" and item.get("platform") != platform:
-                continue
-            if mtype != "all" and item.get("type_key") != mtype:
-                continue
+            if platform not in {None, "", "all"} and item.get("platform") != platform:
+                continue
+            if mtype not in {None, "", "all"} and item.get("type_key") != mtype:
+                continue
             if not self._match_time_filter(item, time_range):
                 continue
-            if region not in {None, "", "all"} and not self._match_rule_regions(item, [region]):
-                continue
-            if genre not in {None, "", "all"} and not self._match_rule_genres(item, [genre]):
-                continue
+            if region not in {None, "", "all"} and not self._match_page_regions(item, [region]):
+                continue
+            if genre not in {None, "", "all"} and not self._match_page_genres(item, [genre]):
+                continue
             filtered.append(item)
         return filtered
 
@@ -2487,10 +2502,7 @@ class UpcomingReleases(_PluginBase):
             summary = f"{summary} / {item.get('release_text')}"
         overview = item.get("story") or ""
         overview = f"{summary}\n{overview}" if overview else summary
-        # Warm recognition cache for later detail/subscribe conversion, but keep
-        # discover/recommend cards on the custom upcomingreleases: mediaid path.
-        self._get_cached_recognition(item, populate=True)
-        return MediaInfo(
+        return MediaInfo(
             source="upcomingreleases",
             type=media_type,
             title=item.get("title"),
@@ -2580,8 +2592,14 @@ class UpcomingReleases(_PluginBase):
                 self._extract_js_string_field(obj_text, "thumbnail")
                 or self._extract_js_string_field(obj_text, "imageUrl")
             )
-            desc = self._clean_text(self._extract_js_string_field(obj_text, "desc"))
-            if title and publish_text:
+            desc = self._clean_text(self._extract_js_string_field(obj_text, "desc"))
+            region_codes = self._extract_source_region_codes(
+                {
+                    key: self._extract_js_string_field(obj_text, key)
+                    for key in ("country", "countryName", "country_name", "area", "region")
+                }
+            )
+            if title and publish_text:
                 release_date, parsed_text = self._parse_release_info(publish_text)
                 raw_id = self._search_text(page_url, r"/([^/]+)\.html") or title
                 year = self._guess_year(title, release_date, publish_text)
@@ -2603,9 +2621,10 @@ class UpcomingReleases(_PluginBase):
                         release_text=parsed_text,
                         poster=thumbnail,
                         detail_link=page_url,
-                        story=desc,
-                        year=year,
-                    )
+                        story=desc,
+                        year=year,
+                        region_codes=region_codes,
+                    )
                 )
             cursor = payload.find("{", cursor + len(obj_text))
         logger.info(f"[UpcomingReleases] iqiyi fetched {len(items)} items")
@@ -2673,9 +2692,10 @@ class UpcomingReleases(_PluginBase):
                                 release_text=parsed_text,
                                 poster=normalize_url(params.get("new_pic_vt") or params.get("new_pic_hz") or params.get("pic_url") or params.get("image_url")),
                                 detail_link=normalize_url(params.get("href") or f"https://v.qq.com/x/cover/{cid}.html"),
-                                story=self._clean_text(params.get("second_title") or params.get("sub_title") or reserve_text),
-                                reserve_count=parse_reserve_count(reserve_text),
-                            )
+                                story=self._clean_text(params.get("second_title") or params.get("sub_title") or reserve_text),
+                                reserve_count=parse_reserve_count(reserve_text),
+                                region_codes=self._extract_source_region_codes([params, entry]),
+                            )
                         )
         logger.info(f"[UpcomingReleases] 腾讯视频待播抓取完成，共 {len(items)} 条")
         return items
@@ -2737,9 +2757,10 @@ class UpcomingReleases(_PluginBase):
                             poster=poster,
                             detail_link=detail_link,
                             story=desc,
-                            year=self._guess_year(title, release_date, subtitle or desc),
-                            reserve_count=parse_reserve_count(str(reserve.get("count") or reserve.get("desc") or "")),
-                        )
+                            year=self._guess_year(title, release_date, subtitle or desc),
+                            reserve_count=parse_reserve_count(str(reserve.get("count") or reserve.get("desc") or "")),
+                            region_codes=self._extract_source_region_codes([entry, reserve]),
+                        )
                     )
         logger.info(f"[UpcomingReleases] 优酷抓取到 {len(items)} 条")
         return items
@@ -2791,9 +2812,10 @@ class UpcomingReleases(_PluginBase):
                     release_text=parsed_text,
                     poster=poster,
                     detail_link=detail_link,
-                    story=story,
-                    year=year,
-                )
+                    story=story,
+                    year=year,
+                    region_codes=self._extract_source_region_codes(entry),
+                )
             )
         logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
         return items
@@ -2945,10 +2967,11 @@ class UpcomingReleases(_PluginBase):
         release_text: Optional[str],
         poster: str,
         detail_link: str = "",
-        story: str = "",
-        year: Optional[str] = None,
-        reserve_count: int = 0,
-    ) -> Dict[str, Any]:
+        story: str = "",
+        year: Optional[str] = None,
+        reserve_count: int = 0,
+        region_codes: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         if type_key not in TYPE_LABELS:
             type_key = "tv"
         if not year:
@@ -2972,8 +2995,9 @@ class UpcomingReleases(_PluginBase):
             "poster": poster,
             "detail_link": detail_link,
             "story": self._clean_text(story),
-            "reserve_count": safe_int(reserve_count, 0),
+            "reserve_count": safe_int(reserve_count, 0),
             "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text or ""),
+            "region_codes": self._normalize_source_region_codes(region_codes),
             "target_season": target_season,
             "season_source": season_source,
         }
@@ -3054,9 +3078,9 @@ class UpcomingReleases(_PluginBase):
         record = {
             "recognition_failed": False,
             "type_key": resolved_type_key,
-            "tmdb_id": media.tmdb_id,
-            "douban_id": media.douban_id,
-            "bangumi_id": media.bangumi_id,
+            "tmdb_id": getattr(media, "tmdb_id", None),
+            "douban_id": getattr(media, "douban_id", None),
+            "bangumi_id": getattr(media, "bangumi_id", None),
             "season": source_season,
             "source_season": source_season,
             "target_season": target_season,
@@ -3067,8 +3091,12 @@ class UpcomingReleases(_PluginBase):
             "country_codes": country_codes,
             "country_names": [self._region_label(code) for code in country_codes],
             "genre_names": sorted(self._extract_genre_names(media, item)),
-            "updated": int(time.time()),
-        }
+            "updated": int(time.time()),
+        }
+        if country_codes and item.get("region_source") != "netflix_catalog":
+            item["region_codes"] = sorted(
+                self._normalize_source_region_codes([item.get("region_codes"), country_codes])
+            )
         keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), resolved_type_key)]
         changed = False
         for key in keys:
@@ -3287,11 +3315,43 @@ class UpcomingReleases(_PluginBase):
         item_type = item.get("type_key")
         return any(item_type in AUTO_SUBSCRIBE_TYPE_GROUPS.get(type_name, {type_name}) for type_name in normalized_types)
 
+    def _get_local_item_region_codes(self, item: Dict[str, Any]) -> set:
+        actual = set()
+        if item.get("region_source") != "netflix_catalog":
+            actual.update(self._normalize_region_values(item.get("region_codes") or []))
+        record = self._get_cached_recognition_record(item)
+        if isinstance(record, dict):
+            actual.update(self._normalize_region_values(record.get("country_codes") or []))
+        return actual
+
+    def _match_page_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
+        expected = self._normalize_region_values(regions)
+        if not expected:
+            return True
+        return bool(self._get_local_item_region_codes(item) & expected)
+
+    def _match_page_genres(self, item: Dict[str, Any], genres: List[Any]) -> bool:
+        expected = self._normalize_genre_values(genres)
+        if not expected:
+            return True
+        actual = set(self._normalize_genre_values(item.get("genre_names") or []))
+        record = self._get_cached_recognition_record(item)
+        if isinstance(record, dict):
+            actual.update(self._normalize_genre_values(record.get("genre_names") or []))
+        actual.update(
+            self._extract_text_genre_names(
+                " ".join(filter(None, [item.get("title"), item.get("story"), item.get("release_text")]))
+            )
+        )
+        return bool(actual & expected)
+
     def _match_rule_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
         expected = self._normalize_region_values(regions)
         if not expected:
             return True
-        actual = self._normalize_region_values(item.get("region_codes") or [])
+        actual = set()
+        if item.get("region_source") != "netflix_catalog":
+            actual.update(self._normalize_region_values(item.get("region_codes") or []))
         failed_cached = False
         cache_keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))]
         for key in cache_keys:
@@ -3338,53 +3398,41 @@ class UpcomingReleases(_PluginBase):
         actual.update(self._extract_genre_names(media, item))
         return bool(actual & expected)
 
-    def _extract_region_codes(self, media: MediaInfo) -> set:
-        codes = set()
-        for code in media.origin_country or []:
-            if isinstance(code, str) and code.strip():
-                codes.update(self._normalize_region_values([code]))
-        for country in media.production_countries or []:
-            if isinstance(country, dict):
-                code = country.get("iso_3166_1") or country.get("iso")
-                if code:
-                    codes.update(self._normalize_region_values([code]))
-                    continue
-                name = country.get("name") or country.get("id")
-                if name:
-                    codes.update(self._normalize_region_values([name]))
-        for country in media.production_countries or []:
-            if isinstance(country, str) and country.strip():
-                codes.update(self._normalize_region_values([country]))
-        payload = {}
-        model_dump = getattr(media, "model_dump", None)
-        if callable(model_dump):
-            try:
-                payload = model_dump() or {}
-            except Exception:
-                payload = {}
-        if not payload:
-            legacy_dict = getattr(media, "dict", None)
-            if callable(legacy_dict):
-                try:
-                    payload = legacy_dict() or {}
-                except Exception:
-                    payload = {}
-        if isinstance(payload, dict):
-            for key in ("origin_country", "origin_countries", "country_codes"):
-                values = payload.get(key) or []
-                if isinstance(values, str):
-                    values = [values]
-                codes.update(self._normalize_region_values(values))
-            for country in payload.get("production_countries") or []:
-                if isinstance(country, dict):
-                    code = country.get("iso_3166_1") or country.get("iso") or country.get("code")
-                    if code:
-                        codes.update(self._normalize_region_values([code]))
+    def _extract_region_codes(self, media: MediaInfo) -> set:
+        if not media:
+            return set()
 
-        language = str(getattr(media, "original_language", "") or "").strip().lower()
+        payload: Dict[str, Any] = {}
+        for serializer_name in ("model_dump", "dict"):
+            serializer = getattr(media, serializer_name, None)
+            if not callable(serializer):
+                continue
+            try:
+                serialized = serializer() or {}
+            except Exception:
+                continue
+            if isinstance(serialized, dict):
+                payload = serialized
+                break
+
+        media_type = self._clean_text(getattr(media, "type", None) or payload.get("type"))
+        is_movie = media_type == MediaType.MOVIE.value or media_type.lower() == "movie"
+        field_order = (
+            ("production_countries", "origin_country", "origin_countries", "country_codes")
+            if is_movie
+            else ("origin_country", "origin_countries", "production_countries", "country_codes")
+        )
+        codes = set()
+        for field in field_order:
+            codes.update(self._normalize_source_region_codes(getattr(media, field, None)))
+            codes.update(self._normalize_source_region_codes(payload.get(field)))
+
+        language = self._clean_text(
+            getattr(media, "original_language", None) or payload.get("original_language")
+        ).lower()
         if not codes and language in LANGUAGE_REGION_MAP:
-            codes.add(LANGUAGE_REGION_MAP[language])
-        return {code.upper() for code in codes if re.fullmatch(r"[A-Za-z]{2}", code)}
+            codes.add(LANGUAGE_REGION_MAP[language])
+        return codes
 
     def _extract_genre_names(self, media: MediaInfo, item: Optional[Dict[str, Any]] = None) -> set:
         values = set()
@@ -3494,7 +3542,7 @@ class UpcomingReleases(_PluginBase):
             "updated": int(time.time()),
         }
 
-    def _store_recognition_record(self, item: Dict[str, Any], record: Dict[str, Any]):
+    def _store_recognition_record(self, item: Dict[str, Any], record: Dict[str, Any]):
         keys = [
             item.get("media_id"),
             self._make_lookup_key(item.get("title"), item.get("year"), record.get("type_key") or item.get("type_key")),
@@ -3506,9 +3554,78 @@ class UpcomingReleases(_PluginBase):
             if self._recognize_cache.get(key) != record:
                 self._recognize_cache[key] = record
                 changed = True
-        if changed:
-            self._recognize_dirty = True
-
+        if changed:
+            self._recognize_dirty = True
+
+    def _normalize_source_region_codes(self, value: Any) -> List[str]:
+        codes = set()
+
+        def visit(current: Any):
+            if current is None:
+                return
+            if isinstance(current, dict):
+                for key in ("iso_3166_1", "iso", "code", "name"):
+                    if key in current:
+                        visit(current.get(key))
+                for key in ("country", "countryName", "country_name", "area", "region"):
+                    if key in current:
+                        visit(current.get(key))
+                return
+            if isinstance(current, (list, tuple, set)):
+                for entry in current:
+                    visit(entry)
+                return
+
+            for serializer_name in ("model_dump", "dict"):
+                serializer = getattr(current, serializer_name, None)
+                if not callable(serializer):
+                    continue
+                try:
+                    serialized = serializer() or {}
+                except Exception:
+                    continue
+                if isinstance(serialized, dict):
+                    visit(serialized)
+                    return
+            object_fields = {
+                key: getattr(current, key, None)
+                for key in ("iso_3166_1", "iso", "code", "name")
+                if getattr(current, key, None) is not None
+            }
+            if object_fields:
+                visit(object_fields)
+                return
+
+            text_value = self._clean_text(current)
+            if not text_value:
+                return
+            for part in re.split(r"[,，、/|;；]+", text_value):
+                candidate = self._clean_text(part)
+                if not candidate:
+                    continue
+                upper_candidate = candidate.upper()
+                if upper_candidate in ISO_3166_ALPHA2_CODES:
+                    codes.add(upper_candidate)
+                    continue
+                alias_codes = REGION_ALIAS_MAP.get(candidate) or REGION_ALIAS_MAP.get(upper_candidate)
+                if alias_codes:
+                    codes.update(code for code in alias_codes if code in ISO_3166_ALPHA2_CODES)
+                    continue
+                label_code = next(
+                    (code for code, label in REGION_CODE_LABELS.items() if self._clean_text(label) == candidate),
+                    None,
+                )
+                english_code = REGION_ENGLISH_NAME_CODES.get(upper_candidate)
+                resolved = label_code or english_code
+                if resolved:
+                    codes.add(resolved)
+
+        visit(value)
+        return sorted(codes)
+
+    def _extract_source_region_codes(self, payload: Any) -> List[str]:
+        return self._normalize_source_region_codes(payload)
+
     def _normalize_region_values(self, regions: List[Any]) -> set:
         values = set()
         for region in regions:
