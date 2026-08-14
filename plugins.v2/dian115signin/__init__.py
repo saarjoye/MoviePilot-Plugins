@@ -1,6 +1,11 @@
 from calendar import monthrange
+import base64
 from datetime import datetime, timedelta
+import hashlib
 from http.cookies import SimpleCookie
+from pathlib import Path
+import re
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -25,7 +30,7 @@ class Dian115Signin(_PluginBase):
     # 插件图标 (已转为raw直链以供页面渲染)
     plugin_icon = "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/Dian115Signin.svg"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.8"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -55,8 +60,18 @@ class Dian115Signin(_PluginBase):
     _user_agent: str = ""
     _visitor_id: str = ""
     _signin_mode: str = "normal"
-    _browser_proof: str = ""
-    _browser_proof_expires_at: float = 0
+    _browser_proof_cache: Dict[str, Dict[str, Any]] = {}
+    _browser_private_key: Optional[int] = None
+    _browser_public_jwk: Optional[Dict[str, str]] = None
+
+    _p256_p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+    _p256_a = _p256_p - 3
+    _p256_b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+    _p256_g = (
+        0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+        0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5,
+    )
+    _p256_n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
     _signin_mode_options: Dict[str, str] = {
         "normal": "普通签到",
@@ -83,6 +98,9 @@ class Dian115Signin(_PluginBase):
 
     def __init__(self):
         super().__init__()
+        self._browser_proof_cache = {}
+        self._browser_private_key = None
+        self._browser_public_jwk = None
 
     @staticmethod
     def _to_bool(val: Any) -> bool:
@@ -218,13 +236,30 @@ class Dian115Signin(_PluginBase):
     def _get_portal_token_value(self) -> str:
         return self._normalize_portal_token(self._portal_token)
 
-    def _build_cookie_header(self) -> str:
+    def _build_cookie_header(self, session: Optional[requests.Session] = None) -> str:
+        cookie_pairs: Dict[str, str] = {}
+        if session is not None:
+            try:
+                cookie_pairs.update({str(key): str(value) for key, value in session.cookies.get_dict().items()})
+            except Exception:
+                pass
+
         cookie_text = self._normalize_cookie_input(self._portal_token)
         if not cookie_text:
-            return ""
-        if "portal_token=" in cookie_text:
-            return cookie_text
-        return f"portal_token={cookie_text}"
+            return "; ".join(f"{name}={value}" for name, value in cookie_pairs.items() if value)
+
+        if "portal_token=" not in cookie_text:
+            cookie_text = f"portal_token={cookie_text}"
+        try:
+            configured_cookie = SimpleCookie()
+            configured_cookie.load(cookie_text)
+            cookie_pairs.update({key: morsel.value for key, morsel in configured_cookie.items() if morsel.value})
+        except Exception:
+            for part in cookie_text.split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name and value:
+                    cookie_pairs[name.strip()] = value.strip()
+        return "; ".join(f"{name}={value}" for name, value in cookie_pairs.items() if value)
 
     def _ensure_visitor_id(self) -> str:
         visitor_id = (self._visitor_id or "").strip()
@@ -251,7 +286,8 @@ class Dian115Signin(_PluginBase):
             include_content_type: bool = False,
             current_path: str = "/me",
             browser_proof: Optional[str] = None,
-            include_cookie: bool = True
+            include_cookie: bool = True,
+            session: Optional[requests.Session] = None
     ) -> Dict[str, str]:
         headers = {
             "User-Agent": self._user_agent or self._default_user_agent,
@@ -271,28 +307,215 @@ class Dian115Signin(_PluginBase):
         if browser_proof:
             headers["X-Portal-Browser-Proof"] = browser_proof
 
-        cookie_header = self._build_cookie_header() if include_cookie and self._auth_mode == "cookie" else ""
+        cookie_header = self._build_cookie_header(session) if include_cookie and self._auth_mode == "cookie" else ""
         if cookie_header:
             headers["Cookie"] = cookie_header
         return headers
 
     @staticmethod
+    def _normalize_current_path(current_path: Any) -> str:
+        path = str(current_path or "/me").strip().replace("\r", "").replace("\n", "") or "/me"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return path[:160]
+
+    @staticmethod
+    def _base64url_encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    @classmethod
+    def _p256_add(
+            cls,
+            left: Optional[Tuple[int, int]],
+            right: Optional[Tuple[int, int]]
+    ) -> Optional[Tuple[int, int]]:
+        if left is None:
+            return right
+        if right is None:
+            return left
+
+        x1, y1 = left
+        x2, y2 = right
+        if x1 == x2 and (y1 + y2) % cls._p256_p == 0:
+            return None
+        if left == right:
+            slope = (3 * x1 * x1 + cls._p256_a) * pow(2 * y1, -1, cls._p256_p)
+        else:
+            slope = (y2 - y1) * pow(x2 - x1, -1, cls._p256_p)
+        slope %= cls._p256_p
+        x3 = (slope * slope - x1 - x2) % cls._p256_p
+        y3 = (slope * (x1 - x3) - y1) % cls._p256_p
+        return x3, y3
+
+    @classmethod
+    def _p256_multiply(cls, scalar: int) -> Optional[Tuple[int, int]]:
+        scalar %= cls._p256_n
+        result = None
+        addend: Optional[Tuple[int, int]] = cls._p256_g
+        while scalar:
+            if scalar & 1:
+                result = cls._p256_add(result, addend)
+            addend = cls._p256_add(addend, addend)
+            scalar >>= 1
+        return result
+
+    @classmethod
+    def _public_jwk_for_private_key(cls, private_key: int) -> Dict[str, str]:
+        public_point = cls._p256_multiply(private_key)
+        if public_point is None:
+            raise ValueError("无法生成浏览器请求签名公钥")
+        x, y = public_point
+        return {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": cls._base64url_encode(x.to_bytes(32, "big")),
+            "y": cls._base64url_encode(y.to_bytes(32, "big")),
+        }
+
+    def _ensure_browser_signing_key(self) -> Tuple[int, Dict[str, str]]:
+        if self._browser_private_key and self._browser_public_jwk:
+            return self._browser_private_key, dict(self._browser_public_jwk)
+        private_key = secrets.randbelow(self._p256_n - 1) + 1
+        public_jwk = self._public_jwk_for_private_key(private_key)
+        self._browser_private_key = private_key
+        self._browser_public_jwk = public_jwk
+        return private_key, dict(public_jwk)
+
+    @classmethod
+    def _sign_p256_sha256(cls, private_key: int, message: bytes) -> bytes:
+        digest = int.from_bytes(hashlib.sha256(message).digest(), "big")
+        while True:
+            ephemeral_key = secrets.randbelow(cls._p256_n - 1) + 1
+            point = cls._p256_multiply(ephemeral_key)
+            if point is None:
+                continue
+            signature_r = point[0] % cls._p256_n
+            if not signature_r:
+                continue
+            signature_s = (
+                pow(ephemeral_key, -1, cls._p256_n)
+                * (digest + signature_r * private_key)
+            ) % cls._p256_n
+            if signature_s:
+                return signature_r.to_bytes(32, "big") + signature_s.to_bytes(32, "big")
+
+    def _browser_request_signature_headers(
+            self,
+            method: str,
+            api_path: str,
+            server_time_offset_ms: float
+    ) -> Dict[str, str]:
+        private_key, _ = self._ensure_browser_signing_key()
+        request_path = urlparse(str(api_path or "/")).path or "/"
+        timestamp = str(int(datetime.now().timestamp() * 1000 + server_time_offset_ms + 0.5))
+        nonce = self._base64url_encode(secrets.token_bytes(24))
+        canonical_request = (
+            "portal-browser-request/v1\n"
+            f"{str(method or 'GET').strip().upper()}\n"
+            f"{request_path}\n"
+            f"{timestamp}\n"
+            f"{nonce}"
+        ).encode("utf-8")
+        signature = self._base64url_encode(
+            self._sign_p256_sha256(private_key, canonical_request)
+        )
+        return {
+            "X-Portal-Browser-TS": timestamp,
+            "X-Portal-Browser-Nonce": nonce,
+            "X-Portal-Browser-Sig": signature,
+        }
+
+    @classmethod
+    def _request_stage(cls, current_path: Any) -> str:
+        path = cls._normalize_current_path(current_path)
+        return {
+            "/login": "login",
+            "/me": "me",
+            "/me/signin": "signin",
+        }.get(path, "unknown")
+
+    @staticmethod
+    def _loaded_module_path() -> str:
+        parts = Path(__file__).parts
+        return "/".join(parts[-2:]) if len(parts) >= 2 else Path(__file__).name
+
+    @staticmethod
+    def _sanitize_diagnostic_value(raw_value: Any) -> str:
+        value = str(raw_value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not value:
+            return "-"
+        normalized_value = value.lower().replace("_", " ")
+        for known_error in (
+                "browser proof required",
+                "browser proof invalid",
+                "browser request signature invalid",
+        ):
+            if known_error in normalized_value:
+                return known_error
+        if re.search(
+                r"(?i)\b(cookie|portal[_-]?token|token|password|proof|webhook|authorization|session|cf_clearance)\b",
+                value
+        ):
+            return "[REDACTED_SENSITIVE]"
+        value = re.sub(r"(?i)https?://\S+", "[REDACTED_URL]", value)
+        return value[:160]
+
+    def _log_api_response(
+            self,
+            current_path: str,
+            response: requests.Response,
+            data: Optional[Dict[str, Any]],
+            refresh_retry: bool
+    ) -> None:
+        response_data = data or {}
+        code = self._sanitize_diagnostic_value(response_data.get("code"))
+        message = self._sanitize_diagnostic_value(
+            response_data.get("message") or response_data.get("msg") or response_data.get("error")
+        )
+        logger.info(
+            f"{self.plugin_name}: API 响应 - stage={self._request_stage(current_path)}, "
+            f"current_path={current_path}, http_status={response.status_code}, "
+            f"code={code}, message={message}, refresh_retry={refresh_retry}"
+        )
+
+    def _clear_browser_proof(self, current_path: str) -> None:
+        path = self._normalize_current_path(current_path)
+        self._browser_proof_cache.pop(path, None)
+
+    @staticmethod
     def _needs_browser_proof_refresh(res_data: Optional[Dict[str, Any]]) -> bool:
-        code = str((res_data or {}).get("code") or "").lower()
-        message = str((res_data or {}).get("message") or (res_data or {}).get("msg") or (res_data or {}).get("error") or "").lower()
-        return code in {"browser_proof_required", "browser_proof_invalid"} or message == "browser proof required"
+        data = res_data or {}
+        error_text = " ".join(
+            str(data.get(field) or "").lower().replace("_", " ")
+            for field in ("code", "message", "msg", "error")
+        )
+        return any(
+            keyword in error_text
+            for keyword in (
+                "browser proof required",
+                "browser proof invalid",
+                "browser request signature invalid",
+            )
+        )
 
     @staticmethod
     def _format_http_error(response: requests.Response, res_data: Optional[Dict[str, Any]] = None) -> str:
         if res_data:
             api_message = res_data.get("message") or res_data.get("msg") or res_data.get("error")
             if api_message:
-                if str(api_message).lower() == "browser proof required":
+                api_message_text = str(api_message)
+                normalized_message = api_message_text.lower().replace("_", " ")
+                if "browser request signature invalid" in normalized_message:
                     return (
-                        "browser proof required（站点要求浏览器证明；插件已支持自动获取 proof，"
+                        f"{api_message_text}（站点拒绝当前请求路径绑定的浏览器签名；"
+                        "插件刷新当前路径 proof 后重试仍未通过）"
+                    )
+                if "browser proof required" in normalized_message or "browser proof invalid" in normalized_message:
+                    return (
+                        f"{api_message_text}（站点要求有效的浏览器证明；插件已支持按请求路径自动获取 proof，"
                         "若仍失败请重新保存有效 Cookie，并确认 User-Agent 与登录浏览器一致）"
                     )
-                return str(api_message)
+                return api_message_text
 
         if response.status_code == 403:
             return "HTTP 状态码: 403（服务器拒绝请求；账号密码模式请确认登录未触发人机验证，Cookie 兜底模式请确认 Cookie 未过期）"
@@ -304,19 +527,30 @@ class Dian115Signin(_PluginBase):
             self,
             session: requests.Session,
             proxies,
+            current_path: str = "/me",
             force_refresh: bool = False,
             include_cookie: bool = True
     ) -> Optional[str]:
+        current_path = self._normalize_current_path(current_path)
         now_ts = self._now_ts()
-        if not force_refresh and self._browser_proof and self._browser_proof_expires_at - now_ts > 30:
-            return self._browser_proof
+        if force_refresh:
+            self._clear_browser_proof(current_path)
+
+        cached_proof = self._browser_proof_cache.get(current_path) or {}
+        if (
+                cached_proof.get("proof")
+                and cached_proof.get("session_id") == id(session)
+                and self._to_int(cached_proof.get("expires_at"), 0) - now_ts > 30
+        ):
+            return str(cached_proof["proof"])
 
         url = f"{self._base_url}/api/portal/auth/browser-challenge"
         headers = self._build_request_headers(
-            referer=f"{self._base_url}/me",
+            referer=f"{self._base_url}{current_path}",
             include_content_type=True,
-            current_path="/me",
-            include_cookie=include_cookie
+            current_path=current_path,
+            include_cookie=include_cookie,
+            session=session
         )
         response = session.get(
             url,
@@ -329,23 +563,169 @@ class Dian115Signin(_PluginBase):
         except ValueError:
             data = {}
 
+        challenge_ttl = max(self._to_int(data.get("ttl"), 0), 0)
+        logger.info(
+            f"{self.plugin_name}: browser proof challenge - stage={self._request_stage(current_path)}, "
+            f"current_path={current_path}, http_status={response.status_code}, "
+            f"proof_present={bool(str(data.get('proof') or '').strip())}, "
+            f"proof_ttl={challenge_ttl}, refresh_retry={force_refresh}"
+        )
+
         if response.status_code != 200:
             raise ValueError(self._format_http_error(response, data))
 
         if data.get("enabled") is False:
-            self._browser_proof = ""
-            self._browser_proof_expires_at = 0
+            self._clear_browser_proof(current_path)
             return None
 
         proof = str(data.get("proof") or "").strip()
         if not proof:
+            self._clear_browser_proof(current_path)
             return None
 
         ttl = self._to_int(data.get("ttl", 600), 600)
         ttl = max(ttl, 60)
-        self._browser_proof = proof
-        self._browser_proof_expires_at = now_ts + ttl
+        self._browser_proof_cache[current_path] = {
+            "proof": proof,
+            "expires_at": now_ts + ttl,
+            "session_id": id(session),
+        }
         return proof
+
+    @staticmethod
+    def _get_browser_session_state(session: requests.Session) -> Dict[str, Any]:
+        state = getattr(session, "_dian115_browser_security_state", None)
+        if not isinstance(state, dict):
+            state = {
+                "enabled": None,
+                "expires_at_ms": 0.0,
+                "server_time_offset_ms": 0.0,
+            }
+            setattr(session, "_dian115_browser_security_state", state)
+        return state
+
+    def _ensure_browser_session(
+            self,
+            session: requests.Session,
+            proxies,
+            proof: Optional[str],
+            current_path: str,
+            force_refresh: bool = False,
+            include_cookie: bool = True
+    ) -> bool:
+        current_path = self._normalize_current_path(current_path)
+        state = self._get_browser_session_state(session)
+        now_ms = datetime.now().timestamp() * 1000
+        if not force_refresh:
+            if state.get("enabled") is False:
+                return False
+            if state.get("enabled") is True and float(state.get("expires_at_ms") or 0) - now_ms > 30000:
+                return True
+
+        _, public_jwk = self._ensure_browser_signing_key()
+        headers = self._build_request_headers(
+            referer=f"{self._base_url}{current_path}",
+            include_content_type=True,
+            current_path=current_path,
+            browser_proof=proof,
+            include_cookie=include_cookie,
+            session=session
+        )
+        response = session.post(
+            f"{self._base_url}/api/portal/auth/browser-session",
+            headers=headers,
+            json={"public_jwk": public_jwk},
+            proxies=proxies,
+            timeout=(self._connect_timeout, self._read_timeout)
+        )
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        ttl = max(self._to_int(data.get("ttl"), 0), 0)
+        logger.info(
+            f"{self.plugin_name}: browser signing session - stage={self._request_stage(current_path)}, "
+            f"current_path={current_path}, http_status={response.status_code}, "
+            f"signature_enabled={response.status_code == 200 and data.get('enabled') is not False}, "
+            f"session_ttl={ttl}, "
+            f"refresh_retry={force_refresh}"
+        )
+        if response.status_code != 200:
+            raise ValueError(self._format_http_error(response, data))
+        if data.get("enabled") is False:
+            state.update({"enabled": False, "expires_at_ms": 0.0, "server_time_offset_ms": 0.0})
+            return False
+
+        response_now_ms = datetime.now().timestamp() * 1000
+        server_time_ms = data.get("server_time_ms")
+        try:
+            server_time_offset_ms = float(server_time_ms) - response_now_ms
+        except (TypeError, ValueError):
+            server_time_offset_ms = 0.0
+
+        if ttl:
+            expires_at_ms = response_now_ms + max(ttl, 300) * 1000
+        else:
+            expires_at_ms = response_now_ms + 1800 * 1000
+            expires_at = str(data.get("expires_at") or "").strip()
+            if expires_at:
+                try:
+                    parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp() * 1000
+                    expires_at_ms = parsed_expiry - server_time_offset_ms
+                except ValueError:
+                    pass
+        state.update({
+            "enabled": True,
+            "expires_at_ms": expires_at_ms,
+            "server_time_offset_ms": server_time_offset_ms,
+        })
+        return True
+
+    def _build_portal_api_headers(
+            self,
+            session: requests.Session,
+            proxies,
+            method: str,
+            api_path: str,
+            referer_path: str,
+            current_path: str,
+            force_refresh: bool = False,
+            include_cookie: bool = True
+    ) -> Dict[str, str]:
+        proof = self._get_browser_proof(
+            session,
+            proxies,
+            current_path=current_path,
+            force_refresh=force_refresh,
+            include_cookie=include_cookie
+        )
+        signing_enabled = self._ensure_browser_session(
+            session,
+            proxies,
+            proof=proof,
+            current_path=current_path,
+            force_refresh=force_refresh,
+            include_cookie=include_cookie
+        )
+        headers = self._build_request_headers(
+            referer=f"{self._base_url}{referer_path}",
+            include_content_type=True,
+            current_path=current_path,
+            browser_proof=proof,
+            include_cookie=include_cookie,
+            session=session
+        )
+        if signing_enabled:
+            state = self._get_browser_session_state(session)
+            headers.update(
+                self._browser_request_signature_headers(
+                    method=method,
+                    api_path=api_path,
+                    server_time_offset_ms=float(state.get("server_time_offset_ms") or 0.0)
+                )
+            )
+        return headers
 
     def _portal_request(
             self,
@@ -356,14 +736,19 @@ class Dian115Signin(_PluginBase):
             referer_path: str,
             payload: Optional[Dict[str, Any]] = None,
             current_path: str = "/me",
-            allow_retry: bool = True
+            allow_retry: bool = True,
+            include_cookie: bool = True
     ) -> Tuple[requests.Response, Dict[str, Any]]:
-        proof = self._get_browser_proof(session, proxies, include_cookie=False)
-        headers = self._build_request_headers(
-            referer=f"{self._base_url}{referer_path}",
-            include_content_type=True,
+        current_path = self._normalize_current_path(current_path)
+        method = method.upper()
+        headers = self._build_portal_api_headers(
+            session=session,
+            proxies=proxies,
+            method=method,
+            api_path=api_path,
+            referer_path=referer_path,
             current_path=current_path,
-            browser_proof=proof
+            include_cookie=include_cookie
         )
         url = f"{self._base_url}{api_path}"
         kwargs = {
@@ -374,26 +759,33 @@ class Dian115Signin(_PluginBase):
         if payload is not None:
             kwargs["json"] = payload
 
-        response = session.request(method.upper(), url, **kwargs)
+        response = session.request(method, url, **kwargs)
         try:
             data = response.json()
         except ValueError:
             data = {}
+        self._log_api_response(current_path, response, data, refresh_retry=False)
 
         if allow_retry and self._needs_browser_proof_refresh(data):
-            proof = self._get_browser_proof(session, proxies, force_refresh=True)
-            headers = self._build_request_headers(
-                referer=f"{self._base_url}{referer_path}",
-                include_content_type=True,
+            self._clear_browser_proof(current_path)
+            logger.warning(f"{self.plugin_name}: 重新获取 browser proof - current_path={current_path}")
+            headers = self._build_portal_api_headers(
+                session=session,
+                proxies=proxies,
+                method=method,
+                api_path=api_path,
+                referer_path=referer_path,
                 current_path=current_path,
-                browser_proof=proof
+                force_refresh=True,
+                include_cookie=include_cookie
             )
             kwargs["headers"] = headers
-            response = session.request(method.upper(), url, **kwargs)
+            response = session.request(method, url, **kwargs)
             try:
                 data = response.json()
             except ValueError:
                 data = {}
+            self._log_api_response(current_path, response, data, refresh_retry=True)
 
         return response, data
 
@@ -405,58 +797,31 @@ class Dian115Signin(_PluginBase):
             "email": self._login_email.strip(),
             "password": self._login_password,
         }
-        proof = self._get_browser_proof(session, proxies)
-        headers = self._build_request_headers(
-            referer=f"{self._base_url}/login",
-            include_content_type=True,
+        response, data = self._portal_request(
+            session=session,
+            method="POST",
+            api_path="/api/portal/auth/login",
+            proxies=proxies,
+            referer_path="/login",
+            payload=payload,
             current_path="/login",
-            browser_proof=proof,
             include_cookie=False
         )
-        response = session.post(
-            f"{self._base_url}/api/portal/auth/login",
-            headers=headers,
-            json=payload,
-            proxies=proxies,
-            timeout=(self._connect_timeout, self._read_timeout)
-        )
-        try:
-            data = response.json()
-        except ValueError:
-            data = {}
-
-        if response.status_code != 200 or data.get("code") != "ok":
-            if self._needs_browser_proof_refresh(data):
-                proof = self._get_browser_proof(session, proxies, force_refresh=True)
-                headers = self._build_request_headers(
-                    referer=f"{self._base_url}/login",
-                    include_content_type=True,
-                    current_path="/login",
-                    browser_proof=proof,
-                    include_cookie=False
-                )
-                response = session.post(
-                    f"{self._base_url}/api/portal/auth/login",
-                    headers=headers,
-                    json=payload,
-                    proxies=proxies,
-                    timeout=(self._connect_timeout, self._read_timeout)
-                )
-                try:
-                    data = response.json()
-                except ValueError:
-                    data = {}
 
         if response.status_code != 200 or data.get("code") != "ok":
             code = str(data.get("code") or "").strip()
             msg = data.get("msg") or data.get("message") or data.get("error")
             if code == "turnstile_failed" or "turnstile" in str(msg or "").lower():
                 raise ValueError("账号密码登录需要人机验证，请改用 Cookie 兜底模式")
-            raise ValueError(msg or self._format_http_error(response, data))
+            raise ValueError(self._format_http_error(response, data))
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
         try:
             self.stop_service()
+            logger.info(
+                f"{self.plugin_name}: 插件加载 - version={self.plugin_version}, "
+                f"module={self._loaded_module_path()}"
+            )
 
             if self.plugin_icon and str(self.plugin_icon).startswith(("http://", "https://")):
                 parsed_icon = urlparse(str(self.plugin_icon))
@@ -482,8 +847,7 @@ class Dian115Signin(_PluginBase):
             self._user_agent = ""
             self._visitor_id = ""
             self._signin_mode = "normal"
-            self._browser_proof = ""
-            self._browser_proof_expires_at = 0
+            self._browser_proof_cache = {}
 
             if config:
                 self._enabled = self._to_bool(config.get("enabled", False))
@@ -1149,15 +1513,15 @@ class Dian115Signin(_PluginBase):
         configured = self._is_configured()
         auth_mode_name = self._auth_mode_name()
         status_text = "已启用" if self._enabled else "未启用"
-        
+
         # 从 API 缓存中读取用户信息
         username = user_info.get("nickname", "未获取 (请先成功执行一次)")
         user_id = user_info.get("id", "--")
         is_vip = user_info.get("vip", False)
-        
+
         # 获取用于生成文字头像的首个字符
         avatar_char = username[0] if username and username != "未获取 (请先成功执行一次)" else "?"
-        
+
         # 优先从 api 获取最新数据，其次取历史记录中的
         current_points = user_info.get("points", latest.get("points", "--"))
         checkin_days = user_info.get("consecutive_signin", latest.get("checkin_days", "--"))
@@ -1959,12 +2323,40 @@ class Dian115Signin(_PluginBase):
         self.save_data("history", history)
         self.save_data("latest_result", record)
 
+    @staticmethod
+    def _sanitize_notification_error(error: Exception) -> str:
+        error_text = str(error).replace("\r", " ").replace("\n", " ").strip()
+        if not error_text:
+            return "无错误详情"
+
+        if re.search(
+                r"(?i)\b(cookie|portal[_-]?token|token|password|proof|webhook|authorization|session|cf_clearance)\b",
+                error_text
+        ):
+            return "错误详情包含敏感字段，已脱敏"
+
+        error_text = re.sub(r"(?i)https?://\S+", "[REDACTED_URL]", error_text)
+        return error_text[:240]
+
     def _notify_result(self, title: str, text: str) -> None:
-        if self._notify:
+        if not self._notify:
+            logger.info(f"{self.plugin_name}: 癫影通知未提交 - notify=false")
+            return
+
+        try:
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title=title,
                 text=text,
+            )
+            logger.info(
+                f"{self.plugin_name}: 癫影通知已提交 - "
+                f"notification_type=SiteMessage, title_empty={not bool(str(title or '').strip())}"
+            )
+        except Exception as err:
+            logger.error(
+                f"{self.plugin_name}: 癫影通知提交异常 - "
+                f"exception_type={type(err).__name__}, error={self._sanitize_notification_error(err)}"
             )
 
     @staticmethod
@@ -2147,7 +2539,7 @@ class Dian115Signin(_PluginBase):
 
         if response.status_code != 200:
             raise ValueError(self._format_http_error(response, data))
-        
+
         if data.get("code") == "ok":
             return data.get("user", {})
         return {}
