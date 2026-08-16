@@ -466,7 +466,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.36"
+    plugin_version = "0.6.37"
     plugin_release_date = "2026-08-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"

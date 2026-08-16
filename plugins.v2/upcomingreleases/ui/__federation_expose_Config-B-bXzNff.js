@@ -325,7 +325,7 @@ function applyInitialConfig(value) {
 
 async function loadRegionOptions() {
   try {
-    const result = await props.api.get('plugin/UpcomingReleases/config_state', { limit: 1 });
+    const result = await props.api.get('plugin/UpcomingReleases/config_state', { params: { limit: 1 } });
     const options = result?.options?.rule_regions;
     if (Array.isArray(options) && options.length) {
       const existingValues = new Set(options.map(option => option.value));

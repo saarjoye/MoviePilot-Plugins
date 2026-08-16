@@ -80,7 +80,9 @@ function useUpcomingBrowser(api, options = {}) {
         limit,
         force_refresh: forceRefresh ? 1 : 0,
       };
-      const result = await api.get(`${PLUGIN_API_BASE}/config_state`, query);
+      const result = await api.get(`${PLUGIN_API_BASE}/config_state`, {
+        params: query,
+      });
       state.value = {
         ...createEmptyState(),
         ...(result || {}),
@@ -118,7 +120,9 @@ function useUpcomingBrowser(api, options = {}) {
     busyMediaId.value = mediaId;
     try {
       const result = await api.get(`${PLUGIN_API_BASE}/page_subscribe`, {
-        media_id: mediaId,
+        params: {
+          media_id: mediaId,
+        },
       });
       if (result?.success) {
         const messageMap = {
