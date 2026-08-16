@@ -152,13 +152,6 @@ const REGION_OPTIONS = reactive([
   { value: 'GB', label: '英国' },
 ]);
 
-const REGION_MATCH_MODE_OPTIONS = [
-  { value: 'production', label: '只匹配制作国家' },
-  { value: 'availability', label: '只匹配平台可用地区' },
-  { value: 'either', label: '制作国家或可用地区' },
-  { value: 'auto', label: '按平台自动选择' },
-];
-
 const RULE_CANONICAL_KEYS = new Set([
   'name', 'enabled', 'time_range', 'days', 'types', 'platforms', 'regions',
   'region_match_mode', 'genres', 'exclude_genres', 'include_pending',
@@ -267,11 +260,6 @@ function normalizeRegionValues(values) {
     .filter((item, index, all) => item && item !== 'all' && all.indexOf(item) === index)
 }
 
-function normalizeRegionMatchMode(value) {
-  const mode = String(value || 'production').trim().toLowerCase();
-  return REGION_MATCH_MODE_OPTIONS.some(option => option.value === mode) ? mode : 'production'
-}
-
 function createRule(raw = {}) {
   const extra = Object.fromEntries(
     Object.entries(raw).filter(([key]) => !RULE_CANONICAL_KEYS.has(key) && key !== 'id' && key !== '_extra')
@@ -285,7 +273,7 @@ function createRule(raw = {}) {
     types: normalizeOptionValues(raw.types ?? raw.type ?? raw.mtype, TYPE_OPTIONS),
     platforms: normalizeOptionValues(raw.platforms ?? raw.platform, PLATFORM_OPTIONS),
     regions: normalizeRegionValues(raw.regions ?? raw.region ?? raw.countries),
-    region_match_mode: normalizeRegionMatchMode(raw.region_match_mode),
+    region_match_mode: 'production',
     genres: normalizeOptionValues(raw.genres ?? raw.genre ?? raw.tags, GENRE_OPTIONS),
     exclude_genres: normalizeOptionValues(raw.exclude_genres ?? raw.exclude_genre, GENRE_OPTIONS),
     include_pending: Boolean(raw.include_pending),
@@ -325,7 +313,7 @@ function applyInitialConfig(value) {
 
 async function loadRegionOptions() {
   try {
-    const result = await props.api.get('plugin/UpcomingReleases/config_state', { params: { limit: 1 } });
+    const result = await props.api.get('plugin/UpcomingReleases/config_state?limit=1');
     const options = result?.options?.rule_regions;
     if (Array.isArray(options) && options.length) {
       const existingValues = new Set(options.map(option => option.value));
@@ -368,16 +356,12 @@ function buildRuleSummary(rule, index) {
   const genreLabels = getSelectedLabels(GENRE_OPTIONS, rule.genres);
   const platformLabels = getSelectedLabels(PLATFORM_OPTIONS, rule.platforms);
   const timeLabel = getOptionLabel(TIME_OPTIONS, rule.time_range) || '7天内';
-  const regionModeLabel = getOptionLabel(REGION_MATCH_MODE_OPTIONS, rule.region_match_mode);
 
   if (typeLabels.length) {
     parts.push(typeLabels.join('、'));
   }
   if (regionLabels.length) {
     parts.push(regionLabels.join('、'));
-  }
-  if (regionLabels.length && regionModeLabel) {
-    parts.push(regionModeLabel);
   }
   if (genreLabels.length) {
     parts.push(genreLabels.join('、'));
@@ -452,7 +436,7 @@ function serializeRule(rule, index) {
     types: rule.types.length ? [...rule.types] : ['all'],
     platforms: rule.platforms.length ? [...rule.platforms] : ['all'],
     regions: [...rule.regions],
-    region_match_mode: normalizeRegionMatchMode(rule.region_match_mode),
+    region_match_mode: 'production',
     genres: [...rule.genres],
     exclude_genres: [...rule.exclude_genres],
     include_pending: Boolean(rule.include_pending),
@@ -789,27 +773,6 @@ return (_ctx, _cache) => {
                         value: option.value
                       }, null, 8, _hoisted_42), [
                         [_vModelRadio, rule.time_range]
-                      ]),
-                      _createElementVNode("span", null, _toDisplayString(option.label), 1)
-                    ], 2)
-                  }), 64))
-                ])
-              ]),
-              _createElementVNode("section", _hoisted_40, [
-                _createElementVNode("div", { class: "rule-block__title" }, "地区匹配方式"),
-                _createElementVNode("div", _hoisted_41, [
-                  (_openBlock(), _createElementBlock(_Fragment, null, _renderList(REGION_MATCH_MODE_OPTIONS, (option) => {
-                    return _createElementVNode("label", {
-                      key: `region-mode-${rule.id}-${option.value}`,
-                      class: _normalizeClass(["choice-option choice-option--radio", { 'choice-option--active': rule.region_match_mode === option.value }])
-                    }, [
-                      _withDirectives(_createElementVNode("input", {
-                        "onUpdate:modelValue": $event => ((rule.region_match_mode) = $event),
-                        name: `region-mode-${rule.id}`,
-                        type: "radio",
-                        value: option.value
-                      }, null, 8, _hoisted_42), [
-                        [_vModelRadio, rule.region_match_mode]
                       ]),
                       _createElementVNode("span", null, _toDisplayString(option.label), 1)
                     ], 2)

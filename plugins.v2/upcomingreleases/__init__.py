@@ -241,7 +241,7 @@ AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
             "types": ["tv"],
             "platforms": ["netflix"],
             "regions": ["US", "KR"],
-            "region_match_mode": "availability",
+            "region_match_mode": "production",
         },
     ],
     ensure_ascii=False,
@@ -466,7 +466,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.37"
+    plugin_version = "0.6.38"
     plugin_release_date = "2026-08-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -1014,7 +1014,12 @@ class UpcomingReleases(_PluginBase):
                 "genre": genre if genre is not None else stored_filters.get("genre"),
             }
         )
-        if any(value is not None for value in supplied_filters.values()):
+        # 可用地区仍保留在缓存数据中，但页面只提供制作国家筛选。
+        filters["availability_region"] = "all"
+        if (
+            any(value is not None for value in supplied_filters.values())
+            or stored_filters.get("availability_region") not in {None, "", "all"}
+        ):
             self.save_data("page_filters", filters)
         try:
             items = (
@@ -1065,8 +1070,6 @@ class UpcomingReleases(_PluginBase):
             items, filters.get("availability_region")
         )
         rule_region_labels = dict(production_region_labels)
-        for code, label in availability_region_labels.items():
-            rule_region_labels.setdefault(code, label)
         logger.info(
             "[UpcomingReleases] dynamic region options: "
             f"production={max(0, len(production_region_labels) - 1)} "
@@ -3607,7 +3610,7 @@ class UpcomingReleases(_PluginBase):
                 "types": self._ensure_rule_list(item.get("types") or item.get("type") or item.get("mtype"), ["all"]),
                 "platforms": self._ensure_rule_list(item.get("platforms") or item.get("platform"), ["all"]),
                 "regions": self._ensure_rule_list(item.get("regions") or item.get("region") or item.get("countries")),
-                "region_match_mode": self._normalize_region_match_mode(item.get("region_match_mode")),
+                "region_match_mode": "production",
                 "genres": self._ensure_rule_list(item.get("genres") or item.get("genre") or item.get("tags")),
                 "exclude_genres": self._ensure_rule_list(item.get("exclude_genres") or item.get("exclude_genre")),
                 "include_pending": bool(item.get("include_pending", False)),
