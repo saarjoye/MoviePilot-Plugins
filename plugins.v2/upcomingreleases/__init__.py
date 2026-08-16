@@ -62,7 +62,8 @@ TYPE_LABELS = {
     "short": "短剧",
     "documentary": "纪录片",
     "kids": "少儿",
-    "humanity": "人文",
+    "humanity": "人文",
+    "other": "其它",
 }
 
 TIME_LABELS = {
@@ -114,23 +115,26 @@ TYPE_ALIAS_MAP = {
     "短剧": "short",
     "kids": "kids",
     "少儿": "kids",
-    "humanity": "humanity",
-    "人文": "humanity",
+    "humanity": "humanity",
+    "人文": "humanity",
+    "other": "other",
+    "其它": "other",
 }
 
 RECOMMEND_GROUPS = {
     "movie": {"movie"},
     "tv": {"tv", "variety", "short", "documentary", "kids", "humanity"},
     "anime": {"anime"},
-    "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity"},
+    "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity", "other"},
 }
 
 AUTO_SUBSCRIBE_TYPE_GROUPS = {
-    "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity"},
+    "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity", "other"},
     "movie": {"movie"},
     "tv": {"tv"},
     "anime": {"anime"},
-    "variety": {"variety"},
+    "variety": {"variety"},
+    "other": {"other"},
 }
 
 GENRE_ALIAS_MAP = {
@@ -213,29 +217,30 @@ NETFLIX_GENRE_NAME_MAP = {
 }
 
 
-CACHE_SCHEMA_VERSION = 14
+CACHE_SCHEMA_VERSION = 15
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
-        {
-            "name": "7天内国产电视剧",
-            "enabled": False,
-            "time_range": "7days",
-            "days": 7,
-            "types": ["tv"],
-            "regions": ["CN"],
-            "platforms": ["all"],
-        },
-        {
-            "name": "30天内韩国喜剧电影",
-            "enabled": False,
-            "time_range": "30days",
-            "days": 30,
-            "types": ["movie"],
-            "regions": ["KR"],
-            "genres": ["喜剧"],
-            "platforms": ["all"],
-        },
+        {
+            "name": "国产及华语电视剧-明日上映",
+            "enabled": True,
+            "time_range": "3days",
+            "days": 3,
+            "types": ["tv"],
+            "platforms": ["iqiyi", "tencent", "youku", "mgtv"],
+            "regions": ["CN", "华语", "HK"],
+            "region_match_mode": "production",
+        },
+        {
+            "name": "Netflix 美韩电视剧-明日上映",
+            "enabled": True,
+            "time_range": "3days",
+            "days": 3,
+            "types": ["tv"],
+            "platforms": ["netflix"],
+            "regions": ["US", "KR"],
+            "region_match_mode": "availability",
+        },
     ],
     ensure_ascii=False,
     indent=2,
@@ -336,6 +341,7 @@ PAGE_TYPE_LABELS = {
     "anime": "动漫",
     "variety": "综艺",
     "short": "短剧",
+    "other": "其它",
 }
 
 PAGE_REGION_LABELS = {
@@ -375,7 +381,8 @@ PAGE_FILTER_DEFAULTS = {
     "platform": "all",
     "mtype": "all",
     "time_range": "30days",
-    "region": "all",
+    "production_region": "all",
+    "availability_region": "all",
     "genre": "all",
 }
 
@@ -457,8 +464,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.32"
-    plugin_release_date = "2026-08-13"
+    plugin_version = "0.6.33"
+    plugin_release_date = "2026-08-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -652,7 +659,14 @@ class UpcomingReleases(_PluginBase):
                 self._build_page_filter_row("平台", "platform", PLATFORM_LABELS, filters.get("platform"), page_api_base, "primary"),
                 self._build_page_filter_row("类型", "mtype", PAGE_TYPE_LABELS, filters.get("mtype"), page_api_base, "success"),
                 self._build_page_filter_row("时间", "time_range", TIME_LABELS, filters.get("time_range"), page_api_base, "warning"),
-                self._build_page_filter_row("地区", "region", PAGE_REGION_LABELS, filters.get("region"), page_api_base, "info"),
+                self._build_page_filter_row(
+                    "制作国家", "production_region", PAGE_REGION_LABELS,
+                    filters.get("production_region"), page_api_base, "info"
+                ),
+                self._build_page_filter_row(
+                    "Netflix 可用地区", "availability_region", PAGE_REGION_LABELS,
+                    filters.get("availability_region"), page_api_base, "info"
+                ),
                 self._build_page_filter_row("题材", "genre", PAGE_GENRE_LABELS, filters.get("genre"), page_api_base, "secondary"),
                 {
                     "component": "VRow",
@@ -828,7 +842,14 @@ class UpcomingReleases(_PluginBase):
                 name="即将上映",
                 mediaid_prefix="upcomingreleases",
                 api_path=api_path,
-                filter_params={"platform": "all", "mtype": "all", "time_range": "all", "region": "all", "genre": "all"},
+                filter_params={
+                    "platform": "all",
+                    "mtype": "all",
+                    "time_range": "all",
+                    "production_region": "all",
+                    "availability_region": "all",
+                    "genre": "all",
+                },
                 filter_ui=self._build_filter_ui(),
             )
         )
@@ -865,12 +886,14 @@ class UpcomingReleases(_PluginBase):
         if media_dict:
             event_data.media_dict = media_dict
 
-    def upcoming_discover(
-        self,
+    def upcoming_discover(
+        self,
         platform: Optional[str] = None,
         mtype: Optional[str] = None,
         time_range: Optional[str] = None,
         region: Optional[str] = None,
+        production_region: Optional[str] = None,
+        availability_region: Optional[str] = None,
         genre: Optional[str] = None,
         page: int = 1,
         count: int = 30,
@@ -880,7 +903,8 @@ class UpcomingReleases(_PluginBase):
             platform=platform,
             mtype=mtype,
             time_range=time_range,
-            region=region,
+            production_region=production_region if production_region is not None else region,
+            availability_region=availability_region,
             genre=genre,
         )
         page = max(1, safe_int(page, 1))
@@ -915,6 +939,8 @@ class UpcomingReleases(_PluginBase):
         mtype: Optional[str] = None,
         time_range: Optional[str] = None,
         region: Optional[str] = None,
+        production_region: Optional[str] = None,
+        availability_region: Optional[str] = None,
         genre: Optional[str] = None,
         limit: int = 24,
         force_refresh: bool = False,
@@ -926,6 +952,8 @@ class UpcomingReleases(_PluginBase):
             "mtype": mtype,
             "time_range": time_range,
             "region": region,
+            "production_region": production_region,
+            "availability_region": availability_region,
             "genre": genre,
         }
         stored_filters = self._get_page_filters()
@@ -934,7 +962,16 @@ class UpcomingReleases(_PluginBase):
                 "platform": platform if platform is not None else stored_filters.get("platform"),
                 "mtype": mtype if mtype is not None else stored_filters.get("mtype"),
                 "time_range": time_range if time_range is not None else stored_filters.get("time_range"),
-                "region": region if region is not None else stored_filters.get("region"),
+                "production_region": (
+                    production_region
+                    if production_region is not None
+                    else (region if region is not None else stored_filters.get("production_region"))
+                ),
+                "availability_region": (
+                    availability_region
+                    if availability_region is not None
+                    else stored_filters.get("availability_region")
+                ),
                 "genre": genre if genre is not None else stored_filters.get("genre"),
             }
         )
@@ -955,9 +992,11 @@ class UpcomingReleases(_PluginBase):
             state["message"] = f"待播数据加载失败：{err}"
             return {"success": False, **state}
 
-    def _normalize_browser_filters(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        current = filters or {}
-        return {
+    def _normalize_browser_filters(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        current = filters or {}
+        if "production_region" not in current and "region" in current:
+            current = {**current, "production_region": current.get("region")}
+        return {
             field: self._normalize_page_filter_value(field, current.get(field, default))
             for field, default in PAGE_FILTER_DEFAULTS.items()
         }
@@ -976,8 +1015,20 @@ class UpcomingReleases(_PluginBase):
         merged_filtered_items = self._merge_browser_items(filtered_items)
         display_items = merged_filtered_items[:limit]
 
-        region_labels = self._build_dynamic_region_labels(items, filters.get("region"))
-        logger.info(f"[UpcomingReleases] dynamic region options: {max(0, len(region_labels) - 1)}")
+        production_region_labels = self._build_dynamic_region_labels(
+            items, filters.get("production_region")
+        )
+        availability_region_labels = self._build_dynamic_availability_region_labels(
+            items, filters.get("availability_region")
+        )
+        rule_region_labels = dict(production_region_labels)
+        for code, label in availability_region_labels.items():
+            rule_region_labels.setdefault(code, label)
+        logger.info(
+            "[UpcomingReleases] dynamic region options: "
+            f"production={max(0, len(production_region_labels) - 1)} "
+            f"availability={max(0, len(availability_region_labels) - 1)}"
+        )
         recognition_failures = sum(
             1
             for item in items
@@ -988,16 +1039,18 @@ class UpcomingReleases(_PluginBase):
         if self._cache.get("timestamp"):
             last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
         return {
-            "filters": filters,
+            "filters": {**filters, "region": filters.get("production_region", "all")},
             "options": {
                 "platforms": self._build_browser_option_items(PLATFORM_LABELS),
                 "types": self._build_browser_option_items(PAGE_TYPE_LABELS),
                 "times": self._build_browser_option_items(TIME_LABELS),
-                "regions": self._build_browser_option_items(region_labels),
+                "regions": self._build_browser_option_items(production_region_labels),
+                "production_regions": self._build_browser_option_items(production_region_labels),
+                "availability_regions": self._build_browser_option_items(availability_region_labels),
                 "genres": self._build_browser_option_items(PAGE_GENRE_LABELS),
                 "rule_types": self._build_browser_option_items(PAGE_TYPE_LABELS, include_all=False),
                 "rule_platforms": self._build_browser_option_items(PLATFORM_LABELS, include_all=False),
-                "rule_regions": self._build_browser_option_items(region_labels, include_all=False),
+                "rule_regions": self._build_browser_option_items(rule_region_labels, include_all=False),
                 "rule_genres": self._build_browser_option_items(PAGE_GENRE_LABELS, include_all=False),
             },
             "stats": {
@@ -1361,10 +1414,13 @@ class UpcomingReleases(_PluginBase):
 
     def _get_page_filters(self) -> Dict[str, str]:
         filters = copy.deepcopy(PAGE_FILTER_DEFAULTS)
-        stored = self.get_data("page_filters")
-        if isinstance(stored, dict):
-            for field in filters:
-                filters[field] = self._normalize_page_filter_value(field, stored.get(field, filters[field]))
+        stored = self.get_data("page_filters")
+        if isinstance(stored, dict):
+            for field in filters:
+                value = stored.get(field, filters[field])
+                if field == "production_region" and "production_region" not in stored:
+                    value = stored.get("region", value)
+                filters[field] = self._normalize_page_filter_value(field, value)
         return filters
 
     def _normalize_page_filter_value(self, field: str, value: Any) -> str:
@@ -1372,13 +1428,14 @@ class UpcomingReleases(_PluginBase):
             "platform": PLATFORM_LABELS,
             "mtype": PAGE_TYPE_LABELS,
             "time_range": TIME_LABELS,
-            "region": PAGE_REGION_LABELS,
+            "production_region": PAGE_REGION_LABELS,
+            "availability_region": PAGE_REGION_LABELS,
             "genre": PAGE_GENRE_LABELS,
         }
         raw_value = self._clean_text(value or "all")
         if field in {"platform", "mtype", "time_range"}:
             raw_value = raw_value.lower()
-        elif field == "region" and raw_value != "all":
+        elif field in {"region", "production_region", "availability_region"} and raw_value != "all":
             if raw_value == "华语":
                 return "华语"
             normalized = self._normalize_region_values([raw_value])
@@ -1391,7 +1448,9 @@ class UpcomingReleases(_PluginBase):
             raw_value = normalized[0] if normalized else "all"
         if raw_value in option_map.get(field, {}):
             return raw_value
-        if field == "region" and (raw_value == "华语" or re.fullmatch(r"[A-Z]{2}", raw_value)):
+        if field in {"region", "production_region", "availability_region"} and (
+            raw_value == "华语" or re.fullmatch(r"[A-Z]{2}", raw_value)
+        ):
             return raw_value
         return PAGE_FILTER_DEFAULTS.get(field, "all")
 
@@ -1416,7 +1475,14 @@ class UpcomingReleases(_PluginBase):
                 continue
             if not self._match_time_filter(item, filters.get("time_range") or "all"):
                 continue
-            if filters.get("region") not in {None, "", "all"} and not self._match_page_regions(item, [filters.get("region")]):
+            production_region = filters.get("production_region", filters.get("region"))
+            if production_region not in {None, "", "all"} and not self._match_page_regions(
+                item, [production_region]
+            ):
+                continue
+            if filters.get("availability_region") not in {None, "", "all"} and not self._match_page_availability_regions(
+                item, [filters.get("availability_region")]
+            ):
                 continue
             if filters.get("genre") not in {None, "", "all"} and not self._match_page_genres(item, [filters.get("genre")]):
                 continue
@@ -1710,27 +1776,52 @@ class UpcomingReleases(_PluginBase):
     ) -> Dict[str, str]:
         codes = set(PRESET_PAGE_REGION_CODES)
         for item in self._sanitize_items(items or []):
-            if item.get("region_source") != "netflix_catalog":
-                codes.update(self._normalize_region_values(item.get("region_codes") or []))
-            for key in (
-                item.get("media_id"),
-                self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key")),
-            ):
-                record = self._recognize_cache.get(key) if key else None
-                if isinstance(record, dict):
-                    codes.update(self._normalize_region_values(record.get("country_codes") or []))
+            codes.update(self._get_production_country_codes(item))
         for record in self._recognize_cache.values():
             if isinstance(record, dict):
                 codes.update(self._normalize_region_values(record.get("country_codes") or []))
-        selected_value = self._normalize_page_filter_value("region", selected or "all")
+        selected_value = self._normalize_page_filter_value("production_region", selected or "all")
         if re.fullmatch(r"[A-Z]{2}", selected_value):
             codes.add(selected_value)
         ordered_codes = [code for code in PRESET_PAGE_REGION_CODES if code in codes]
         ordered_codes.extend(sorted(codes - set(ordered_codes)))
         return {
-            "all": "全部地区",
+            "all": "全部制作国家",
             **{code: self._region_label(code) for code in ordered_codes if re.fullmatch(r"[A-Z]{2}", code)},
         }
+
+    def _build_dynamic_availability_region_labels(
+        self,
+        items: Optional[List[Dict[str, Any]]] = None,
+        selected: Optional[str] = None,
+    ) -> Dict[str, str]:
+        codes = {region.upper() for region in self._normalize_netflix_regions(self._config.get("netflix_regions"))}
+        for item in self._sanitize_items(items or []):
+            codes.update(self._get_availability_region_codes(item))
+        selected_value = self._normalize_page_filter_value("availability_region", selected or "all")
+        if re.fullmatch(r"[A-Z]{2}", selected_value):
+            codes.add(selected_value)
+        ordered_codes = [code for code in PRESET_PAGE_REGION_CODES if code in codes]
+        ordered_codes.extend(sorted(codes - set(ordered_codes)))
+        return {
+            "all": "全部可用地区",
+            **{code: self._region_label(code) for code in ordered_codes if re.fullmatch(r"[A-Z]{2}", code)},
+        }
+
+    def _get_production_country_codes(self, item: Dict[str, Any]) -> set:
+        codes = set(self._normalize_region_values(item.get("production_country_codes") or []))
+        if item.get("platform") != "netflix":
+            codes.update(self._normalize_region_values(item.get("region_codes") or []))
+        record = self._get_cached_recognition_record(item)
+        if isinstance(record, dict):
+            codes.update(self._normalize_region_values(record.get("country_codes") or []))
+        return codes
+
+    def _get_availability_region_codes(self, item: Dict[str, Any]) -> set:
+        codes = set(self._normalize_region_values(item.get("availability_regions") or []))
+        if item.get("platform") == "netflix" and not codes:
+            codes.update(self._normalize_region_values(item.get("region_codes") or []))
+        return codes
 
     def _resolve_item_subscribe_season(
         self,
@@ -2003,28 +2094,27 @@ class UpcomingReleases(_PluginBase):
             return release_text
         return "??"
 
-    def _get_item_region_text(self, item: Dict[str, Any]) -> str:
-        source_labels = [self._region_label(code) for code in self._normalize_source_region_codes(item.get("region_codes"))]
+    def _get_production_country_text(self, item: Dict[str, Any]) -> str:
+        country_labels = [self._region_label(code) for code in sorted(self._get_production_country_codes(item))]
         record = self._get_cached_recognition_record(item)
-        country_labels = [
-            self._region_label(code)
-            for code in self._normalize_source_region_codes((record or {}).get("country_codes"))
-        ]
-
         if country_labels:
-            country_text = " / ".join(country_labels[:3])
-        elif record is None:
-            country_text = "待识别"
-        elif record.get("recognition_failed"):
-            country_text = "识别失败"
-        else:
-            country_text = "未提供国家信息"
-        if item.get("region_source") == "netflix_catalog":
-            catalog_text = " / ".join(source_labels[:6]) if source_labels else "未提供区域信息"
-            return f"Netflix区域：{catalog_text}；制作国家：{country_text}"
-        if source_labels:
-            return " / ".join(source_labels[:3])
-        return country_text
+            return " / ".join(country_labels[:3])
+        if record is None:
+            return "待识别"
+        if record.get("recognition_failed"):
+            return "识别失败"
+        return "未提供国家信息"
+
+    def _get_availability_region_text(self, item: Dict[str, Any]) -> str:
+        labels = [self._region_label(code) for code in sorted(self._get_availability_region_codes(item))]
+        return " / ".join(labels[:6]) if labels else ""
+
+    def _get_item_region_text(self, item: Dict[str, Any]) -> str:
+        production_text = self._get_production_country_text(item)
+        availability_text = self._get_availability_region_text(item)
+        if availability_text:
+            return f"可用地区：{availability_text}；制作国家：{production_text}"
+        return production_text
 
     def _get_item_genre_text(self, item: Dict[str, Any]) -> str:
         direct_genres = [self._clean_text(value) for value in item.get("genre_names") or [] if self._clean_text(value)]
@@ -2087,13 +2177,20 @@ class UpcomingReleases(_PluginBase):
         detail_links = []
         stories = []
         region_codes = set()
+        production_country_codes = set()
+        availability_regions = set()
         reserve_count = 0
         for item in group_items:
             platform = self._clean_text(item.get("platform"))
             platform_label = self._clean_text(item.get("platform_label"))
             detail_link = self._clean_text(item.get("detail_link"))
             story_text = self._clean_text(item.get("story"))
-            region_codes.update(self._normalize_source_region_codes(item.get("region_codes")))
+            if item.get("platform") != "netflix":
+                region_codes.update(self._normalize_source_region_codes(item.get("region_codes")))
+            production_country_codes.update(
+                self._normalize_source_region_codes(item.get("production_country_codes"))
+            )
+            availability_regions.update(self._get_availability_region_codes(item))
             reserve_count = max(reserve_count, safe_int(item.get("reserve_count"), 0))
             if platform and platform not in platform_values:
                 platform_values.append(platform)
@@ -2111,6 +2208,10 @@ class UpcomingReleases(_PluginBase):
         primary["detail_links"] = detail_links
         primary["reserve_count"] = reserve_count
         primary["region_codes"] = sorted(region_codes)
+        primary["production_country_codes"] = sorted(production_country_codes | region_codes)
+        primary["availability_regions"] = sorted(availability_regions)
+        if availability_regions:
+            primary["availability_source"] = "netflix_catalog"
         for item in group_items:
             target_season = safe_int(item.get("target_season"), 0)
             if target_season > 0:
@@ -2206,7 +2307,12 @@ class UpcomingReleases(_PluginBase):
             "release_text": item.get("release_text"),
             "target_season": safe_int(item.get("target_season"), 0) or None,
             "season_source": item.get("season_source"),
-            "region_text": self._get_item_region_text(item),
+            "production_country_codes": sorted(self._get_production_country_codes(item)),
+            "availability_regions": sorted(self._get_availability_region_codes(item)),
+            "availability_source": item.get("availability_source"),
+            "production_country_text": self._get_production_country_text(item),
+            "availability_region_text": self._get_availability_region_text(item),
+            "region_text": self._get_item_region_text(item),
             "genre_text": self._get_item_genre_text(item),
             "story": story_text,
             "reserve_count": safe_int(item.get("reserve_count"), 0),
@@ -2215,8 +2321,10 @@ class UpcomingReleases(_PluginBase):
             "subscription_label": "已完成" if subscription_status == "history" else ("已订阅" if subscription_status == "active" else ""),
         }
 
-    def page_set_filter(self, field: str, value: str = "all") -> Dict[str, Any]:
-        if field not in PAGE_FILTER_DEFAULTS:
+    def page_set_filter(self, field: str, value: str = "all") -> Dict[str, Any]:
+        if field == "region":
+            field = "production_region"
+        if field not in PAGE_FILTER_DEFAULTS:
             self._set_page_feedback("error", "无效的筛选字段。")
             return {"success": False, "message": "invalid field"}
         filters = self._get_page_filters()
@@ -2408,7 +2516,7 @@ class UpcomingReleases(_PluginBase):
 
     def _finalize_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result = []
-        seen = set()
+        seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         today = datetime.now().date()
         for item in items:
             if not item or not item.get("title"):
@@ -2425,9 +2533,20 @@ class UpcomingReleases(_PluginBase):
                 dedup_key = ("netflix", item.get("media_id"))
             else:
                 dedup_key = (item.get("platform"), item.get("title"), item.get("release_date") or item.get("release_text"))
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
+            existing = seen.get(dedup_key)
+            if existing:
+                existing["availability_regions"] = sorted(
+                    self._get_availability_region_codes(existing) | self._get_availability_region_codes(item)
+                )
+                existing["production_country_codes"] = sorted(
+                    self._get_production_country_codes(existing) | self._get_production_country_codes(item)
+                )
+                continue
+            item["availability_regions"] = sorted(self._get_availability_region_codes(item))
+            item["production_country_codes"] = sorted(self._get_production_country_codes(item))
+            if item.get("platform") == "netflix" and item.get("availability_regions"):
+                item["availability_source"] = "netflix_catalog"
+            seen[dedup_key] = item
             item["platform_label"] = PLATFORM_LABELS.get(item.get("platform"), item.get("platform") or "")
             item["type_label"] = TYPE_LABELS.get(item.get("type_key"), "电视剧")
             item["time_key"] = self._compute_time_key(item.get("release_date"))
@@ -2440,11 +2559,14 @@ class UpcomingReleases(_PluginBase):
         items: List[Dict[str, Any]],
         platform: str = "all",
         mtype: str = "all",
-        time_range: str = "all",
-        region: str = "all",
-        genre: str = "all",
-    ) -> List[Dict[str, Any]]:
-        filtered = []
+        time_range: str = "all",
+        region: str = "all",
+        genre: str = "all",
+        production_region: Optional[str] = None,
+        availability_region: str = "all",
+    ) -> List[Dict[str, Any]]:
+        filtered = []
+        resolved_production_region = production_region if production_region is not None else region
         for item in items:
             if platform not in {None, "", "all"} and item.get("platform") != platform:
                 continue
@@ -2452,7 +2574,13 @@ class UpcomingReleases(_PluginBase):
                 continue
             if not self._match_time_filter(item, time_range):
                 continue
-            if region not in {None, "", "all"} and not self._match_page_regions(item, [region]):
+            if resolved_production_region not in {None, "", "all"} and not self._match_page_regions(
+                item, [resolved_production_region]
+            ):
+                continue
+            if availability_region not in {None, "", "all"} and not self._match_page_availability_regions(
+                item, [availability_region]
+            ):
                 continue
             if genre not in {None, "", "all"} and not self._match_page_genres(item, [genre]):
                 continue
@@ -2831,7 +2959,8 @@ class UpcomingReleases(_PluginBase):
         for region in regions:
             region_code = region.upper()
             logger.info(f"[UpcomingReleases] Netflix region {region_code} fetch started")
-            region_count = 0
+            returned_count = 0
+            overlap_count = 0
             seen_region_ids = set()
             page = 1
             total_pages = 1
@@ -2853,15 +2982,14 @@ class UpcomingReleases(_PluginBase):
                 self._netflix_fetch_succeeded = True
                 total_pages = max(page, safe_int(response.get("totalPages"), page))
                 entries = response.get("data") or []
+                returned_count += len(entries)
                 logger.info(
                     f"[UpcomingReleases] Netflix region {region_code} page {page} returned {len(entries)} items"
                 )
                 for entry in entries:
                     raw_id = str(entry.get("videoID") or entry.get("id") or "").strip()
-                    request_key = (region, raw_id)
-                    if not raw_id or request_key in seen_region_ids:
+                    if not raw_id or raw_id in seen_region_ids:
                         continue
-                    seen_region_ids.add(request_key)
                     title = self._clean_text(entry.get("title1"))
                     subtitle = self._clean_text(entry.get("title2"))
                     start_time_ms = safe_int(entry.get("startTime"), 0)
@@ -2870,13 +2998,16 @@ class UpcomingReleases(_PluginBase):
                     release_dt = datetime.utcfromtimestamp(start_time_ms / 1000).date()
                     if release_dt < today:
                         continue
+                    seen_region_ids.add(raw_id)
 
                     existing = merged_items.get(raw_id)
                     if existing:
-                        existing["region_codes"] = sorted(
-                            self._normalize_region_values((existing.get("region_codes") or []) + [region_code])
+                        existing["availability_regions"] = sorted(
+                            self._normalize_region_values(
+                                (existing.get("availability_regions") or []) + [region_code]
+                            )
                         )
-                        region_count += 1
+                        overlap_count += 1
                         continue
 
                     type_key = self._resolve_netflix_type_key(entry, title, subtitle)
@@ -2893,18 +3024,33 @@ class UpcomingReleases(_PluginBase):
                         story=story,
                         year=str(release_dt.year),
                     )
-                    item["region_codes"] = [region_code]
-                    item["region_source"] = "netflix_catalog"
+                    item.pop("region_codes", None)
+                    item["availability_regions"] = [region_code]
+                    item["availability_source"] = "netflix_catalog"
+                    item["production_country_codes"] = []
                     item["genre_names"] = self._resolve_netflix_genre_names(entry, type_key)
                     item["platforms"] = ["netflix"]
                     item["platform_labels"] = [PLATFORM_LABELS["netflix"]]
                     merged_items[raw_id] = item
-                    region_count += 1
                 page += 1
-            logger.info(f"[UpcomingReleases] Netflix region {region_code} fetched {region_count} items")
+            logger.info(
+                f"[UpcomingReleases] Netflix region {region_code} returned={returned_count} "
+                f"unique={len(seen_region_ids)} overlap={overlap_count}"
+            )
 
         items = list(merged_items.values())
-        logger.info(f"[UpcomingReleases] Netflix regions merged into {len(items)} items")
+        region_count_distribution: Dict[int, int] = {}
+        for item in items:
+            region_count = len(self._get_availability_region_codes(item))
+            region_count_distribution[region_count] = region_count_distribution.get(region_count, 0) + 1
+        distribution_text = ",".join(
+            f"{region_count}:{item_count}"
+            for region_count, item_count in sorted(region_count_distribution.items())
+        ) or "none"
+        logger.info(
+            f"[UpcomingReleases] Netflix regions merged items={len(items)} "
+            f"availability_count_distribution={distribution_text}"
+        )
         return items
 
     def _request_netflix_page(
@@ -2927,19 +3073,43 @@ class UpcomingReleases(_PluginBase):
         )
 
     def _resolve_netflix_type_key(self, entry: Dict[str, Any], title: str, subtitle: str = "") -> str:
-        genre_id = safe_int(entry.get("genre"), 0)
-        if genre_id in NETFLIX_GENRE_TYPE_MAP:
-            return NETFLIX_GENRE_TYPE_MAP[genre_id]
-
-        subtitle_lower = subtitle.lower()
-        if any(keyword in subtitle_lower for keyword in ["season", "part", "chapter", "volume", "book", "episodes"]):
-            return "tv"
+        direct_type_map = {
+            "movie": "movie", "film": "movie", "feature": "movie",
+            "tv": "tv", "series": "tv", "show": "tv", "episode": "tv",
+            "variety": "variety", "reality": "variety", "reality show": "variety",
+            "documentary": "documentary", "docuseries": "documentary",
+            "anime": "anime", "animation": "anime",
+            "kids": "kids", "children": "kids",
+            "podcast": "other", "special": "other", "other": "other",
+        }
+        for field in ("type", "contentType", "content_type", "mediaType", "media_type", "videoType", "video_type"):
+            value = self._clean_text(entry.get(field)).lower()
+            if value in direct_type_map:
+                return direct_type_map[value]
 
         collection_id = safe_int(entry.get("collection"), 0)
         if collection_id in NETFLIX_COLLECTION_TYPE_MAP:
             return NETFLIX_COLLECTION_TYPE_MAP[collection_id]
 
-        return self._keyword_type_key(" ".join(filter(None, [title, subtitle])))
+        genre_id = safe_int(entry.get("genre"), 0)
+        if genre_id in NETFLIX_GENRE_TYPE_MAP:
+            return NETFLIX_GENRE_TYPE_MAP[genre_id]
+
+        text_value = " ".join(filter(None, [title, subtitle])).lower()
+        if any(keyword in text_value for keyword in ["podcast", "special presentation", "特别节目", "播客"]):
+            return "other"
+        if any(keyword in text_value for keyword in ["season", "part", "chapter", "volume", "book", "episodes"]):
+            return "tv"
+        keyword_markers = {
+            "anime": ["动漫", "动画", "番剧", "animation", "anime"],
+            "documentary": ["纪录", "纪实", "documentary", "docuseries"],
+            "variety": ["综艺", "晚会", "脱口秀", "真人秀", "reality show"],
+            "movie": ["电影", "院线", "大片", "film", "movie"],
+        }
+        for type_key, markers in keyword_markers.items():
+            if any(marker in text_value for marker in markers):
+                return type_key
+        return "other"
 
     def _resolve_netflix_genre_names(self, entry: Dict[str, Any], type_key: str) -> List[str]:
         labels: List[str] = []
@@ -2983,7 +3153,8 @@ class UpcomingReleases(_PluginBase):
             "story": self._clean_text(story),
         }
         target_season, season_source = self._extract_item_target_season(season_item)
-        return {
+        normalized_region_codes = self._normalize_source_region_codes(region_codes)
+        return {
             "platform": platform,
             "platform_label": PLATFORM_LABELS.get(platform, platform),
             "type_key": type_key,
@@ -2997,7 +3168,8 @@ class UpcomingReleases(_PluginBase):
             "story": self._clean_text(story),
             "reserve_count": safe_int(reserve_count, 0),
             "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text or ""),
-            "region_codes": self._normalize_source_region_codes(region_codes),
+            "region_codes": normalized_region_codes,
+            "production_country_codes": normalized_region_codes if platform != "netflix" else [],
             "target_season": target_season,
             "season_source": season_source,
         }
@@ -3093,10 +3265,16 @@ class UpcomingReleases(_PluginBase):
             "genre_names": sorted(self._extract_genre_names(media, item)),
             "updated": int(time.time()),
         }
-        if country_codes and item.get("region_source") != "netflix_catalog":
-            item["region_codes"] = sorted(
-                self._normalize_source_region_codes([item.get("region_codes"), country_codes])
+        if country_codes:
+            item["production_country_codes"] = sorted(
+                self._normalize_source_region_codes(
+                    [item.get("production_country_codes"), country_codes]
+                )
             )
+            if item.get("platform") != "netflix":
+                item["region_codes"] = sorted(
+                    self._normalize_source_region_codes([item.get("region_codes"), country_codes])
+                )
         keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), resolved_type_key)]
         changed = False
         for key in keys:
@@ -3108,36 +3286,79 @@ class UpcomingReleases(_PluginBase):
         if changed:
             self._recognize_dirty = True
 
-    def _run_auto_subscribe(self, items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
-        rules = self._load_auto_subscribe_rules()
-        summary = {"added": [], "existing": [], "failed": []}
+    def _get_subscription_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        record = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
+        if record and not record.get("recognition_failed"):
+            return record
+        media = self._recognize_item(item)
+        if media:
+            self._cache_recognition(item, media, self._media_to_type_key(media))
+            return self._get_cached_recognition(item, populate=False, require_ids=False) or {}
+        fallback = self._build_text_fallback_recognition(item)
+        self._store_recognition_record(item, fallback)
+        return fallback
+
+    def _run_auto_subscribe(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        rules = self._load_auto_subscribe_rules()
+        summary = {"added": [], "existing": [], "failed": [], "diagnostics": []}
         if not rules:
             return summary
         subscribe_chain = SubscribeChain()
-        default_username = self._get_default_subscribe_username()
-        processed = set()
-        for rule in rules:
-            matched_items = [item for item in items if self._rule_matches_item(item, rule)]
-            logger.info(f"[UpcomingReleases] auto-subscribe rule {rule.get('name')} matched {len(matched_items)} items")
-            for item in matched_items:
+        default_username = self._get_default_subscribe_username()
+        processed = set()
+        for rule in rules:
+            counters = {
+                "platform_filtered": 0,
+                "type_filtered": 0,
+                "time_filtered": 0,
+                "production_region_filtered": 0,
+                "availability_region_filtered": 0,
+                "genre_filtered": 0,
+                "keyword_filtered": 0,
+                "recognition_failed": 0,
+                "matched": 0,
+                "added": 0,
+                "existing": 0,
+                "failed": 0,
+            }
+            matched_items = []
+            for item in items:
+                matched, reason = self._evaluate_rule_item(item, rule)
+                if matched:
+                    counters["matched"] += 1
+                    matched_items.append(item)
+                elif reason in counters:
+                    counters[reason] += 1
+            logger.info(f"[UpcomingReleases] auto-subscribe rule {rule.get('name')} matched {len(matched_items)} items")
+            for item in matched_items:
                 process_key = self._make_browser_group_key(item)
                 if process_key in processed:
                     continue
-                processed.add(process_key)
-                try:
-                    recognition = self._get_cached_recognition(item, populate=True, require_ids=False) or {}
-                    detail = f"[{rule.get('name')}] {item.get('title')} ({item.get('release_text')})"
-                    subscription_status = self._get_item_subscription_status(
+                processed.add(process_key)
+                try:
+                    recognition = self._get_subscription_recognition(item)
+                    detail = f"[{rule.get('name')}] {item.get('title')} ({item.get('release_text')})"
+                    if recognition.get("recognition_failed"):
+                        counters["recognition_failed"] += 1
+                        counters["failed"] += 1
+                        summary["failed"].append(f"{detail} - 订阅创建识别失败")
+                        logger.warning(
+                            f"[UpcomingReleases] rule={rule.get('name')} subscription creation recognition failed"
+                        )
+                        continue
+                    subscription_status = self._get_item_subscription_status(
                         item,
                         username=default_username,
                         recognition=recognition,
                     )
-                    if subscription_status == "active":
-                        summary["existing"].append(detail)
-                        continue
-                    if subscription_status == "history":
-                        summary["existing"].append(f"{detail} [已在订阅历史]")
-                        continue
+                    if subscription_status == "active":
+                        summary["existing"].append(detail)
+                        counters["existing"] += 1
+                        continue
+                    if subscription_status == "history":
+                        summary["existing"].append(f"{detail} [已在订阅历史]")
+                        counters["existing"] += 1
+                        continue
 
                     resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
                     resolved_season = self._resolve_item_subscribe_season(item, recognition)
@@ -3165,6 +3386,7 @@ class UpcomingReleases(_PluginBase):
                         result_detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, sid=sid, target_season=resolved_season, actual_season=actual_season)}"
                         if verified:
                             summary["added"].append(result_detail)
+                            counters["added"] += 1
                         else:
                             logger.error(
                                 "[UpcomingReleases] auto subscribe season verify failed: "
@@ -3172,16 +3394,27 @@ class UpcomingReleases(_PluginBase):
                                 f"target_season={resolved_season} actual_season={actual_season} reason={verify_message}"
                             )
                             summary["failed"].append(f"{result_detail} - {verify_message}")
-                    elif self._is_exists_message(message):
-                        if self._claim_subscribe_owner(item=item, username=default_username):
-                            summary["added"].append(f"{detail} [已补全归属]")
-                        else:
-                            summary["existing"].append(detail)
-                    else:
-                        summary["failed"].append(f"{detail} - {message or '未知原因'}")
-                except Exception as err:
-                    logger.error(f"[UpcomingReleases] auto subscribe error: {item.get('title')} - {err}")
-                    summary["failed"].append(f"[{rule.get('name')}] {item.get('title')} - {err}")
+                            counters["failed"] += 1
+                    elif self._is_exists_message(message):
+                        if self._claim_subscribe_owner(item=item, username=default_username):
+                            summary["added"].append(f"{detail} [已补全归属]")
+                            counters["added"] += 1
+                        else:
+                            summary["existing"].append(detail)
+                            counters["existing"] += 1
+                    else:
+                        summary["failed"].append(f"{detail} - {message or '未知原因'}")
+                        counters["failed"] += 1
+                except Exception as err:
+                    logger.error(f"[UpcomingReleases] auto subscribe error: {item.get('title')} - {err}")
+                    summary["failed"].append(f"[{rule.get('name')}] {item.get('title')} - {err}")
+                    counters["failed"] += 1
+            diagnostic = {"rule": rule.get("name"), **counters}
+            summary["diagnostics"].append(diagnostic)
+            logger.info(
+                f"[UpcomingReleases] rule={rule.get('name')} "
+                + " ".join(f"{key}={value}" for key, value in counters.items())
+            )
         logger.info(f"[UpcomingReleases] auto subscribe finished: added {len(summary['added'])}, existing {len(summary['existing'])}, failed {len(summary['failed'])}")
         return summary
 
@@ -3252,9 +3485,10 @@ class UpcomingReleases(_PluginBase):
                 "time_range": self._infer_rule_time_range(item),
                 "days": max(1, safe_int(item.get("days") or item.get("window_days"), 7)),
                 "types": self._ensure_rule_list(item.get("types") or item.get("type") or item.get("mtype"), ["all"]),
-                "platforms": self._ensure_rule_list(item.get("platforms") or item.get("platform"), ["all"]),
-                "regions": self._ensure_rule_list(item.get("regions") or item.get("region") or item.get("countries")),
-                "genres": self._ensure_rule_list(item.get("genres") or item.get("genre") or item.get("tags")),
+                "platforms": self._ensure_rule_list(item.get("platforms") or item.get("platform"), ["all"]),
+                "regions": self._ensure_rule_list(item.get("regions") or item.get("region") or item.get("countries")),
+                "region_match_mode": self._normalize_region_match_mode(item.get("region_match_mode")),
+                "genres": self._ensure_rule_list(item.get("genres") or item.get("genre") or item.get("tags")),
                 "exclude_genres": self._ensure_rule_list(item.get("exclude_genres") or item.get("exclude_genre")),
                 "include_pending": bool(item.get("include_pending", False)),
                 "keyword": self._clean_text(item.get("keyword") or ""),
@@ -3264,49 +3498,59 @@ class UpcomingReleases(_PluginBase):
                 rules.append(rule)
         return rules
 
-    def _rule_matches_item(self, item: Dict[str, Any], rule: Dict[str, Any]) -> bool:
-        platforms = self._normalize_platform_values(rule.get("platforms") or ["all"])
-        if platforms and "all" not in platforms and item.get("platform") not in platforms:
-            return False
-
-        if not self._match_rule_types(item, rule.get("types") or ["all"]):
-            return False
-
-        if rule.get("keyword") and rule.get("keyword") not in item.get("title", "") and rule.get("keyword") not in item.get("story", ""):
-            return False
-        if rule.get("exclude_keyword") and (rule.get("exclude_keyword") in item.get("title", "") or rule.get("exclude_keyword") in item.get("story", "")):
-            return False
+    def _rule_matches_item(self, item: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+        matched, _ = self._evaluate_rule_item(item, rule)
+        return matched
+
+    def _evaluate_rule_item(self, item: Dict[str, Any], rule: Dict[str, Any]) -> Tuple[bool, str]:
+        platforms = self._normalize_platform_values(rule.get("platforms") or ["all"])
+        if platforms and "all" not in platforms and item.get("platform") not in platforms:
+            return False, "platform_filtered"
+
+        if not self._match_rule_types(item, rule.get("types") or ["all"]):
+            return False, "type_filtered"
+
+        if rule.get("keyword") and rule.get("keyword") not in item.get("title", "") and rule.get("keyword") not in item.get("story", ""):
+            return False, "keyword_filtered"
+        if rule.get("exclude_keyword") and (rule.get("exclude_keyword") in item.get("title", "") or rule.get("exclude_keyword") in item.get("story", "")):
+            return False, "keyword_filtered"
 
         time_range = self._normalize_rule_time_range(rule.get("time_range"))
         if time_range:
             if item.get("release_date"):
-                if not self._match_time_filter(item, time_range):
-                    return False
-            elif time_range != "pending" and not rule.get("include_pending"):
-                return False
+                if not self._match_time_filter(item, time_range):
+                    return False, "time_filtered"
+            elif time_range != "pending" and not rule.get("include_pending"):
+                return False, "time_filtered"
         else:
             if item.get("release_date"):
                 try:
                     delta = (datetime.strptime(item.get("release_date"), "%Y-%m-%d").date() - datetime.now().date()).days
-                except ValueError:
-                    return False
-                if delta < 0 or delta > max(1, safe_int(rule.get("days"), 7)):
-                    return False
-            elif not rule.get("include_pending"):
-                return False
-
-        regions = rule.get("regions") or []
-        if regions and not self._match_rule_regions(item, regions):
-            return False
-
-        genres = rule.get("genres") or []
-        if genres and not self._match_rule_genres(item, genres):
-            return False
-
-        exclude_genres = rule.get("exclude_genres") or []
-        if exclude_genres and self._match_rule_genres(item, exclude_genres):
-            return False
-        return True
+                except ValueError:
+                    return False, "time_filtered"
+                if delta < 0 or delta > max(1, safe_int(rule.get("days"), 7)):
+                    return False, "time_filtered"
+            elif not rule.get("include_pending"):
+                return False, "time_filtered"
+
+        regions = rule.get("regions") or []
+        if regions:
+            matched, reason = self._match_rule_regions_with_reason(
+                item,
+                regions,
+                rule.get("region_match_mode"),
+            )
+            if not matched:
+                return False, reason
+
+        genres = rule.get("genres") or []
+        if genres and not self._match_rule_genres(item, genres):
+            return False, "genre_filtered"
+
+        exclude_genres = rule.get("exclude_genres") or []
+        if exclude_genres and self._match_rule_genres(item, exclude_genres):
+            return False, "genre_filtered"
+        return True, "matched"
 
     def _match_rule_types(self, item: Dict[str, Any], types: List[Any]) -> bool:
         normalized_types = self._normalize_rule_types(types)
@@ -3316,19 +3560,19 @@ class UpcomingReleases(_PluginBase):
         return any(item_type in AUTO_SUBSCRIBE_TYPE_GROUPS.get(type_name, {type_name}) for type_name in normalized_types)
 
     def _get_local_item_region_codes(self, item: Dict[str, Any]) -> set:
-        actual = set()
-        if item.get("region_source") != "netflix_catalog":
-            actual.update(self._normalize_region_values(item.get("region_codes") or []))
-        record = self._get_cached_recognition_record(item)
-        if isinstance(record, dict):
-            actual.update(self._normalize_region_values(record.get("country_codes") or []))
-        return actual
+        return self._get_production_country_codes(item)
 
     def _match_page_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
         expected = self._normalize_region_values(regions)
         if not expected:
             return True
         return bool(self._get_local_item_region_codes(item) & expected)
+
+    def _match_page_availability_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
+        expected = self._normalize_region_values(regions)
+        if not expected:
+            return True
+        return bool(self._get_availability_region_codes(item) & expected)
 
     def _match_page_genres(self, item: Dict[str, Any], genres: List[Any]) -> bool:
         expected = self._normalize_genre_values(genres)
@@ -3345,32 +3589,60 @@ class UpcomingReleases(_PluginBase):
         )
         return bool(actual & expected)
 
-    def _match_rule_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
-        expected = self._normalize_region_values(regions)
-        if not expected:
-            return True
-        actual = set()
-        if item.get("region_source") != "netflix_catalog":
-            actual.update(self._normalize_region_values(item.get("region_codes") or []))
-        failed_cached = False
-        cache_keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))]
-        for key in cache_keys:
-            record = self._recognize_cache.get(key) if key else None
-            if record and record.get("country_codes"):
-                actual.update(self._normalize_region_values(record.get("country_codes") or []))
-            if self._is_failed_recognition_record(record):
-                failed_cached = True
+    def _normalize_region_match_mode(self, value: Any) -> str:
+        mode = self._clean_text(value or "production").lower()
+        return mode if mode in {"production", "availability", "either", "auto"} else "production"
+
+    def _match_production_regions(self, item: Dict[str, Any], expected: set) -> Tuple[bool, bool]:
+        actual = self._get_production_country_codes(item)
         if actual & expected:
-            return True
-        if failed_cached:
-            return False
+            return True, False
+        if actual:
+            return False, False
+        record = self._get_cached_recognition_record(item)
+        if self._is_failed_recognition_record(record):
+            return False, True
         media = self._recognize_item(item)
         if not media:
-            return False
-        type_key = self._media_to_type_key(media)
-        self._cache_recognition(item, media, type_key)
-        actual.update(self._extract_region_codes(media))
-        return bool(actual & expected)
+            self._store_recognition_record(item, self._build_text_fallback_recognition(item))
+            return False, True
+        type_key = self._media_to_type_key(media)
+        self._cache_recognition(item, media, type_key)
+        actual = self._get_production_country_codes(item)
+        return bool(actual & expected), False
+
+    def _match_rule_regions_with_reason(
+        self,
+        item: Dict[str, Any],
+        regions: List[Any],
+        mode: Any = "production",
+    ) -> Tuple[bool, str]:
+        expected = self._normalize_region_values(regions)
+        if not expected:
+            return True, ""
+        resolved_mode = self._normalize_region_match_mode(mode)
+        if resolved_mode == "auto":
+            resolved_mode = "availability" if item.get("platform") == "netflix" else "production"
+        availability_match = bool(self._get_availability_region_codes(item) & expected)
+        if resolved_mode == "availability":
+            return (True, "") if availability_match else (False, "availability_region_filtered")
+        if resolved_mode == "either" and availability_match:
+            return True, ""
+        production_match, recognition_failed = self._match_production_regions(item, expected)
+        if production_match:
+            return True, ""
+        if recognition_failed:
+            return False, "recognition_failed"
+        return False, "production_region_filtered"
+
+    def _match_rule_regions(
+        self,
+        item: Dict[str, Any],
+        regions: List[Any],
+        mode: Any = "production",
+    ) -> bool:
+        matched, _ = self._match_rule_regions_with_reason(item, regions, mode)
+        return matched
 
     def _match_rule_genres(self, item: Dict[str, Any], genres: List[Any]) -> bool:
         expected = self._normalize_genre_values(genres)
@@ -3628,10 +3900,12 @@ class UpcomingReleases(_PluginBase):
 
     def _normalize_region_values(self, regions: List[Any]) -> set:
         values = set()
-        for region in regions:
-            text_value = self._clean_text(region).upper()
-            if not text_value:
-                continue
+        for region in regions:
+            text_value = self._clean_text(region).upper()
+            if not text_value:
+                continue
+            if text_value in {"ALL", "全部", "全部地区", "全部制作国家", "全部可用地区"}:
+                return set()
             if text_value in REGION_ALIAS_MAP:
                 values.update(REGION_ALIAS_MAP[text_value])
             else:
@@ -3754,7 +4028,8 @@ class UpcomingReleases(_PluginBase):
             self._build_chip_group("平台", "platform", PLATFORM_LABELS),
             self._build_chip_group("类型", "mtype", TYPE_LABELS),
             self._build_chip_group("时间", "time_range", TIME_LABELS),
-            self._build_chip_group("地区", "region", PAGE_REGION_LABELS),
+            self._build_chip_group("制作国家", "production_region", PAGE_REGION_LABELS),
+            self._build_chip_group("Netflix 可用地区", "availability_region", PAGE_REGION_LABELS),
             self._build_chip_group("题材", "genre", PAGE_GENRE_LABELS),
         ]
 
@@ -3792,7 +4067,7 @@ class UpcomingReleases(_PluginBase):
         self._ensure_runtime_state()
         cache = self.get_data("cache")
         cache_version = safe_int(cache.get("schema_version"), 0) if isinstance(cache, dict) else 0
-        if isinstance(cache, dict) and cache_version in {13, CACHE_SCHEMA_VERSION}:
+        if isinstance(cache, dict) and cache_version in {13, 14, CACHE_SCHEMA_VERSION}:
             items = cache.get("items") or []
             if isinstance(items, list):
                 self._cache = {
@@ -3808,7 +4083,7 @@ class UpcomingReleases(_PluginBase):
 
         recognize_cache = self.get_data("recognize_cache")
         recognize_version = safe_int(recognize_cache.get("schema_version"), 0) if isinstance(recognize_cache, dict) else 0
-        if isinstance(recognize_cache, dict) and recognize_version in {13, CACHE_SCHEMA_VERSION}:
+        if isinstance(recognize_cache, dict) and recognize_version in {13, 14, CACHE_SCHEMA_VERSION}:
             records = recognize_cache.get("records") or {}
             if isinstance(records, dict):
                 self._recognize_cache = self._migrate_recognition_records(records)
@@ -3820,9 +4095,26 @@ class UpcomingReleases(_PluginBase):
         migrated = []
         for raw_item in self._sanitize_items(items):
             item = copy.deepcopy(raw_item)
-            item["region_codes"] = sorted(self._normalize_region_values(item.get("region_codes") or []))
-            if item.get("platform") == "netflix" and item.get("region_codes"):
-                item.setdefault("region_source", "netflix_catalog")
+            legacy_region_codes = sorted(self._normalize_region_values(item.get("region_codes") or []))
+            production_codes = set(
+                self._normalize_region_values(item.get("production_country_codes") or [])
+            )
+            availability_codes = set(
+                self._normalize_region_values(item.get("availability_regions") or [])
+            )
+            if item.get("platform") == "netflix":
+                availability_codes.update(legacy_region_codes)
+                item.pop("region_codes", None)
+                item.pop("region_source", None)
+                item["availability_regions"] = sorted(availability_codes)
+                if availability_codes:
+                    item["availability_source"] = "netflix_catalog"
+                item["production_country_codes"] = sorted(production_codes)
+            else:
+                production_codes.update(legacy_region_codes)
+                item["region_codes"] = legacy_region_codes
+                item["production_country_codes"] = sorted(production_codes)
+                item["availability_regions"] = sorted(availability_codes)
             migrated.append(item)
         return migrated
 

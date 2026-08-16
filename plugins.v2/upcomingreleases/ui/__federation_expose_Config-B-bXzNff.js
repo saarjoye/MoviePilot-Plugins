@@ -128,6 +128,7 @@ const TYPE_OPTIONS = [
   { value: 'short', label: '短剧' },
   { value: 'anime', label: '动漫' },
   { value: 'variety', label: '综艺' },
+  { value: 'other', label: '其它' },
 ];
 
 const PLATFORM_OPTIONS = [
@@ -148,6 +149,19 @@ const REGION_OPTIONS = reactive([
   { value: 'TW', label: '中国台湾' }, { value: 'KR', label: '韩国' },
   { value: 'JP', label: '日本' }, { value: 'US', label: '美国' },
   { value: 'GB', label: '英国' },
+]);
+
+const REGION_MATCH_MODE_OPTIONS = [
+  { value: 'production', label: '只匹配制作国家' },
+  { value: 'availability', label: '只匹配平台可用地区' },
+  { value: 'either', label: '制作国家或可用地区' },
+  { value: 'auto', label: '按平台自动选择' },
+];
+
+const RULE_CANONICAL_KEYS = new Set([
+  'name', 'enabled', 'time_range', 'days', 'types', 'platforms', 'regions',
+  'region_match_mode', 'genres', 'exclude_genres', 'include_pending',
+  'keyword', 'exclude_keyword',
 ]);
 
 const GENRE_OPTIONS = [
@@ -252,15 +266,25 @@ function normalizeRegionValues(values) {
     .filter((item, index, all) => item && item !== 'all' && all.indexOf(item) === index)
 }
 
+function normalizeRegionMatchMode(value) {
+  const mode = String(value || 'production').trim().toLowerCase();
+  return REGION_MATCH_MODE_OPTIONS.some(option => option.value === mode) ? mode : 'production'
+}
+
 function createRule(raw = {}) {
+  const extra = Object.fromEntries(
+    Object.entries(raw).filter(([key]) => !RULE_CANONICAL_KEYS.has(key) && key !== 'id' && key !== '_extra')
+  );
   return {
     id: nextRuleId(),
+    _extra: extra,
     name: String(raw.name || '').trim(),
     enabled: raw.enabled !== false,
     time_range: inferTimeRange(raw),
     types: normalizeOptionValues(raw.types ?? raw.type ?? raw.mtype, TYPE_OPTIONS),
     platforms: normalizeOptionValues(raw.platforms ?? raw.platform, PLATFORM_OPTIONS),
     regions: normalizeRegionValues(raw.regions ?? raw.region ?? raw.countries),
+    region_match_mode: normalizeRegionMatchMode(raw.region_match_mode),
     genres: normalizeOptionValues(raw.genres ?? raw.genre ?? raw.tags, GENRE_OPTIONS),
     exclude_genres: normalizeOptionValues(raw.exclude_genres ?? raw.exclude_genre, GENRE_OPTIONS),
     include_pending: Boolean(raw.include_pending),
@@ -343,12 +367,16 @@ function buildRuleSummary(rule, index) {
   const genreLabels = getSelectedLabels(GENRE_OPTIONS, rule.genres);
   const platformLabels = getSelectedLabels(PLATFORM_OPTIONS, rule.platforms);
   const timeLabel = getOptionLabel(TIME_OPTIONS, rule.time_range) || '7天内';
+  const regionModeLabel = getOptionLabel(REGION_MATCH_MODE_OPTIONS, rule.region_match_mode);
 
   if (typeLabels.length) {
     parts.push(typeLabels.join('、'));
   }
   if (regionLabels.length) {
     parts.push(regionLabels.join('、'));
+  }
+  if (regionLabels.length && regionModeLabel) {
+    parts.push(regionModeLabel);
   }
   if (genreLabels.length) {
     parts.push(genreLabels.join('、'));
@@ -415,6 +443,7 @@ function mapTimeRangeToDays(timeRange) {
 
 function serializeRule(rule, index) {
   return {
+    ...(rule._extra || {}),
     name: rule.name.trim() || buildRuleSummary(rule, index).replace(/^条件\d+：/, '').trim(),
     enabled: Boolean(rule.enabled),
     time_range: normalizeTimeRange(rule.time_range) || '7days',
@@ -422,6 +451,7 @@ function serializeRule(rule, index) {
     types: rule.types.length ? [...rule.types] : ['all'],
     platforms: rule.platforms.length ? [...rule.platforms] : ['all'],
     regions: [...rule.regions],
+    region_match_mode: normalizeRegionMatchMode(rule.region_match_mode),
     genres: [...rule.genres],
     exclude_genres: [...rule.exclude_genres],
     include_pending: Boolean(rule.include_pending),
@@ -752,6 +782,27 @@ return (_ctx, _cache) => {
                   }), 64))
                 ])
               ]),
+              _createElementVNode("section", _hoisted_40, [
+                _createElementVNode("div", { class: "rule-block__title" }, "地区匹配方式"),
+                _createElementVNode("div", _hoisted_41, [
+                  (_openBlock(), _createElementBlock(_Fragment, null, _renderList(REGION_MATCH_MODE_OPTIONS, (option) => {
+                    return _createElementVNode("label", {
+                      key: `region-mode-${rule.id}-${option.value}`,
+                      class: _normalizeClass(["choice-option choice-option--radio", { 'choice-option--active': rule.region_match_mode === option.value }])
+                    }, [
+                      _withDirectives(_createElementVNode("input", {
+                        "onUpdate:modelValue": $event => ((rule.region_match_mode) = $event),
+                        name: `region-mode-${rule.id}`,
+                        type: "radio",
+                        value: option.value
+                      }, null, 8, _hoisted_42), [
+                        [_vModelRadio, rule.region_match_mode]
+                      ]),
+                      _createElementVNode("span", null, _toDisplayString(option.label), 1)
+                    ], 2)
+                  }), 64))
+                ])
+              ]),
               _createElementVNode("section", _hoisted_43, [
                 _cache[33] || (_cache[33] = _createElementVNode("div", { class: "rule-block__title" }, "影视类型", -1)),
                 _createElementVNode("div", _hoisted_44, [
@@ -791,7 +842,7 @@ return (_ctx, _cache) => {
                 _cache[36] || (_cache[36] = _createElementVNode("div", { class: "rule-tip" }, "不勾选表示全平台", -1))
               ]),
               _createElementVNode("section", _hoisted_49, [
-                _cache[37] || (_cache[37] = _createElementVNode("div", { class: "rule-block__title" }, "地区", -1)),
+                _cache[37] || (_cache[37] = _createElementVNode("div", { class: "rule-block__title" }, "地区代码", -1)),
                 _createElementVNode("div", _hoisted_50, [
                   (_openBlock(), _createElementBlock(_Fragment, null, _renderList(REGION_OPTIONS, (option) => {
                     return _createElementVNode("label", {
@@ -807,7 +858,7 @@ return (_ctx, _cache) => {
                     ], 2)
                   }), 64))
                 ]),
-                _cache[38] || (_cache[38] = _createElementVNode("div", { class: "rule-tip" }, "不勾选表示不限地区", -1))
+                _cache[38] || (_cache[38] = _createElementVNode("div", { class: "rule-tip" }, "按上方匹配方式解释；不勾选表示不限地区", -1))
               ]),
               _createElementVNode("section", _hoisted_52, [
                 _cache[39] || (_cache[39] = _createElementVNode("div", { class: "rule-block__title" }, "题材", -1)),

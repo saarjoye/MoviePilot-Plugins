@@ -11,7 +11,8 @@ function createDefaultFilters() {
     platform: 'all',
     mtype: 'all',
     time_range: 'all',
-    region: 'all',
+    production_region: 'all',
+    availability_region: 'all',
     genre: 'all',
   }
 }
@@ -24,6 +25,8 @@ function createEmptyState() {
       types: [],
       times: [],
       regions: [],
+      production_regions: [],
+      availability_regions: [],
       genres: [],
       rule_types: [],
       rule_platforms: [],
@@ -288,7 +291,8 @@ const primaryFilterGroups = computed(() => [
   { field: 'platform', label: '平台', options: state.value.options.platforms || [] },
   { field: 'mtype', label: '类型', options: state.value.options.types || [] },
   { field: 'time_range', label: '时间', options: state.value.options.times || [] },
-  { field: 'region', label: '地区', options: state.value.options.regions || [] },
+  { field: 'production_region', label: '制作国家', options: state.value.options.production_regions || state.value.options.regions || [] },
+  { field: 'availability_region', label: 'Netflix 可用地区', options: state.value.options.availability_regions || [] },
 ]);
 
 const genreOptions = computed(() => state.value.options.genres || []);
@@ -510,7 +514,10 @@ return (_ctx, _cache) => {
                   ]),
                   _createElementVNode$1("h3", _hoisted_35, _toDisplayString(item.title), 1),
                   _createElementVNode$1("p", _hoisted_36, "上映时间：" + _toDisplayString(item.release_display), 1),
-                  _createElementVNode$1("p", _hoisted_37, "地区：" + _toDisplayString(item.region_text), 1),
+                  _createElementVNode$1("p", _hoisted_37, "制作国家：" + _toDisplayString(item.production_country_text), 1),
+                  (item.availability_region_text)
+                    ? (_openBlock$1(), _createElementBlock$1("p", { key: 5, class: "media-meta" }, "可用地区：" + _toDisplayString(item.availability_region_text), 1))
+                    : _createCommentVNode$1("", true),
                   _createElementVNode$1("p", _hoisted_38, "题材：" + _toDisplayString(item.genre_text), 1),
                   (item.story)
                     ? (_openBlock$1(), _createElementBlock$1("p", _hoisted_39, _toDisplayString(item.story), 1))
@@ -596,7 +603,7 @@ return (_ctx, _cache) => {
     _createVNode(UpcomingBrowserPanel, {
       api: __props.api,
       title: "近期预览",
-      subtitle: "支持平台、类型、时间、地区、题材组合筛选，并可直接订阅。",
+      subtitle: "支持平台、类型、时间、制作国家、Netflix 可用地区和题材组合筛选，并可直接订阅。",
       "show-switch": false
     }, null, 8, ["api"])
   ]))
