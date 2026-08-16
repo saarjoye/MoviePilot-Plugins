@@ -100,6 +100,7 @@ const defaults = {
   auto_subscribe_enabled: false,
   auto_subscribe_notify: true,
   cache_ttl_minutes: 180,
+  daily_refresh_time: '06:00',
   push_cron: '0 9,18 * * *',
   push_days: 7,
   push_limit: 8,
@@ -324,7 +325,7 @@ function applyInitialConfig(value) {
 
 async function loadRegionOptions() {
   try {
-    const result = await props.api.get('plugin/UpcomingReleases/config_state', { params: { limit: 1 } });
+    const result = await props.api.get('plugin/UpcomingReleases/config_state', { limit: 1 });
     const options = result?.options?.rule_regions;
     if (Array.isArray(options) && options.length) {
       const existingValues = new Set(options.map(option => option.value));
@@ -502,6 +503,8 @@ async function runAutoSubscribeOnce() {
 
 function saveConfig() {
   const nextConfig = JSON.parse(JSON.stringify(config));
+  const refreshTime = String(nextConfig.daily_refresh_time || '').trim();
+  nextConfig.daily_refresh_time = /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(refreshTime) ? refreshTime : '06:00';
   nextConfig.netflix_regions = splitToList(nextConfig.netflix_regions)
     .map(item => String(item || '').trim().toLowerCase())
     .filter((item, index, all) => /^[a-z]{2}$/.test(item) && all.indexOf(item) === index)
@@ -575,8 +578,18 @@ return (_ctx, _cache) => {
         ])
       ]),
       _createElementVNode("div", _hoisted_10, [
+        _createElementVNode("label", { class: "form-field" }, [
+          _createElementVNode("span", null, "每日缓存刷新时间"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.daily_refresh_time) = $event),
+            type: "time",
+            step: "60"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.daily_refresh_time]
+          ])
+        ]),
         _createElementVNode("label", _hoisted_11, [
-          _cache[18] || (_cache[18] = _createElementVNode("span", null, "缓存分钟数", -1)),
+          _cache[18] || (_cache[18] = _createElementVNode("span", null, "探索/推荐缓存分钟数", -1)),
           _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.cache_ttl_minutes) = $event)),
             type: "number",

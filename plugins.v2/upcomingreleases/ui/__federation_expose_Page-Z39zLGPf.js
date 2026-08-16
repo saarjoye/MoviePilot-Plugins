@@ -75,13 +75,12 @@ function useUpcomingBrowser(api, options = {}) {
   async function load(forceRefresh = false) {
     loading.value = true;
     try {
-      const result = await api.get(`${PLUGIN_API_BASE}/config_state`, {
-        params: {
-          ...(loaded ? cloneConfig(filters) : {}),
-          limit,
-          force_refresh: forceRefresh ? 1 : 0,
-        },
-      });
+      const query = {
+        ...(loaded ? cloneConfig(filters) : {}),
+        limit,
+        force_refresh: forceRefresh ? 1 : 0,
+      };
+      const result = await api.get(`${PLUGIN_API_BASE}/config_state`, query);
       state.value = {
         ...createEmptyState(),
         ...(result || {}),
@@ -105,7 +104,7 @@ function useUpcomingBrowser(api, options = {}) {
     try {
       const result = await api.get(`${PLUGIN_API_BASE}/page_refresh`);
       setNotice('success', `已同步最新待播数据，共 ${result?.count || 0} 条。`);
-      await load(true);
+      await load(false);
     } catch (error) {
       setNotice('error', normalizeError(error));
       loading.value = false;
@@ -119,9 +118,7 @@ function useUpcomingBrowser(api, options = {}) {
     busyMediaId.value = mediaId;
     try {
       const result = await api.get(`${PLUGIN_API_BASE}/page_subscribe`, {
-        params: {
-          media_id: mediaId,
-        },
+        media_id: mediaId,
       });
       if (result?.success) {
         const messageMap = {

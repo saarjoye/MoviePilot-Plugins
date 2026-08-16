@@ -218,6 +218,8 @@ NETFLIX_GENRE_NAME_MAP = {
 
 
 CACHE_SCHEMA_VERSION = 15
+DEFAULT_DAILY_REFRESH_TIME = "06:00"
+RECOGNITION_FAILURE_RETRY_SECONDS = 7 * 24 * 60 * 60
 
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
@@ -464,7 +466,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.33"
+    plugin_version = "0.6.36"
     plugin_release_date = "2026-08-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -484,7 +486,8 @@ class UpcomingReleases(_PluginBase):
         "enable_netflix": True,
         "netflix_regions": ",".join(DEFAULT_NETFLIX_REGIONS),
         "cache_ttl_minutes": 180,
-        "push_enabled": True,
+        "daily_refresh_time": DEFAULT_DAILY_REFRESH_TIME,
+        "push_enabled": True,
         "push_cron": "0 9,18 * * *",
         "push_days": 7,
         "push_limit": 8,
@@ -500,9 +503,12 @@ class UpcomingReleases(_PluginBase):
         self._config["enabled"] = bool(self._config.get("enabled", True))
         self._config["push_enabled"] = bool(self._config.get("push_enabled", True))
         self._config["auto_subscribe_enabled"] = bool(self._config.get("auto_subscribe_enabled", False))
-        self._config["auto_subscribe_notify"] = bool(self._config.get("auto_subscribe_notify", True))
-        self._config["cache_ttl_minutes"] = max(5, safe_int(self._config.get("cache_ttl_minutes"), 180))
-        self._config["push_days"] = max(1, safe_int(self._config.get("push_days"), 7))
+        self._config["auto_subscribe_notify"] = bool(self._config.get("auto_subscribe_notify", True))
+        self._config["cache_ttl_minutes"] = max(5, safe_int(self._config.get("cache_ttl_minutes"), 180))
+        self._config["daily_refresh_time"] = self._normalize_daily_refresh_time(
+            self._config.get("daily_refresh_time")
+        )
+        self._config["push_days"] = max(1, safe_int(self._config.get("push_days"), 7))
         self._config["push_limit"] = max(1, safe_int(self._config.get("push_limit"), 8))
 
         self._config["netflix_regions"] = ",".join(
@@ -592,21 +598,54 @@ class UpcomingReleases(_PluginBase):
             }
         ]
 
-    def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
-        return None, copy.deepcopy(self._default_config)
-
-    def get_service(self) -> List[Dict[str, Any]]:
-        if not self.get_state():
-            return []
-        if not self._config.get("push_enabled") and not self._config.get("auto_subscribe_enabled"):
-            return []
-        cron_expr = str(self._config.get("push_cron") or self._default_config["push_cron"]).strip()
-        try:
-            trigger = CronTrigger.from_crontab(cron_expr)
-        except Exception as err:
-            logger.error(f"[UpcomingReleases] 定时 Cron 无效，已回退到默认值: {err}")
-            trigger = CronTrigger.from_crontab(self._default_config["push_cron"])
-        return [{"id": "upcoming_sync", "name": "待播影视同步", "trigger": trigger, "func": self.sync_and_push}]
+    def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
+        return None, copy.deepcopy(self._default_config)
+
+    def _normalize_daily_refresh_time(self, value: Any) -> str:
+        text_value = self._clean_text(value or DEFAULT_DAILY_REFRESH_TIME)
+        matched = re.fullmatch(r"(\d{1,2}):(\d{2})", text_value)
+        if not matched:
+            return DEFAULT_DAILY_REFRESH_TIME
+        hour, minute = map(int, matched.groups())
+        if hour > 23 or minute > 59:
+            return DEFAULT_DAILY_REFRESH_TIME
+        return f"{hour:02d}:{minute:02d}"
+
+    def _daily_refresh_cron(self) -> str:
+        hour, minute = self._normalize_daily_refresh_time(
+            self._config.get("daily_refresh_time")
+        ).split(":")
+        return f"{int(minute)} {int(hour)} * * *"
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        if not self.get_state():
+            return []
+        refresh_cron = self._daily_refresh_cron()
+        try:
+            refresh_trigger = CronTrigger.from_crontab(refresh_cron)
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 每日缓存刷新时间无效，已回退到 06:00: {err}")
+            refresh_trigger = CronTrigger.from_crontab("0 6 * * *")
+        services = [
+            {
+                "id": "upcoming_daily_cache_refresh",
+                "name": "待播影视每日缓存刷新",
+                "trigger": refresh_trigger,
+                "func": self.refresh_cache_daily,
+            }
+        ]
+        if not self._config.get("push_enabled") and not self._config.get("auto_subscribe_enabled"):
+            return services
+        cron_expr = str(self._config.get("push_cron") or self._default_config["push_cron"]).strip()
+        try:
+            trigger = CronTrigger.from_crontab(cron_expr)
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 定时 Cron 无效，已回退到默认值: {err}")
+            trigger = CronTrigger.from_crontab(self._default_config["push_cron"])
+        services.append(
+            {"id": "upcoming_sync", "name": "待播影视同步", "trigger": trigger, "func": self.sync_and_push}
+        )
+        return services
 
     def get_page(self) -> List[dict]:
         # Vue 渲染模式下详情页由远程 Page 组件负责，这里只需安全返回占位数据。
@@ -978,7 +1017,11 @@ class UpcomingReleases(_PluginBase):
         if any(value is not None for value in supplied_filters.values()):
             self.save_data("page_filters", filters)
         try:
-            items = self._get_items(force_refresh=bool(force_refresh))
+            items = (
+                self._get_items(force_refresh=True)
+                if bool(force_refresh)
+                else self._get_cached_items()
+            )
             state = self._build_browser_state(items, filters, limit=limit, username=username)
             if getattr(self, "_recognize_dirty", False):
                 self._persist_recognize_cache()
@@ -2338,12 +2381,34 @@ class UpcomingReleases(_PluginBase):
         self.save_data("page_feedback", None)
         return {"success": True, "message": "ok"}
 
-    def page_refresh(self) -> Dict[str, Any]:
-        items = self._get_items(force_refresh=True)
+    def page_refresh(self) -> Dict[str, Any]:
+        items = self._get_items(force_refresh=True)
         self._set_page_feedback("success", f"已同步最新待播数据，共 {len(items)} 条。")
         if getattr(self, "_recognize_dirty", False):
             self._persist_recognize_cache()
-        return {"success": True, "count": len(items)}
+        return {"success": True, "count": len(items)}
+
+    def refresh_cache_daily(self) -> Dict[str, Any]:
+        if not self.get_state():
+            return {"success": False, "count": 0}
+        refresh_time = self._normalize_daily_refresh_time(self._config.get("daily_refresh_time"))
+        try:
+            before_timestamp = float(self._cache.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            before_timestamp = 0.0
+        logger.info(f"[UpcomingReleases] daily cache refresh started: time={refresh_time}")
+        items = self._get_items(force_refresh=True)
+        try:
+            refreshed = float(self._cache.get("timestamp") or 0) > before_timestamp
+        except (TypeError, ValueError):
+            refreshed = False
+        if refreshed:
+            logger.info(f"[UpcomingReleases] daily cache refresh completed: items={len(items)}")
+        else:
+            logger.warning(
+                f"[UpcomingReleases] daily cache refresh kept previous cache: items={len(items)}"
+            )
+        return {"success": refreshed, "count": len(items)}
 
     def run_auto_subscribe_once(self) -> Dict[str, Any]:
         if not self.get_state():
@@ -2438,15 +2503,68 @@ class UpcomingReleases(_PluginBase):
         if getattr(self, "_recognize_dirty", False):
             self._persist_recognize_cache()
 
-    def _ensure_runtime_state(self):
+    def _ensure_runtime_state(self):
         if not isinstance(getattr(self, "_cache", None), dict):
             self._cache = {"timestamp": 0, "items": []}
         if not isinstance(getattr(self, "_recognize_cache", None), dict):
             self._recognize_cache = {}
-        if not hasattr(self, "_recognize_dirty"):
-            self._recognize_dirty = False
-
-    def _get_items(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        if not hasattr(self, "_recognize_dirty"):
+            self._recognize_dirty = False
+
+    def _get_cached_items(self) -> List[Dict[str, Any]]:
+        self._ensure_runtime_state()
+        return self._sanitize_items(self._cache.get("items") or [])
+
+    def _enrich_production_countries(self, items: List[Dict[str, Any]]) -> Dict[str, int]:
+        counters = {
+            "known": 0,
+            "attempted": 0,
+            "country_updated": 0,
+            "country_missing": 0,
+            "failed": 0,
+            "failure_cached": 0,
+        }
+        now_ts = int(time.time())
+        for item in self._sanitize_items(items):
+            if self._get_production_country_codes(item):
+                counters["known"] += 1
+                continue
+
+            record = self._get_cached_recognition_record(item)
+            if isinstance(record, dict):
+                if not self._is_failed_recognition_record(record):
+                    counters["country_missing"] += 1
+                    continue
+                updated = safe_int(record.get("updated"), 0)
+                if updated and now_ts - updated < RECOGNITION_FAILURE_RETRY_SECONDS:
+                    counters["failure_cached"] += 1
+                    continue
+
+            counters["attempted"] += 1
+            try:
+                media = self._recognize_item(item)
+                if not media:
+                    self._store_recognition_record(item, self._build_text_fallback_recognition(item))
+                    counters["failed"] += 1
+                    continue
+                self._cache_recognition(item, media, self._media_to_type_key(media))
+                if self._get_production_country_codes(item):
+                    counters["country_updated"] += 1
+                else:
+                    counters["country_missing"] += 1
+            except Exception:
+                self._store_recognition_record(item, self._build_text_fallback_recognition(item))
+                counters["failed"] += 1
+
+        logger.info(
+            "[UpcomingReleases] production country enrichment: "
+            f"known={counters['known']} attempted={counters['attempted']} "
+            f"updated={counters['country_updated']} missing={counters['country_missing']} "
+            f"failed={counters['failed']} cached_failures={counters['failure_cached']}"
+        )
+        return counters
+
+    def _get_items(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
         self._ensure_runtime_state()
         if not self.get_state():
             return []
@@ -2493,8 +2611,10 @@ class UpcomingReleases(_PluginBase):
                 "items": items,
                 "netflix_regions_signature": self._netflix_regions_signature(),
             }
-            try:
-                self._persist_cache()
+            if force_refresh:
+                self._enrich_production_countries(items)
+            try:
+                self._persist_cache()
             except Exception as err:
                 logger.error(f"[UpcomingReleases] 缓存写入失败: {err}")
             if self._recognize_dirty:
