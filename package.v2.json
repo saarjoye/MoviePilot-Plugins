@@ -175,5 +175,17 @@
       "v1.0.11": "修复搜索类型标签和详情日期多格式解析，避免访问限制页被误判为条目无日期",
       "v1.0.12": "修复播放提交被受限登录冷却阻断，获得CK后直接尝试标记，并解除旧匹配失败抑制"
     }
+  },
+  "PandaTradeAssistant": {
+    "name": "熊猫交易助手",
+    "description": "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。",
+    "labels": "站点,娱乐,自动化",
+    "version": "0.2.13",
+    "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/PandaTradeAssistant.png",
+    "author": "wYw",
+    "level": 1,
+    "history": {
+      "v0.2.13": "按真实站点字段修复资产、魔力、经营 EXP 与市场数据；刷新改为缓存优先、后台并发和失败模块保留。"
+    }
   }
 }
