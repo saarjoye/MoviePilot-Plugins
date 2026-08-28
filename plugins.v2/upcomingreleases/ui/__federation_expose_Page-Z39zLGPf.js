@@ -41,6 +41,14 @@ function createEmptyState() {
       platform_counts: [],
       type_counts: [],
     },
+    pagination: {
+      offset: 0,
+      limit: 24,
+      returned: 0,
+      total: 0,
+      has_more: false,
+      next_offset: 0,
+    },
     items: [],
   }
 }
@@ -73,6 +81,7 @@ function useUpcomingBrowser(api, options = {}) {
   const state = ref$1(createEmptyState());
   const filters = reactive(createDefaultFilters());
   const loading = ref$1(false);
+  const loadingMore = ref$1(false);
   const busyMediaId = ref$1('');
   const notice = reactive({ type: 'info', text: '' });
   const limit = options.limit || 24;
@@ -83,19 +92,37 @@ function useUpcomingBrowser(api, options = {}) {
     notice.text = text || '';
   }
 
-  async function load(forceRefresh = false) {
-    loading.value = true;
+  async function load(forceRefresh = false, append = false) {
+    if (append) {
+      loadingMore.value = true;
+    } else {
+      loading.value = true;
+    }
     try {
+      const offset = append
+        ? (state.value.pagination?.next_offset ?? state.value.items.length)
+        : 0;
       const query = {
         ...(loaded ? cloneConfig(filters) : {}),
         limit,
+        offset,
         force_refresh: forceRefresh ? 1 : 0,
       };
       const result = await api.get(buildApiUrl(`${PLUGIN_API_BASE}/config_state`, query));
-      state.value = {
+      const nextState = {
         ...createEmptyState(),
         ...(result || {}),
       };
+      if (append) {
+        const existingIds = new Set(state.value.items.map(item => item.media_id));
+        const appendedItems = (nextState.items || []).filter(item => !existingIds.has(item.media_id));
+        nextState.items = [...state.value.items, ...appendedItems];
+        nextState.stats = {
+          ...nextState.stats,
+          showing: nextState.items.length,
+        };
+      }
+      state.value = nextState;
       Object.assign(filters, state.value.filters || createDefaultFilters());
       loaded = true;
       if (result?.message) {
@@ -106,7 +133,11 @@ function useUpcomingBrowser(api, options = {}) {
     } catch (error) {
       setNotice('error', normalizeError(error));
     } finally {
-      loading.value = false;
+      if (append) {
+        loadingMore.value = false;
+      } else {
+        loading.value = false;
+      }
     }
   }
 
@@ -139,10 +170,17 @@ function useUpcomingBrowser(api, options = {}) {
         };
         const feedback = messageMap[result?.message] || { type: 'success', text: '已添加到订阅列表。' };
         setNotice(feedback.type, feedback.text);
+        const item = state.value.items.find(candidate => candidate.media_id === mediaId);
+        if (item) {
+          const subscriptionStatus = result?.subscription_status
+            || (result?.message === 'completed' ? 'history' : 'active');
+          item.subscription_status = subscriptionStatus;
+          item.subscribed = subscriptionStatus !== 'none';
+          item.subscription_label = subscriptionStatus === 'history' ? '已完成' : '已订阅';
+        }
       } else {
         setNotice('error', result?.message || '订阅失败，请稍后重试。');
       }
-      await load(false);
     } catch (error) {
       setNotice('error', normalizeError(error));
     } finally {
@@ -160,10 +198,18 @@ function useUpcomingBrowser(api, options = {}) {
     await load(false);
   }
 
+  async function loadMore() {
+    if (loading.value || loadingMore.value || !state.value.pagination?.has_more) {
+      return
+    }
+    await load(false, true);
+  }
+
   return {
     state,
     filters,
     loading,
+    loadingMore,
     busyMediaId,
     notice,
     load,
@@ -171,6 +217,7 @@ function useUpcomingBrowser(api, options = {}) {
     subscribe,
     setFilter,
     resetFilters,
+    loadMore,
   }
 }
 
@@ -246,6 +293,11 @@ const _hoisted_39 = {
 const _hoisted_40 = { class: "media-actions" };
 const _hoisted_41 = ["disabled", "onClick"];
 const _hoisted_42 = ["href"];
+const _hoisted_43 = {
+  key: 5,
+  class: "browser-load-more"
+};
+const _hoisted_44 = ["disabled"];
 
 const {computed,onMounted,ref,watch} = await importShared('vue');
 
@@ -282,6 +334,7 @@ const {
   state,
   filters,
   loading,
+  loadingMore,
   busyMediaId,
   notice,
   load,
@@ -289,6 +342,7 @@ const {
   subscribe,
   setFilter,
   resetFilters,
+  loadMore,
 } = useUpcomingBrowser(props.api, {
   limit: 24,
 });
@@ -546,7 +600,19 @@ return (_ctx, _cache) => {
                 ])
               ]))
             }), 128))
-          ]))
+          ])),
+    (_unref(state).pagination?.has_more)
+      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_43, [
+          _createElementVNode$1("button", {
+            type: "button",
+            class: "ghost-button",
+            disabled: _unref(loadingMore) || _unref(loading),
+            onClick: _cache[7] || (_cache[7] = $event => (_unref(loadMore)()))
+          }, _toDisplayString(_unref(loadingMore)
+            ? '加载中...'
+            : `加载更多（已显示 ${_unref(state).items.length} / ${_unref(state).stats.matched}）`), 9, _hoisted_44)
+        ]))
+      : _createCommentVNode$1("", true)
   ]))
 }
 }

@@ -140,6 +140,14 @@ const PLATFORM_OPTIONS = [
   { value: 'netflix', label: 'Netflix' },
 ];
 
+const RECOMMENDED_REGIONS = ['CN', 'HK', 'TW', 'KR', 'JP', 'US', 'GB', 'FR', 'DE', 'IT', 'ES', 'CA', 'AU', 'IN', 'TH'];
+const FALLBACK_RECOMMENDED_RULES = [
+  { name: '电视剧-3天内', enabled: true, time_range: '3days', days: 3, types: ['tv'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
+  { name: '电影-3天内', enabled: true, time_range: '3days', days: 3, types: ['movie'], platforms: ['tencent', 'youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
+  { name: '综艺-3天内', enabled: true, time_range: '3days', days: 3, types: ['variety'], platforms: ['youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
+  { name: '动漫-3天内', enabled: true, time_range: '3days', days: 3, types: ['anime'], platforms: ['youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
+];
+
 const REGION_ALIASES = {
   '国产': 'CN', '中国': 'CN', '中国大陆': 'CN',
   '韩国': 'KR', '日本': 'JP', '美国': 'US', '英国': 'GB',
@@ -184,6 +192,9 @@ const rules = ref([]);
 const ruleParseNotice = ref('');
 const runLoading = ref(false);
 const actionNotice = reactive({ type: 'info', text: '', details: [] });
+const recommendedRules = ref(FALLBACK_RECOMMENDED_RULES);
+const sourceCapabilities = ref([]);
+const sourceCounts = ref([]);
 
 let ruleSeed = 0;
 
@@ -323,6 +334,15 @@ async function loadRegionOptions() {
         .map(value => ({ value, label: value }));
       REGION_OPTIONS.splice(0, REGION_OPTIONS.length, ...options, ...preserved)
     }
+    if (Array.isArray(result?.recommended_rules) && result.recommended_rules.length) {
+      recommendedRules.value = result.recommended_rules
+    }
+    if (Array.isArray(result?.source_capabilities)) {
+      sourceCapabilities.value = result.source_capabilities
+    }
+    if (Array.isArray(result?.stats?.source_counts)) {
+      sourceCounts.value = result.stats.source_counts
+    }
   } catch (error) {
     // Keep the common static regions when the state endpoint is unavailable.
   }
@@ -410,6 +430,40 @@ function removeRule(ruleId) {
   rules.value = rules.value.filter(rule => rule.id !== ruleId);
 }
 
+function applyRecommendedRules() {
+  if (!recommendedRules.value.length) {
+    setActionNotice('error', '推荐规则暂不可用，请稍后重试。');
+    return
+  }
+  if (!window.confirm('将用四条源能力推荐规则替换当前编辑区。未点击“保存配置”前不会生效，是否继续？')) {
+    return
+  }
+  rules.value = recommendedRules.value.map(rule => createRule(JSON.parse(JSON.stringify(rule))));
+  setActionNotice('warning', '已在编辑区生成四条源能力推荐规则，尚未保存。确认无误后请点击“保存配置”。');
+}
+
+function getRuleCapabilityWarnings(rule) {
+  if (!rule.types?.length || !rule.platforms?.length || !sourceCapabilities.value.length) {
+    return []
+  }
+  const capabilityMap = new Map(sourceCapabilities.value.map(item => [item.value, new Set(item.supported_types || [])]));
+  const warnings = [];
+  for (const platform of rule.platforms) {
+    const supported = capabilityMap.get(platform);
+    if (!supported) {
+      continue
+    }
+    for (const type of rule.types) {
+      if (!supported.has(type)) {
+        const platformLabel = getOptionLabel(PLATFORM_OPTIONS, platform) || platform;
+        const typeLabel = getOptionLabel(TYPE_OPTIONS, type) || type;
+        warnings.push(`${platformLabel}抓取器不支持${typeLabel}`)
+      }
+    }
+  }
+  return warnings
+}
+
 function mapTimeRangeToDays(timeRange) {
   if (timeRange === 'today' || timeRange === 'tomorrow') {
     return 1
@@ -461,7 +515,20 @@ function setActionNotice(type, text, details = []) {
 }
 
 function buildActionDetails(summary = {}) {
+  const diagnosticLabels = {
+    platform_filtered: '平台过滤', type_filtered: '类型过滤', time_filtered: '时间过滤',
+    production_region_filtered: '制作国家过滤', availability_region_filtered: '可用地区过滤',
+    genre_filtered: '题材过滤', keyword_filtered: '关键词过滤', recognition_failed: '识别失败',
+    matched: '命中', added: '新增', existing: '已存在', failed: '失败',
+  };
+  const diagnostics = (summary?.diagnostics || []).map(item => {
+    const counts = Object.entries(diagnosticLabels)
+      .map(([key, label]) => `${label} ${Number(item?.[key] || 0)}`)
+      .join('，');
+    return `规则诊断：${item?.rule || '未命名规则'}｜${counts}`
+  });
   return [
+    ...diagnostics,
     ...(summary?.added || []).slice(0, 6).map(item => `新增：${item}`),
     ...(summary?.existing || []).slice(0, 4).map(item => `已存在：${item}`),
     ...(summary?.failed || []).slice(0, 4).map(item => `失败：${item}`),
@@ -678,9 +745,14 @@ return (_ctx, _cache) => {
       _createElementVNode("div", _hoisted_22, [
         _cache[28] || (_cache[28] = _createElementVNode("div", null, [
           _createElementVNode("div", { class: "panel-title" }, "自动订阅规则"),
-          _createElementVNode("p", { class: "panel-subtitle" }, "按条件勾选即可，不再手写 JSON。每条条件会独立执行，例如“电影 + 国产 + 喜剧 + 今日上映”。如需测试，请先保存配置，再点击“立即执行已保存规则”。")
+          _createElementVNode("p", { class: "panel-subtitle" }, "地区按制作国家匹配；平台未提供国家时依赖后台媒体识别。不勾选题材表示不限题材，严格 3 天规则不会包含无日期内容。")
         ], -1)),
         _createElementVNode("div", _hoisted_23, [
+          _createElementVNode("button", {
+            type: "button",
+            class: "ghost-button",
+            onClick: applyRecommendedRules
+          }, "生成源能力推荐规则"),
           _createElementVNode("button", {
             type: "button",
             class: "ghost-button ghost-button--accent",
@@ -699,6 +771,15 @@ return (_ctx, _cache) => {
         _createElementVNode("span", null, "已启用 " + _toDisplayString(enabledRuleCount.value) + " 条", 1),
         _cache[29] || (_cache[29] = _createElementVNode("span", null, "不勾选的平台、类型、地区、题材表示“不限”", -1))
       ]),
+      (sourceCounts.value.length)
+        ? (_openBlock(), _createElementBlock("div", { key: 2, class: "rule-overview" }, [
+            (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sourceCounts.value, (source) => {
+              return (_openBlock(), _createElementBlock("span", {
+                key: `source-${source.value}`
+              }, _toDisplayString(`${source.label}：总数 ${source.total}，有日期 ${source.dated}，3天内 ${source.within_3days}，制作国家 ${source.production_country}`), 1))
+            }), 128))
+          ]))
+        : _createCommentVNode("", true),
       (ruleParseNotice.value)
         ? (_openBlock(), _createElementBlock("div", _hoisted_26, _toDisplayString(ruleParseNotice.value), 1))
         : _createCommentVNode("", true),
@@ -728,7 +809,13 @@ return (_ctx, _cache) => {
             _createElementVNode("div", _hoisted_29, [
               _createElementVNode("div", _hoisted_30, [
                 _createElementVNode("h3", _hoisted_31, "条件 " + _toDisplayString(index + 1), 1),
-                _createElementVNode("p", _hoisted_32, _toDisplayString(buildRuleSummary(rule, index)), 1)
+                _createElementVNode("p", _hoisted_32, _toDisplayString(buildRuleSummary(rule, index)), 1),
+                (getRuleCapabilityWarnings(rule).length)
+                  ? (_openBlock(), _createElementBlock("div", {
+                      key: 0,
+                      class: "rule-tip rule-tip--warning"
+                    }, _toDisplayString(getRuleCapabilityWarnings(rule).join('；')), 1))
+                  : _createCommentVNode("", true)
               ]),
               _createElementVNode("div", _hoisted_33, [
                 _createElementVNode("label", _hoisted_34, [
@@ -834,7 +921,7 @@ return (_ctx, _cache) => {
                     ], 2)
                   }), 64))
                 ]),
-                _cache[38] || (_cache[38] = _createElementVNode("div", { class: "rule-tip" }, "按上方匹配方式解释；不勾选表示不限地区", -1))
+                _cache[38] || (_cache[38] = _createElementVNode("div", { class: "rule-tip" }, "按制作国家匹配；不勾选表示不限制作国家", -1))
               ]),
               _createElementVNode("section", _hoisted_52, [
                 _cache[39] || (_cache[39] = _createElementVNode("div", { class: "rule-block__title" }, "题材", -1)),

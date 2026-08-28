@@ -219,9 +219,59 @@ NETFLIX_GENRE_NAME_MAP = {
 
 CACHE_SCHEMA_VERSION = 15
 DEFAULT_DAILY_REFRESH_TIME = "06:00"
-RECOGNITION_FAILURE_RETRY_SECONDS = 7 * 24 * 60 * 60
-
-AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
+RECOGNITION_FAILURE_RETRY_SECONDS = 24 * 60 * 60
+RECOGNITION_STRATEGY_VERSION = 2
+MAX_RECOGNITION_ATTEMPTS = 12
+
+RECOMMENDED_PRODUCTION_REGIONS = [
+    "CN", "HK", "TW", "KR", "JP", "US", "GB", "FR", "DE", "IT", "ES", "CA", "AU", "IN", "TH",
+]
+
+SOURCE_TYPE_CAPABILITIES = {
+    "iqiyi": {"movie", "tv", "anime", "variety", "short", "documentary"},
+    "tencent": {"movie", "tv"},
+    "youku": {"movie", "tv", "anime", "variety", "documentary", "humanity", "kids"},
+    "mgtv": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity"},
+    "netflix": {"movie", "tv", "anime", "variety", "documentary", "kids", "other"},
+}
+
+RECOMMENDED_RULES = [
+    {
+        "name": "电视剧-3天内", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["tv"], "platforms": ["iqiyi", "tencent", "youku", "mgtv", "netflix"],
+        "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
+    },
+    {
+        "name": "电影-3天内", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["movie"], "platforms": ["tencent", "youku", "netflix"],
+        "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
+    },
+    {
+        "name": "综艺-3天内", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["variety"], "platforms": ["youku", "netflix"],
+        "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
+    },
+    {
+        "name": "动漫-3天内", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["anime"], "platforms": ["youku", "netflix"],
+        "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
+    },
+]
+
+LEGACY_AUTO_SUBSCRIBE_RULES = [
+    {
+        "name": "国产及华语电视剧-明日上映", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["tv"], "platforms": ["iqiyi", "tencent", "youku", "mgtv"],
+        "regions": ["CN", "华语", "HK"], "region_match_mode": "production",
+    },
+    {
+        "name": "Netflix 美韩电视剧-明日上映", "enabled": True, "time_range": "3days", "days": 3,
+        "types": ["tv"], "platforms": ["netflix"],
+        "regions": ["US", "KR"], "region_match_mode": "production",
+    },
+]
+
+LEGACY_AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     [
         {
             "name": "国产及华语电视剧-明日上映",
@@ -247,7 +297,9 @@ AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
     ensure_ascii=False,
     indent=2,
 )
-REGION_ALIAS_MAP = {
+AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(RECOMMENDED_RULES, ensure_ascii=False, indent=2)
+
+REGION_ALIAS_MAP = {
     "CN": {"CN"},
     "中国": {"CN"},
     "中国大陆": {"CN"},
@@ -466,8 +518,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.38"
-    plugin_release_date = "2026-08-16"
+    plugin_version = "0.6.42"
+    plugin_release_date = "2026-08-28"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -519,10 +571,30 @@ class UpcomingReleases(_PluginBase):
         rules = self._config.get("auto_subscribe_rules")
         if isinstance(rules, list):
             self._config["auto_subscribe_rules"] = json.dumps(rules, ensure_ascii=False, indent=2)
-        elif not isinstance(rules, str) or not rules.strip():
-            self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
-        self._ensure_security_domains()
-        self._restore_cache()
+        elif not isinstance(rules, str) or not rules.strip():
+            self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
+        self._migrate_legacy_auto_subscribe_rules()
+        self._ensure_security_domains()
+        self._restore_cache()
+
+    def _migrate_legacy_auto_subscribe_rules(self) -> bool:
+        raw_rules = self._config.get("auto_subscribe_rules")
+        try:
+            rules = raw_rules if isinstance(raw_rules, list) else json.loads(str(raw_rules or ""))
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if rules != LEGACY_AUTO_SUBSCRIBE_RULES:
+            return False
+
+        self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
+        update_config = getattr(self, "update_config", None)
+        if callable(update_config):
+            try:
+                update_config(copy.deepcopy(self._config))
+            except Exception as err:
+                logger.warning(f"[UpcomingReleases] legacy rule migration persist failed: {type(err).__name__}")
+        logger.info("[UpcomingReleases] migrated exact legacy auto-subscribe rules to source-aware defaults")
+        return True
 
     def get_state(self) -> bool:
         return bool(self._config.get("enabled"))
@@ -981,7 +1053,8 @@ class UpcomingReleases(_PluginBase):
         production_region: Optional[str] = None,
         availability_region: Optional[str] = None,
         genre: Optional[str] = None,
-        limit: int = 24,
+        limit: int = 24,
+        offset: int = 0,
         force_refresh: bool = False,
         current_user=Depends(get_current_active_user),
     ) -> Dict[str, Any]:
@@ -1027,7 +1100,9 @@ class UpcomingReleases(_PluginBase):
                 if bool(force_refresh)
                 else self._get_cached_items()
             )
-            state = self._build_browser_state(items, filters, limit=limit, username=username)
+            state = self._build_browser_state(
+                items, filters, limit=limit, offset=offset, username=username
+            )
             if getattr(self, "_recognize_dirty", False):
                 self._persist_recognize_cache()
             return {"success": True, **state}
@@ -1036,7 +1111,9 @@ class UpcomingReleases(_PluginBase):
             cached_items = []
             if isinstance(getattr(self, "_cache", None), dict):
                 cached_items = self._sanitize_items(self._cache.get("items") or [])
-            state = self._build_browser_state(cached_items, filters, limit=limit, username=username)
+            state = self._build_browser_state(
+                cached_items, filters, limit=limit, offset=offset, username=username
+            )
             state["message"] = f"待播数据加载失败：{err}"
             return {"success": False, **state}
 
@@ -1049,19 +1126,21 @@ class UpcomingReleases(_PluginBase):
             for field, default in PAGE_FILTER_DEFAULTS.items()
         }
 
-    def _build_browser_state(
+    def _build_browser_state(
         self,
         items: List[Dict[str, Any]],
         filters: Dict[str, str],
-        limit: int = 24,
+        limit: int = 24,
+        offset: int = 0,
         username: Optional[str] = None,
     ) -> Dict[str, Any]:
         items = self._sanitize_items(items)
-        limit = max(1, min(60, safe_int(limit, 24)))
+        limit = max(1, min(60, safe_int(limit, 24)))
+        offset = max(0, safe_int(offset, 0))
         merged_items = self._merge_browser_items(items)
         filtered_items = self._filter_page_items(items, filters)
         merged_filtered_items = self._merge_browser_items(filtered_items)
-        display_items = merged_filtered_items[:limit]
+        display_items = merged_filtered_items[offset:offset + limit]
 
         production_region_labels = self._build_dynamic_region_labels(
             items, filters.get("production_region")
@@ -1082,11 +1161,14 @@ class UpcomingReleases(_PluginBase):
         )
         logger.info(f"[UpcomingReleases] recognition failures: {recognition_failures}")
         last_refresh = "未同步"
-        if self._cache.get("timestamp"):
-            last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
-        return {
+        if self._cache.get("timestamp"):
+            last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
+        source_counts = self._build_source_stats(items)
+        return {
             "filters": {**filters, "region": filters.get("production_region", "all")},
-            "options": {
+            "source_capabilities": self._build_source_capability_state(),
+            "recommended_rules": copy.deepcopy(RECOMMENDED_RULES),
+            "options": {
                 "platforms": self._build_browser_option_items(PLATFORM_LABELS),
                 "types": self._build_browser_option_items(PAGE_TYPE_LABELS),
                 "times": self._build_browser_option_items(TIME_LABELS),
@@ -1102,7 +1184,7 @@ class UpcomingReleases(_PluginBase):
             "stats": {
                 "total": len(merged_items),
                 "matched": len(merged_filtered_items),
-                "showing": len(display_items),
+                "showing": min(len(merged_filtered_items), offset + len(display_items)),
                 "last_refresh": last_refresh,
                 "platform_counts": [
                     {
@@ -1113,18 +1195,90 @@ class UpcomingReleases(_PluginBase):
                     for key, label in PLATFORM_LABELS.items()
                     if key != "all"
                 ],
-                "type_counts": [
+                "type_counts": [
                     {
                         "value": key,
                         "label": label,
                         "count": len([item for item in items if item.get("type_key") == key]),
                     }
                     for key, label in TYPE_LABELS.items()
-                    if key != "all"
-                ],
-            },
-            "items": [self._serialize_browser_item(item, username=username) for item in display_items],
-        }
+                    if key != "all"
+                ],
+                "source_counts": source_counts,
+            },
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(display_items),
+                "total": len(merged_filtered_items),
+                "has_more": offset + len(display_items) < len(merged_filtered_items),
+                "next_offset": offset + len(display_items),
+            },
+            "items": [self._serialize_browser_item(item, username=username) for item in display_items],
+        }
+
+    def _build_source_capability_state(self) -> List[Dict[str, Any]]:
+        recommended_by_platform: Dict[str, set] = {key: set() for key in SOURCE_TYPE_CAPABILITIES}
+        for rule in RECOMMENDED_RULES:
+            for platform in rule.get("platforms") or []:
+                recommended_by_platform.setdefault(platform, set()).update(rule.get("types") or [])
+        return [
+            {
+                "value": platform,
+                "label": PLATFORM_LABELS.get(platform, platform),
+                "supported_types": [
+                    type_key
+                    for type_key in TYPE_LABELS
+                    if type_key != "all" and type_key in SOURCE_TYPE_CAPABILITIES.get(platform, set())
+                ],
+                "recommended_types": [
+                    type_key
+                    for type_key in TYPE_LABELS
+                    if type_key != "all" and type_key in recommended_by_platform.get(platform, set())
+                ],
+            }
+            for platform in PLATFORM_LABELS
+            if platform != "all"
+        ]
+
+    def _build_source_stats(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        sanitized_items = self._sanitize_items(items)
+        result = []
+        for platform, label in PLATFORM_LABELS.items():
+            if platform == "all":
+                continue
+            platform_items = [item for item in sanitized_items if item.get("platform") == platform]
+            result.append(
+                {
+                    "value": platform,
+                    "label": label,
+                    "total": len(platform_items),
+                    "dated": sum(bool(item.get("release_date")) for item in platform_items),
+                    "within_3days": sum(
+                        bool(item.get("release_date")) and self._match_time_filter(item, "3days")
+                        for item in platform_items
+                    ),
+                    "direct_country": sum(
+                        bool(item.get("region_codes")) and item.get("platform") != "netflix"
+                        for item in platform_items
+                    ),
+                    "production_country": sum(
+                        bool(self._get_production_country_codes(item)) for item in platform_items
+                    ),
+                    "type_counts": [
+                        {
+                            "value": type_key,
+                            "label": type_label,
+                            "count": sum(item.get("type_key") == type_key for item in platform_items),
+                        }
+                        for type_key, type_label in TYPE_LABELS.items()
+                        if type_key != "all" and any(
+                            item.get("type_key") == type_key for item in platform_items
+                        )
+                    ],
+                }
+            )
+        return result
 
     def _build_browser_option_items(self, mapping: Dict[str, str], include_all: bool = True) -> List[Dict[str, str]]:
         return [
@@ -1144,24 +1298,54 @@ class UpcomingReleases(_PluginBase):
             return {"success": False, "message": "not found"}
 
         username = self._resolve_subscribe_username(getattr(current_user, "name", None))
-        recognition = self._get_cached_recognition(item, populate=True, require_ids=False) or {}
+        recognition = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
         subscription_status = self._get_item_subscription_status(
             item,
             username=username,
-            populate_recognition=True,
+            populate_recognition=False,
             recognition=recognition,
         )
         if subscription_status == "active":
             self._set_page_feedback("info", f"{item.get('title')} 已在订阅列表中。")
-            return {"success": True, "message": "exists"}
+            return {"success": True, "message": "exists", "subscription_status": "active"}
         if subscription_status == "history":
             self._set_page_feedback("info", f"{item.get('title')} 已在订阅历史中，资源已处理完成。")
-            return {"success": True, "message": "completed"}
+            return {"success": True, "message": "completed", "subscription_status": "history"}
+
+        if self._is_failed_recognition_record(recognition):
+            updated = safe_int(recognition.get("updated"), 0)
+            retry_due = (
+                not self._is_current_recognition_strategy(recognition)
+                or not updated
+                or int(time.time()) - updated >= RECOGNITION_FAILURE_RETRY_SECONDS
+            )
+            if not retry_due:
+                message = "媒体识别失败，暂时无法创建订阅，请等待后台重新识别或从搜索页手动订阅。"
+                logger.warning(
+                    "[UpcomingReleases] page subscribe skipped: cached recognition failure is still fresh "
+                    f"media_id={item.get('media_id')}"
+                )
+                self._set_page_feedback("warning", message)
+                return {"success": False, "message": message, "subscription_status": "none"}
+
+        if not recognition or self._is_failed_recognition_record(recognition):
+            recognition = self._get_subscription_recognition(item)
+            if getattr(self, "_recognize_dirty", False):
+                self._persist_recognize_cache()
+
+        media_source, resolved_media_id = self._resolve_subscribe_identity(recognition)
+        if self._is_failed_recognition_record(recognition) or not media_source or not resolved_media_id:
+            message = "媒体识别未获得可用媒体编号，暂时无法创建订阅，请等待后台重新识别或从搜索页手动订阅。"
+            logger.warning(
+                "[UpcomingReleases] page subscribe recognition unavailable "
+                f"media_id={item.get('media_id')}"
+            )
+            self._set_page_feedback("warning", message)
+            return {"success": False, "message": message, "subscription_status": "none"}
 
         subscribe_chain = SubscribeChain()
         resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
-        media_source, media_id = self._resolve_subscribe_identity(recognition)
         sid, message = subscribe_chain.add(
             title=item.get("title"),
             year=item.get("year") or "",
@@ -1171,7 +1355,7 @@ class UpcomingReleases(_PluginBase):
             bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
             mediaid=self._make_subscribe_mediaid(item),
             media_source=media_source,
-            media_id=media_id,
+            media_id=resolved_media_id,
             season=resolved_season,
             exist_ok=True,
             username=username,
@@ -1196,13 +1380,19 @@ class UpcomingReleases(_PluginBase):
                 self._set_page_feedback("error", warning)
                 return {"success": False, "message": warning, "sid": sid}
             self._set_page_feedback("success", f"已添加订阅：{item.get('title')}（{release_text}）")
-            return {"success": True, "message": message or "added", "sid": sid, "actual_season": actual_season}
+            return {
+                "success": True,
+                "message": message or "added",
+                "sid": sid,
+                "actual_season": actual_season,
+                "subscription_status": "active",
+            }
 
         if self._is_exists_message(message):
             claimed = self._claim_subscribe_owner(item=item, username=username)
             if claimed:
                 self._set_page_feedback("success", f"已同步订阅状态：{item.get('title')}（{release_text}）")
-                return {"success": True, "message": "claimed"}
+                return {"success": True, "message": "claimed", "subscription_status": "active"}
             warning_message = "发现可能存在识别冲突，未找到可直接对应的订阅记录，请先在搜索页核对后再订阅。"
             self._set_page_feedback("warning", warning_message)
             return {"success": False, "message": warning_message}
@@ -2132,7 +2322,7 @@ class UpcomingReleases(_PluginBase):
         release_date = self._clean_text(item.get("release_date"))
         release_text = self._clean_text(item.get("release_text"))
         time_match = re.search(r"(\d{1,2}:\d{2})", release_text)
-        if release_date:
+        if release_date:
             if time_match:
                 return f"{release_date} {time_match.group(1)}"
             return release_date
@@ -2526,6 +2716,7 @@ class UpcomingReleases(_PluginBase):
             "country_missing": 0,
             "failed": 0,
             "failure_cached": 0,
+            "missing_cached": 0,
         }
         now_ts = int(time.time())
         for item in self._sanitize_items(items):
@@ -2535,12 +2726,16 @@ class UpcomingReleases(_PluginBase):
 
             record = self._get_cached_recognition_record(item)
             if isinstance(record, dict):
-                if not self._is_failed_recognition_record(record):
-                    counters["country_missing"] += 1
-                    continue
                 updated = safe_int(record.get("updated"), 0)
-                if updated and now_ts - updated < RECOGNITION_FAILURE_RETRY_SECONDS:
-                    counters["failure_cached"] += 1
+                if (
+                    self._is_current_recognition_strategy(record)
+                    and updated
+                    and now_ts - updated < RECOGNITION_FAILURE_RETRY_SECONDS
+                ):
+                    if self._is_failed_recognition_record(record):
+                        counters["failure_cached"] += 1
+                    else:
+                        counters["missing_cached"] += 1
                     continue
 
             counters["attempted"] += 1
@@ -2563,7 +2758,8 @@ class UpcomingReleases(_PluginBase):
             "[UpcomingReleases] production country enrichment: "
             f"known={counters['known']} attempted={counters['attempted']} "
             f"updated={counters['country_updated']} missing={counters['country_missing']} "
-            f"failed={counters['failed']} cached_failures={counters['failure_cached']}"
+            f"failed={counters['failed']} cached_failures={counters['failure_cached']} "
+            f"cached_missing={counters['missing_cached']}"
         )
         return counters
 
@@ -2781,10 +2977,18 @@ class UpcomingReleases(_PluginBase):
         populate: bool = False,
         require_ids: bool = True,
     ) -> Dict[str, Any]:
-        lookup_key = self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))
+        lookup_key = self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))
         for key in [item.get("media_id"), lookup_key]:
             record = self._recognize_cache.get(key) if key else None
-            if record and (
+            if not record:
+                continue
+            if (
+                populate
+                and record.get("recognition_failed")
+                and not self._is_current_recognition_strategy(record)
+            ):
+                continue
+            if (
                 record.get("recognition_failed")
                 or not require_ids
                 or record.get("tmdb_id")
@@ -2809,6 +3013,12 @@ class UpcomingReleases(_PluginBase):
 
     def _is_failed_recognition_record(self, record: Optional[Dict[str, Any]]) -> bool:
         return bool(record and record.get("recognition_failed"))
+
+    def _is_current_recognition_strategy(self, record: Optional[Dict[str, Any]]) -> bool:
+        return bool(
+            isinstance(record, dict)
+            and safe_int(record.get("strategy_version"), 0) >= RECOGNITION_STRATEGY_VERSION
+        )
 
     def _get_cached_recognition_record(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         lookup_key = self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))
@@ -2844,6 +3054,18 @@ class UpcomingReleases(_PluginBase):
                 or self._extract_js_string_field(obj_text, "imageUrl")
             )
             desc = self._clean_text(self._extract_js_string_field(obj_text, "desc"))
+            source_metadata = {
+                key: (
+                    self._extract_js_year_field(obj_text, key)
+                    if key in {"productionYear", "releaseYear", "publishYear", "showYear", "year"}
+                    else self._extract_js_string_field(obj_text, key)
+                )
+                for key in (
+                    "productionYear", "releaseYear", "publishYear", "showYear", "year",
+                    "original_title", "originalTitle", "english_title", "englishTitle",
+                    "enName", "otherName", "alias", "aliases", "aka",
+                )
+            }
             region_codes = self._extract_source_region_codes(
                 {
                     key: self._extract_js_string_field(obj_text, key)
@@ -2853,7 +3075,10 @@ class UpcomingReleases(_PluginBase):
             if title and publish_text:
                 release_date, parsed_text = self._parse_release_info(publish_text)
                 raw_id = self._search_text(page_url, r"/([^/]+)\.html") or title
-                year = self._guess_year(title, release_date, publish_text)
+                year, year_source = self._extract_source_year(source_metadata)
+                if not year:
+                    year = self._guess_year(title, release_date, publish_text)
+                    year_source = "title_or_labeled_text" if year else ""
                 type_key = self._extract_iqiyi_type_key(obj_text) or self._infer_type_key(
                     title=title,
                     year=year,
@@ -2874,6 +3099,8 @@ class UpcomingReleases(_PluginBase):
                         detail_link=page_url,
                         story=desc,
                         year=year,
+                        year_source=year_source,
+                        alternate_titles=self._extract_source_alternate_titles(source_metadata, title),
                         region_codes=region_codes,
                     )
                 )
@@ -2930,10 +3157,11 @@ class UpcomingReleases(_PluginBase):
                         if not title or not cid or dedup_key in seen_ids:
                             continue
                         seen_ids.add(dedup_key)
-                        release_hint = params.get("publish_date") or params.get("second_title") or params.get("sub_title") or ""
-                        release_date, parsed_text = self._parse_release_info(release_hint)
-                        reserve_text = self._clean_text(" / ".join(filter(None, [params.get("third_title"), params.get("chnlist_search_label")])))
-                        items.append(
+                        release_hint = params.get("publish_date") or params.get("second_title") or params.get("sub_title") or ""
+                        release_date, parsed_text = self._parse_release_info(release_hint)
+                        reserve_text = self._clean_text(" / ".join(filter(None, [params.get("third_title"), params.get("chnlist_search_label")])))
+                        year, year_source = self._extract_source_year([params, entry])
+                        items.append(
                             self._build_item(
                                 platform="tencent",
                                 raw_id=cid,
@@ -2944,6 +3172,9 @@ class UpcomingReleases(_PluginBase):
                                 poster=normalize_url(params.get("new_pic_vt") or params.get("new_pic_hz") or params.get("pic_url") or params.get("image_url")),
                                 detail_link=normalize_url(params.get("href") or f"https://v.qq.com/x/cover/{cid}.html"),
                                 story=self._clean_text(params.get("second_title") or params.get("sub_title") or reserve_text),
+                                year=year,
+                                year_source=year_source,
+                                alternate_titles=self._extract_source_alternate_titles([params, entry], title),
                                 reserve_count=parse_reserve_count(reserve_text),
                                 region_codes=self._extract_source_region_codes([params, entry]),
                             )
@@ -2994,10 +3225,14 @@ class UpcomingReleases(_PluginBase):
                     if not title or dedup_key in seen:
                         continue
                     seen.add(dedup_key)
-                    release_date, parsed_text = self._parse_release_info(subtitle or desc)
-                    detail_link = f"https://v.youku.com/video?s={raw_id}" if raw_id else ""
-                    poster = normalize_url(entry.get("img") or entry.get("poster") or entry.get("cover"))
-                    items.append(
+                    release_date, parsed_text = self._parse_release_info(subtitle or desc)
+                    detail_link = f"https://v.youku.com/video?s={raw_id}" if raw_id else ""
+                    poster = normalize_url(entry.get("img") or entry.get("poster") or entry.get("cover"))
+                    year, year_source = self._extract_source_year([entry, reserve])
+                    if not year:
+                        year = self._guess_year(title, release_date, subtitle or desc)
+                        year_source = "title_or_labeled_text" if year else ""
+                    items.append(
                         self._build_item(
                             platform="youku",
                             raw_id=raw_id or title,
@@ -3008,7 +3243,9 @@ class UpcomingReleases(_PluginBase):
                             poster=poster,
                             detail_link=detail_link,
                             story=desc,
-                            year=self._guess_year(title, release_date, subtitle or desc),
+                            year=year,
+                            year_source=year_source,
+                            alternate_titles=self._extract_source_alternate_titles([entry, reserve], title),
                             reserve_count=parse_reserve_count(str(reserve.get("count") or reserve.get("desc") or "")),
                             region_codes=self._extract_source_region_codes([entry, reserve]),
                         )
@@ -3045,7 +3282,10 @@ class UpcomingReleases(_PluginBase):
             if detail_link.startswith("/"):
                 detail_link = f"https://www.mgtv.com{detail_link}"
             story = self._clean_text(entry.get("stroy") or entry.get("story"))
-            year = self._guess_year(title, release_date, release_hint)
+            year, year_source = self._extract_source_year(entry)
+            if not year:
+                year = self._guess_year(title, release_date, release_hint)
+                year_source = "title_or_labeled_text" if year else ""
             type_key = self._infer_type_key(
                 title=title,
                 year=year,
@@ -3065,6 +3305,8 @@ class UpcomingReleases(_PluginBase):
                     detail_link=detail_link,
                     story=story,
                     year=year,
+                    year_source=year_source,
+                    alternate_titles=self._extract_source_alternate_titles(entry, title),
                     region_codes=self._extract_source_region_codes(entry),
                 )
             )
@@ -3135,6 +3377,7 @@ class UpcomingReleases(_PluginBase):
 
                     type_key = self._resolve_netflix_type_key(entry, title, subtitle)
                     story = subtitle if subtitle and subtitle.lower() != title.lower() else ""
+                    year, year_source = self._extract_source_year(entry)
                     item = self._build_item(
                         platform="netflix",
                         raw_id=raw_id,
@@ -3145,7 +3388,9 @@ class UpcomingReleases(_PluginBase):
                         poster=self._clean_text(entry.get("image")),
                         detail_link=f"https://www.netflix.com/watch/{raw_id}",
                         story=story,
-                        year=str(release_dt.year),
+                        year=year,
+                        year_source=year_source,
+                        alternate_titles=self._extract_source_alternate_titles(entry, title),
                     )
                     item.pop("region_codes", None)
                     item["availability_regions"] = [region_code]
@@ -3262,13 +3507,21 @@ class UpcomingReleases(_PluginBase):
         detail_link: str = "",
         story: str = "",
         year: Optional[str] = None,
+        year_source: Optional[str] = None,
+        alternate_titles: Optional[Any] = None,
         reserve_count: int = 0,
         region_codes: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if type_key not in TYPE_LABELS:
             type_key = "tv"
-        if not year:
-            year = self._guess_year(title, release_date, release_text)
+        normalized_year = self._normalize_media_year(year)
+        normalized_year_source = self._clean_text(year_source).lower()
+        if not normalized_year:
+            normalized_year = self._guess_year(title, release_date, release_text)
+            normalized_year_source = "title_or_labeled_text" if normalized_year else ""
+        normalized_alternate_titles = self._normalize_alternate_titles(
+            alternate_titles, primary_title=title
+        )
         season_item = {
             "type_key": type_key,
             "title": self._clean_text(title),
@@ -3283,7 +3536,9 @@ class UpcomingReleases(_PluginBase):
             "type_key": type_key,
             "type_label": TYPE_LABELS.get(type_key, "电视剧"),
             "title": self._clean_text(title),
-            "year": year,
+            "year": normalized_year,
+            "year_source": normalized_year_source,
+            "alternate_titles": normalized_alternate_titles,
             "release_date": release_date,
             "release_text": self._clean_text(release_text) or "敬请期待",
             "poster": poster,
@@ -3304,7 +3559,7 @@ class UpcomingReleases(_PluginBase):
                 return {"id": record.get("tmdb_id")}
             if convert_type == "douban" and record.get("douban_id"):
                 return {"id": record.get("douban_id")}
-            if self._is_failed_recognition_record(record):
+            if self._is_failed_recognition_record(record) and self._is_current_recognition_strategy(record):
                 return {}
         media = self._recognize_item(item)
         if not media:
@@ -3317,47 +3572,82 @@ class UpcomingReleases(_PluginBase):
             return {"id": media.douban_id}
         return {}
 
-    def _recognize_item(self, item: Dict[str, Any]) -> Optional[MediaInfo]:
-        title = self._clean_text(item.get("title"))
-        if not title:
-            return None
-        year = item.get("year")
-        text_blob = " ".join(filter(None, [title, item.get("story"), item.get("release_text"), item.get("type_label")]))
+    def _recognize_item(self, item: Dict[str, Any]) -> Optional[MediaInfo]:
+        titles = self._build_recognition_title_candidates(item)
+        if not titles:
+            return None
+        primary_title = titles[0]
+        text_blob = " ".join(
+            filter(None, [primary_title, item.get("story"), item.get("release_text"), item.get("type_label")])
+        )
         target_season, _ = self._extract_item_target_season(item)
-        candidate_types = []
-        for value in [
-            item.get("type_key"),
-            self._keyword_type_key(text_blob),
-            None,
-        ]:
-            normalized = self._clean_text(value).lower() if value is not None else ""
-            key = normalized or "<none>"
-            if key in candidate_types:
-                continue
-            candidate_types.append(key)
-
-        last_error = None
-        for candidate in candidate_types:
-            type_key = None if candidate == "<none>" else candidate
-            meta = MetaInfo(title)
-            if year:
-                meta.year = year
-            resolved_mtype = self._type_key_to_media_type(type_key)
-            if resolved_mtype == MediaType.MOVIE:
-                meta.type = MediaType.MOVIE
-            elif resolved_mtype == MediaType.TV:
+        candidate_types: List[Optional[str]] = []
+        for value in [
+            item.get("type_key"),
+            None,
+            self._keyword_type_key(text_blob),
+        ]:
+            normalized = self._clean_text(value).lower() if value is not None else ""
+            candidate = normalized or None
+            if candidate in candidate_types:
+                continue
+            candidate_types.append(candidate)
+
+        year = self._normalize_media_year(item.get("year"))
+        year_source = self._clean_text(item.get("year_source")).lower()
+        title_year = self._normalize_media_year(primary_title)
+        reliable_year = year if year and (
+            year_source in {
+                "productionyear", "releaseyear", "publishyear", "showyear", "year",
+                "title", "title_or_labeled_text", "labeled_text",
+            }
+            or year == title_year
+        ) else None
+        attempts: List[Tuple[str, Optional[str], Optional[str]]] = []
+        primary_type = candidate_types[0] if candidate_types else None
+        if reliable_year:
+            for candidate_title in titles:
+                attempts.append((candidate_title, reliable_year, primary_type))
+        for candidate_title in titles:
+            attempts.append((candidate_title, None, primary_type))
+        for candidate_type in candidate_types[1:]:
+            for candidate_title in titles:
+                attempts.append((candidate_title, None, candidate_type))
+
+        last_error = None
+        attempted = set()
+        attempt_count = 0
+        for candidate_title, candidate_year, candidate_type in attempts:
+            attempt_key = (self._normalize_compare_text(candidate_title), candidate_year, candidate_type)
+            if attempt_key in attempted:
+                continue
+            if attempt_count >= MAX_RECOGNITION_ATTEMPTS:
+                break
+            attempted.add(attempt_key)
+            attempt_count += 1
+            meta = MetaInfo(candidate_title)
+            if candidate_year:
+                meta.year = candidate_year
+            resolved_mtype = self._type_key_to_media_type(candidate_type)
+            if resolved_mtype == MediaType.MOVIE:
+                meta.type = MediaType.MOVIE
+            elif resolved_mtype == MediaType.TV:
                 meta.type = MediaType.TV
                 if meta.begin_season is None:
-                    meta.begin_season = target_season or self._extract_title_suffix_season(title) or None
-            try:
-                media = self.chain.recognize_media(meta=meta, mtype=resolved_mtype, cache=True)
-                if media:
-                    return media
-            except Exception as err:
-                last_error = err
-        if last_error:
-            logger.warning(f"[UpcomingReleases] recognize media failed: {item.get('title')} - {last_error}")
-        return None
+                    meta.begin_season = target_season or self._extract_title_suffix_season(candidate_title) or None
+            try:
+                media = self.chain.recognize_media(meta=meta, mtype=resolved_mtype, cache=True)
+                if media:
+                    return media
+            except Exception as err:
+                last_error = err
+        if last_error:
+            logger.warning(
+                "[UpcomingReleases] recognize media failed: "
+                f"media_id={item.get('media_id') or 'unknown'} attempts={attempt_count} "
+                f"error={type(last_error).__name__}"
+            )
+        return None
 
     def _cache_recognition(self, item: Dict[str, Any], media: MediaInfo, type_key: Optional[str] = None):
         if not media:
@@ -3372,6 +3662,7 @@ class UpcomingReleases(_PluginBase):
         country_codes = sorted(self._extract_region_codes(media))
         record = {
             "recognition_failed": False,
+            "strategy_version": RECOGNITION_STRATEGY_VERSION,
             "type_key": resolved_type_key,
             "tmdb_id": getattr(media, "tmdb_id", None),
             "douban_id": getattr(media, "douban_id", None),
@@ -3411,7 +3702,9 @@ class UpcomingReleases(_PluginBase):
 
     def _get_subscription_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
         record = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
-        if record and not record.get("recognition_failed"):
+        if record and not record.get("recognition_failed") and any(
+            record.get(key) for key in ("tmdb_id", "douban_id", "bangumi_id")
+        ):
             return record
         media = self._recognize_item(item)
         if media:
@@ -3723,8 +4016,10 @@ class UpcomingReleases(_PluginBase):
         if actual:
             return False, False
         record = self._get_cached_recognition_record(item)
-        if self._is_failed_recognition_record(record):
-            return False, True
+        if isinstance(record, dict) and self._is_current_recognition_strategy(record):
+            updated = safe_int(record.get("updated"), 0)
+            if updated and int(time.time()) - updated < RECOGNITION_FAILURE_RETRY_SECONDS:
+                return False, self._is_failed_recognition_record(record)
         media = self._recognize_item(item)
         if not media:
             self._store_recognition_record(item, self._build_text_fallback_recognition(item))
@@ -3778,7 +4073,7 @@ class UpcomingReleases(_PluginBase):
             record = self._recognize_cache.get(key) if key else None
             if record:
                 actual.update(record.get("genre_names") or [])
-            if self._is_failed_recognition_record(record):
+            if self._is_failed_recognition_record(record) and self._is_current_recognition_strategy(record):
                 failed_cached = True
         actual.update(self._extract_text_genre_names(" ".join(filter(None, [item.get("title"), item.get("story"), item.get("release_text")]))))
         if actual & expected:
@@ -3920,6 +4215,7 @@ class UpcomingReleases(_PluginBase):
         target_season, season_source = self._extract_item_target_season(item)
         return {
             "recognition_failed": True,
+            "strategy_version": RECOGNITION_STRATEGY_VERSION,
             "type_key": type_key or "tv",
             "tmdb_id": None,
             "douban_id": None,
@@ -4358,7 +4654,8 @@ class UpcomingReleases(_PluginBase):
             return {}
 
     def _find_item_by_mediaid(self, media_id: str) -> Optional[Dict[str, Any]]:
-        for item in self._get_items(force_refresh=False):
+        # Page and media-conversion lookups must never turn a cache read into a full source refresh.
+        for item in self._get_cached_items():
             if item.get("media_id") == media_id:
                 return item
         return None
@@ -4418,11 +4715,177 @@ class UpcomingReleases(_PluginBase):
             return "30days"
         return "all"
 
-    def _guess_year(self, title: str, release_date: Optional[str], text: Optional[str]) -> Optional[str]:
-        if release_date:
-            return release_date[:4]
-        matched = re.search(r"((?:19|20)\d{2})", f"{title or ''} {text or ''}")
-        return matched.group(1) if matched else None
+    def _normalize_alternate_titles(
+        self,
+        value: Any,
+        primary_title: Optional[str] = None,
+    ) -> List[str]:
+        titles: List[str] = []
+        primary_key = self._normalize_compare_text(primary_title)
+
+        def add_text(current: Any):
+            text_value = self._clean_text(current)
+            if not text_value:
+                return
+            parts = re.split(r"[,，、|;；\n]+|\s+/\s+", text_value)
+            for part in parts:
+                candidate = self._clean_text(part)
+                candidate_key = self._normalize_compare_text(candidate)
+                if not candidate or candidate_key == primary_key:
+                    continue
+                if candidate_key and all(
+                    self._normalize_compare_text(existing) != candidate_key for existing in titles
+                ):
+                    titles.append(candidate)
+
+        def visit(current: Any):
+            if current is None:
+                return
+            if isinstance(current, dict):
+                matched = False
+                for key in (
+                    "title", "name", "value", "original_title", "originalTitle",
+                    "english_title", "englishTitle", "enName", "otherName",
+                    "alias", "aliases", "aka",
+                ):
+                    if key in current:
+                        visit(current.get(key))
+                        matched = True
+                if not matched:
+                    for nested in current.values():
+                        visit(nested)
+                return
+            if isinstance(current, (list, tuple, set)):
+                for nested in current:
+                    visit(nested)
+                return
+            add_text(current)
+
+        visit(value)
+        return titles[:8]
+
+    def _extract_source_year(self, payload: Any) -> Tuple[Optional[str], str]:
+        field_order = ("productionyear", "releaseyear", "publishyear", "showyear", "year")
+        nodes: List[Dict[str, Any]] = []
+
+        def visit(current: Any):
+            if current is None:
+                return
+            if isinstance(current, dict):
+                nodes.append(current)
+                for nested in current.values():
+                    if isinstance(nested, (dict, list, tuple, set)):
+                        visit(nested)
+                return
+            if isinstance(current, (list, tuple, set)):
+                for nested in current:
+                    visit(nested)
+                return
+            for serializer_name in ("model_dump", "dict"):
+                serializer = getattr(current, serializer_name, None)
+                if not callable(serializer):
+                    continue
+                try:
+                    serialized = serializer() or {}
+                except Exception:
+                    continue
+                if isinstance(serialized, dict):
+                    visit(serialized)
+                    return
+
+        visit(payload)
+        for expected_field in field_order:
+            for node in nodes:
+                for key, value in node.items():
+                    if self._clean_text(key).replace("_", "").lower() != expected_field:
+                        continue
+                    year = self._normalize_media_year(value)
+                    if year:
+                        return year, expected_field
+        return None, ""
+
+    def _extract_source_alternate_titles(
+        self,
+        payload: Any,
+        primary_title: Optional[str] = None,
+    ) -> List[str]:
+        alias_fields = {
+            "originaltitle", "englishtitle", "enname", "othername", "alias", "aliases", "aka",
+        }
+        values: List[Any] = []
+
+        def visit(current: Any):
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    normalized_key = self._clean_text(key).replace("_", "").lower()
+                    if normalized_key in alias_fields:
+                        values.append(value)
+                    elif isinstance(value, (dict, list, tuple, set)):
+                        visit(value)
+            elif isinstance(current, (list, tuple, set)):
+                for nested in current:
+                    visit(nested)
+
+        visit(payload)
+        return self._normalize_alternate_titles(values, primary_title=primary_title)
+
+    def _build_recognition_title_candidates(self, item: Dict[str, Any]) -> List[str]:
+        primary_title = self._clean_text(item.get("title"))
+        values = [primary_title]
+        if primary_title:
+            promo_markers = (
+                r"定档|官宣|预告(?:片)?|先导片|首发|预约(?:开启)?|即将上线|即将播出|"
+                r"上线日期|开播日期|全网独播|精彩看点"
+            )
+            cleaned = re.sub(
+                rf"\s*[【\[（(][^】\]）)]*(?:{promo_markers})[^】\]）)]*[】\]）)]\s*",
+                " ",
+                primary_title,
+                flags=re.IGNORECASE,
+            )
+            cleaned = re.sub(
+                rf"\s*(?:[|｜:：·]|\s+-\s+)\s*(?:{promo_markers}).*$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            cleaned = re.sub(
+                rf"\s+(?:{promo_markers})(?:\s*[：:]?.*)?$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            cleaned = self._clean_text(cleaned)
+            if cleaned:
+                values.append(cleaned)
+        values.extend(item.get("alternate_titles") or [])
+        return self._normalize_alternate_titles(values)[:4]
+
+    def _normalize_media_year(self, value: Any) -> Optional[str]:
+        matched = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", self._clean_text(value))
+        if not matched:
+            return None
+        year = safe_int(matched.group(1), 0)
+        if 1900 <= year <= datetime.now().year + 2:
+            return str(year)
+        return None
+
+    def _guess_year(self, title: str, release_date: Optional[str], text: Optional[str]) -> Optional[str]:
+        title_year = self._normalize_media_year(title)
+        if title_year:
+            return title_year
+        text_value = self._clean_text(text)
+        if not text_value:
+            return None
+        label = r"(?:出品|制作|首播|上映|发行|公映|年份|年度|production|release|premiere)"
+        for pattern in (
+            rf"{label}\s*(?:年份|时间|日期|于)?\s*[:：]?\s*((?:19|20)\d{{2}})(?:年)?",
+            rf"((?:19|20)\d{{2}})(?:年)?\s*{label}",
+        ):
+            matched = re.search(pattern, text_value, re.IGNORECASE)
+            if matched:
+                return self._normalize_media_year(matched.group(1))
+        return None
 
     def _make_lookup_key(self, title: str, year: Optional[str], type_key: Optional[str] = None) -> str:
         title_part = self._normalize_compare_text(title)
@@ -4468,8 +4931,12 @@ class UpcomingReleases(_PluginBase):
                 .replace("\\t", "\t")
             )
 
-    def _extract_js_string_field(self, text: str, field: str) -> str:
-        matched = re.search(rf'{re.escape(field)}:"', text or "", re.IGNORECASE)
+    def _extract_js_string_field(self, text: str, field: str) -> str:
+        matched = re.search(
+            rf'(?<![0-9A-Za-z_])["\']?{re.escape(field)}["\']?\s*:\s*"',
+            text or "",
+            re.IGNORECASE,
+        )
         if not matched:
             return ""
         start = matched.end()
@@ -4486,7 +4953,16 @@ class UpcomingReleases(_PluginBase):
             if char == '"':
                 return self._decode_js_string("".join(value))
             value.append(char)
-        return self._decode_js_string("".join(value))
+        return self._decode_js_string("".join(value))
+
+    def _extract_js_year_field(self, text: str, field: str) -> str:
+        string_value = self._extract_js_string_field(text, field)
+        if string_value:
+            return string_value
+        return self._search_text(
+            text,
+            rf'(?<![0-9A-Za-z_])["\']?{re.escape(field)}["\']?\s*:\s*["\']?((?:19|20)\d{{2}})',
+        )
 
     def _extract_bracket_array(self, text: str, start_index: int) -> Optional[str]:
         if start_index < 0 or start_index >= len(text):
