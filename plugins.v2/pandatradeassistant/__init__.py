@@ -13,7 +13,7 @@ from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
 
 from .client import PandaClientError, PandaFriendTradeClient
-from .engine import AutomationEngine, enrich_audit_record
+from .engine import AutomationEngine, build_daily_summary, enrich_audit_record
 from .presentation import build_home_view
 from .strategy import market_candidate_decision, rank_market_candidates
 
@@ -106,7 +106,7 @@ class PandaTradeAssistant(_PluginBase):
     plugin_name = "熊猫交易助手"
     plugin_desc = "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。"
     plugin_icon = "pandatradeassistant.png"
-    plugin_version = "0.2.13"
+    plugin_version = "0.2.15"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "pandatradeassistant_"
@@ -129,9 +129,20 @@ class PandaTradeAssistant(_PluginBase):
         invalid_snapshot = "snapshot" in self._state and not self._snapshot_matches_site()
         if invalid_snapshot:
             self._state.pop("snapshot", None)
+        snapshot_errors = (self._state.get("snapshot") or {}).get("errors") or {}
+        legacy_read_circuit = bool(
+            self._state.get("circuit_open")
+            and not self._state.get("circuit_scope")
+            and self._state.get("circuit_reason") == "PandaClientError"
+            and len(snapshot_errors) >= 3
+        )
+        if legacy_read_circuit:
+            self._state["circuit_open"] = False
+            self._state["consecutive_failures"] = 0
+            self._state.pop("circuit_reason", None)
         self._prune_history()
         self.update_config(self._config)
-        if invalid_snapshot:
+        if invalid_snapshot or legacy_read_circuit:
             self._persist()
 
     def get_state(self) -> bool:
@@ -327,12 +338,13 @@ class PandaTradeAssistant(_PluginBase):
             return
         today = datetime.now().astimezone().date().isoformat()
         records = [item for item in self._history if str(item.get("time", "")).startswith(today)]
-        success = sum(1 for item in records if item.get("success"))
-        failed = sum(1 for item in records if not item.get("success") and not item.get("planned"))
         self.post_message(
             mtype=NotificationType.Plugin,
             title="熊猫交易助手每日汇总",
-            text=self._notification_text(records, f"今日记录 {len(records)} 条，成功 {success} 条，失败 {failed} 条。"),
+            text=build_daily_summary(
+                records,
+                include_details=bool(self._config.get("notification_include_details")),
+            ),
         )
 
     def _snapshot_section(self, key: str) -> Any:
@@ -357,7 +369,9 @@ class PandaTradeAssistant(_PluginBase):
             "configured": self._config.get("site_id") is not None,
             "risk_acknowledged": self._config.get("risk_acknowledged"),
             "paused": self._state.get("paused", False), "circuit_open": self._state.get("circuit_open", False),
-            "circuit_reason": self._state.get("circuit_reason"), "screening_circuit": self._state.get("screening_circuit"),
+            "circuit_reason": self._state.get("circuit_reason"), "circuit_scope": self._state.get("circuit_scope"),
+            "screening_circuit": self._state.get("screening_circuit"),
+            "read_failure_streak": int(self._state.get("read_failure_streak") or 0),
             "last_run_at": self._state.get("last_run_at"),
             "snapshot_at": (self._state.get("snapshot") or {}).get("refreshed_at") if self._snapshot_matches_site() else None,
             "refresh_attempted_at": (self._state.get("snapshot") or {}).get("refresh_attempted_at") if self._snapshot_matches_site() else None,
@@ -491,6 +505,7 @@ class PandaTradeAssistant(_PluginBase):
         self._state["circuit_open"] = False
         self._state["consecutive_failures"] = 0
         self._state.pop("circuit_reason", None)
+        self._state.pop("circuit_scope", None)
         self._state.pop("screening_circuit", None)
         self._persist()
         return {"success": True, "message": "已恢复并重置熔断"}
