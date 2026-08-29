@@ -82,6 +82,8 @@ SUMMARY_ATTENTION_ACTIONS = {"budget_gate", "reserve_gate", "slot_gate", "candid
 MODULE_READ_REQUIREMENTS = {
     "claims": ("home",),
     "cultivation": ("home",),
+    "work": ("home",),
+    "interaction": ("home",),
     "market": ("home", "inventory", "market"),
     "office": ("home", "office"),
     "screening": ("screening",),
@@ -367,6 +369,7 @@ class AutomationEngine:
         self.state.setdefault("circuit_open", False)
         self.state.setdefault("target_cooldowns", {})
         self.state.setdefault("daily_trade", {})
+        self.state.setdefault("daily_interaction", {})
 
     def _record(self, subsystem: str, action: str, success: bool, message: str, **extra: Any) -> Dict[str, Any]:
         record = enrich_audit_record({
@@ -558,18 +561,33 @@ class AutomationEngine:
                     ))
         return records
 
-    def _run_cultivation(self, home: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    def _run_cultivation(
+        self,
+        home: Mapping[str, Any],
+        run_work: bool = True,
+        run_interaction: bool = True,
+    ) -> List[Dict[str, Any]]:
         records = []
-        paid_budget = float(self.config.get("daily_interaction_budget") or 0)
+        today = datetime.now().astimezone().date().isoformat()
+        daily_interaction = self.state["daily_interaction"]
+        interaction_ledger = daily_interaction.setdefault(today, {"spent": 0.0})
+        for old_key in list(daily_interaction):
+            if old_key != today:
+                daily_interaction.pop(old_key, None)
+        paid_budget = max(
+            0.0,
+            float(self.config.get("daily_interaction_budget") or 0)
+            - float(interaction_ledger.get("spent") or 0),
+        )
         for index, asset in enumerate(home.get("my_assets") or [], start=1):
             if asset.get("is_temporary"):
                 continue
-            work = choose_work(asset)
+            work = choose_work(asset) if run_work else None
             if work:
                 work_name = str(work.get("name") or WORK_NAMES.get(str(work["key"]), "日常工作"))
                 detail = f"第 {index} 位佣人执行「{work_name}」；选择原因：{work.get('reason') or '均衡成长'}"
                 records.append(self._execute("cultivation", "friendTradeWork", {"target_uid": asset.get("slave_uid"), "work_key": work["key"]}, detail=detail))
-            interaction = choose_interaction(asset, paid_budget)
+            interaction = choose_interaction(asset, paid_budget) if run_interaction else None
             if interaction:
                 interaction_name = INTERACTION_NAMES.get(str(interaction["key"]), "日常互动")
                 cost = float(interaction.get("cost") or 0)
@@ -577,12 +595,15 @@ class AutomationEngine:
                 reward_hint = f"消耗魔力 {cost:g}" if cost > 0 else None
                 reward_items = ([{"key": "magic", "label": "魔力", "amount": -cost, "source": "known_input"}]
                                 if cost > 0 else [])
-                records.append(self._execute(
+                record = self._execute(
                     "cultivation", "friendTradeInteract",
                     {"target_uid": asset.get("slave_uid"), "interaction_key": interaction["key"]},
                     detail=detail, reward_hint=reward_hint, reward_items=reward_items,
-                ))
-                paid_budget = max(0.0, paid_budget - float(interaction.get("cost") or 0))
+                )
+                records.append(record)
+                if record.get("success") and cost > 0:
+                    interaction_ledger["spent"] = float(interaction_ledger.get("spent") or 0) + cost
+                    paid_budget = max(0.0, paid_budget - cost)
         return records
 
     def _market_rows(self, first_page: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -752,18 +773,41 @@ class AutomationEngine:
 
         if "claims" in selected and (force_selected or self.config.get("auto_claim", True)) and ready("claims"):
             records.extend(self._run_claims(home))
-        if "cultivation" in selected and (force_selected or self.config.get("auto_cultivation", True)) and ready("cultivation"):
-            records.extend(self._run_cultivation(home))
+        cultivation_selected = bool({"cultivation", "work", "interaction"}.intersection(selected))
+        if cultivation_selected and ready("cultivation"):
+            if force_selected:
+                run_work = "work" in selected or "cultivation" in selected
+                run_interaction = "interaction" in selected or "cultivation" in selected
+            else:
+                run_work = bool(self.config.get("auto_work", True))
+                run_interaction = bool(self.config.get("auto_interaction", True))
+            if run_work or run_interaction:
+                records.extend(self._run_cultivation(home, run_work, run_interaction))
         if "market" in selected and (force_selected or self.config.get("auto_market", False)) and ready("market"):
             records.extend(self._run_market(home, snapshot.get("market") or {}, snapshot.get("inventory") or {}))
         if "office" in selected and (force_selected or self.config.get("auto_office", True)) and ready("office"):
             records.extend(self._run_office(home, snapshot.get("office") or {}))
         if "screening" in selected and (force_selected or self.config.get("auto_screening", True)) and ready("screening"):
             records.extend(self._run_screening(snapshot.get("screening") or {}))
+        post_refresh = None
+        completed_write = any(
+            record.get("success")
+            and not (record.get("skipped") or record.get("planned"))
+            and str(record.get("action") or "").startswith("friendTrade")
+            for record in records
+        )
+        if completed_write:
+            snapshot = self.refresh()
+            post_refresh = {
+                "success": "home" not in (snapshot.get("errors") or {}),
+                "errors": dict(snapshot.get("errors") or {}),
+                "time": snapshot.get("refresh_attempted_at"),
+            }
         return {
             "success": not any(not record.get("success") and not (record.get("skipped") or record.get("planned")) for record in records),
             "records": records,
             "snapshot": snapshot,
+            "post_refresh": post_refresh,
             "circuit_open": bool(self.state.get("circuit_open")),
         }
 

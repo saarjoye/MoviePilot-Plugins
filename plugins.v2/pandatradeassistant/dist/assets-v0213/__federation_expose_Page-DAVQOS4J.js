@@ -1,1 +1,0 @@
-import{importShared as e}from"./__federation_fn_import-E6wRZccp.js";import{_ as a}from"./AppPage.vue_vue_type_script_setup_true_lang-DAQ_JDhl.js";const{defineComponent:t}=await e("vue"),{openBlock:n,createBlock:p}=await e("vue"),m=t({__name:"Page",props:{api:{}},setup(o){return(c,r)=>(n(),p(a,{api:o.api},null,8,["api"]))}});export{m as default};

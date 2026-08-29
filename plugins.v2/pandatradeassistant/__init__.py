@@ -23,7 +23,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "site_id": None,
     "risk_acknowledged": False,
     "auto_claim": True,
-    "auto_cultivation": True,
+    "auto_work": True,
+    "auto_interaction": True,
     "auto_market": False,
     "auto_office": True,
     "auto_screening": True,
@@ -50,7 +51,7 @@ SENSITIVE_KEYS = {
     "authorization", "cookie", "cookies", "ua", "user_agent", "proxy", "proxies",
     "token", "challenge_token", "headers", "session", "password",
 }
-MODULES = {"claims", "cultivation", "market", "office", "screening", "posters"}
+MODULES = {"claims", "cultivation", "work", "interaction", "market", "office", "screening", "posters"}
 
 
 def normalize_config(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -58,7 +59,13 @@ def normalize_config(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     result = deepcopy(DEFAULT_CONFIG)
     incoming = dict(config or {})
     result.update({key: incoming[key] for key in DEFAULT_CONFIG if key in incoming})
-    for key in ("enabled", "risk_acknowledged", "auto_claim", "auto_cultivation",
+    # 0.2.17 及更早版本只有一个培养开关，升级时保持原有选择。
+    if "auto_cultivation" in incoming:
+        if "auto_work" not in incoming:
+            result["auto_work"] = bool(incoming["auto_cultivation"])
+        if "auto_interaction" not in incoming:
+            result["auto_interaction"] = bool(incoming["auto_cultivation"])
+    for key in ("enabled", "risk_acknowledged", "auto_claim", "auto_work", "auto_interaction",
                 "auto_market", "auto_office", "auto_screening", "allow_snatch",
                 "notify_failures", "notify_success", "daily_summary_enabled",
                 "notification_include_details"):
@@ -106,7 +113,7 @@ class PandaTradeAssistant(_PluginBase):
     plugin_name = "熊猫交易助手"
     plugin_desc = "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。"
     plugin_icon = "pandatradeassistant.png"
-    plugin_version = "0.2.15"
+    plugin_version = "0.2.18"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "pandatradeassistant_"
@@ -122,10 +129,28 @@ class PandaTradeAssistant(_PluginBase):
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
         self._config = normalize_config(config)
+        auto_selected_site = False
+        if self._config.get("site_id") is None:
+            available_sites = PandaFriendTradeClient.available_sites()
+            if len(available_sites) == 1 and available_sites[0].get("id") is not None:
+                self._config = normalize_config({
+                    **self._config,
+                    "site_id": available_sites[0]["id"],
+                    "enabled": False,
+                })
+                auto_selected_site = True
         stored_state = self.get_data("state") or {}
         stored_history = self.get_data("history") or []
         self._state = dict(stored_state) if isinstance(stored_state, Mapping) else {}
         self._history = list(stored_history) if isinstance(stored_history, list) else []
+        if auto_selected_site:
+            self._audit({
+                "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "subsystem": "config",
+                "action": "site_auto_select",
+                "success": True,
+                "message": "检测到唯一熊猫站点，已自动选择；自动执行保持关闭",
+            })
         invalid_snapshot = "snapshot" in self._state and not self._snapshot_matches_site()
         if invalid_snapshot:
             self._state.pop("snapshot", None)
@@ -142,7 +167,7 @@ class PandaTradeAssistant(_PluginBase):
             self._state.pop("circuit_reason", None)
         self._prune_history()
         self.update_config(self._config)
-        if invalid_snapshot or legacy_read_circuit:
+        if auto_selected_site or invalid_snapshot or legacy_read_circuit:
             self._persist()
 
     def get_state(self) -> bool:
@@ -152,7 +177,7 @@ class PandaTradeAssistant(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
-        return "vue", "dist/assets-v0213"
+        return "vue", "dist/assets-v0218"
 
     @staticmethod
     def get_sidebar_nav() -> List[Dict[str, Any]]:
@@ -184,6 +209,8 @@ class PandaTradeAssistant(_PluginBase):
             ]},
             {"component": "VSwitch", "props": {"model": "risk_acknowledged", "label": "我已知晓站规与账号风险"}},
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用自动执行与调度"}},
+            {"component": "VSwitch", "props": {"model": "auto_work", "label": "自动安排工作"}},
+            {"component": "VSwitch", "props": {"model": "auto_interaction", "label": "自动进行互动"}},
             {"component": "VSwitch", "props": {"model": "notify_failures", "label": "异常即时通知"}},
             {"component": "VSwitch", "props": {"model": "notify_success", "label": "成功任务通知"}},
             {"component": "VSwitch", "props": {"model": "daily_summary_enabled", "label": "每日汇总通知"}},
@@ -302,15 +329,24 @@ class PandaTradeAssistant(_PluginBase):
             return {"success": False, "message": "请先在设置中选择熊猫站点"}
         if not self._config.get("risk_acknowledged") or not self._config.get("enabled"):
             return {"success": False, "message": "请先确认风险并启用自动执行"}
-        if self._state.get("paused") or self._state.get("circuit_open"):
-            return {"success": False, "message": "插件已暂停或熔断，请先恢复"}
+        if self._state.get("paused"):
+            return {"success": False, "message": "插件已暂停，未执行任何任务；请点击“恢复”后重试"}
+        if self._state.get("circuit_open"):
+            return {"success": False, "message": "插件已熔断，未执行任何任务；请检查审计记录并点击“恢复”"}
         if not self._lock.acquire(blocking=False):
             return {"success": False, "busy": True, "message": "已有任务正在执行"}
         try:
             engine = AutomationEngine(self._client(), self._config, self._state, self._audit)
             result = sanitize(engine.run(modules, force_selected=force_selected))
-            self._state["last_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-            self._state["last_result"] = {"success": result["success"]}
+            finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._state["last_run_at"] = finished_at
+            self._state["last_result"] = sanitize({
+                "success": result["success"],
+                "time": finished_at,
+                "modules": list(modules or ["all"]),
+                "records": list(result.get("records") or [])[-50:],
+                "post_refresh": result.get("post_refresh"),
+            })
             self._persist()
             if not result["success"] or result.get("circuit_open"):
                 self._notify_failure("熊猫交易助手执行异常", "任务失败或已触发熔断，请在插件审计记录中查看。")
@@ -373,6 +409,7 @@ class PandaTradeAssistant(_PluginBase):
             "screening_circuit": self._state.get("screening_circuit"),
             "read_failure_streak": int(self._state.get("read_failure_streak") or 0),
             "last_run_at": self._state.get("last_run_at"),
+            "last_result": self._state.get("last_result"),
             "snapshot_at": (self._state.get("snapshot") or {}).get("refreshed_at") if self._snapshot_matches_site() else None,
             "refresh_attempted_at": (self._state.get("snapshot") or {}).get("refresh_attempted_at") if self._snapshot_matches_site() else None,
             "snapshot_valid": self._snapshot_matches_site(),
@@ -384,9 +421,11 @@ class PandaTradeAssistant(_PluginBase):
             "automation": {
                 "schedule": self._config.get("cron"),
                 "market_watch_schedule": self._config.get("market_watch_cron"),
+                "daily_interaction_budget": self._config.get("daily_interaction_budget"),
                 "modules": {
                     "claims": self._config.get("auto_claim"),
-                    "cultivation": self._config.get("auto_cultivation"),
+                    "work": self._config.get("auto_work"),
+                    "interaction": self._config.get("auto_interaction"),
                     "market": self._config.get("auto_market"),
                     "office": self._config.get("auto_office"),
                     "screening": self._config.get("auto_screening"),

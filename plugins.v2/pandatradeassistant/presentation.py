@@ -78,12 +78,12 @@ def _income_view(home: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "total": income.get("total_earned"),
         "today": income.get("today_earned"),
-        "servant": source("daily_income").get("today"),
-        "work": source("work_income").get("today"),
-        "work_tip": source("work_tip").get("today"),
-        "trade": source("trade_income").get("today"),
-        "task": source("task_reward").get("today"),
-        "business": source("business_reward").get("today"),
+        "servant": source("daily_income").get("total"),
+        "work": source("work_income").get("total"),
+        "work_tip": source("work_tip").get("total"),
+        "trade": source("trade_income").get("total"),
+        "task": source("task_reward").get("total"),
+        "business": source("business_reward").get("total"),
         "available": bool(income),
     }
 
