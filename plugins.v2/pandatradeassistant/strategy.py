@@ -83,8 +83,8 @@ def score_market_candidate(
     price = float(candidate.get("current_price") or candidate.get("price") or 0)
     reference = max(float(median_price or price or 1), 1.0)
     price_score = clamp(100.0 - max(0.0, price / reference - 0.5) * 70.0)
-    today_trades = int(candidate.get("today_trade_count") or candidate.get("today_trades") or 0)
-    protected = bool(nested(candidate, "protection_summary", "is_protected", default=False))
+    today_trades = int(candidate.get("trade_count_today") or candidate.get("today_trade_count") or candidate.get("today_trades") or 0)
+    protected = bool(candidate.get("is_protected", nested(candidate, "protection_summary", "is_protected", default=False)))
     stability_score = clamp(100.0 - today_trades * 18.0 - (35.0 if protected else 0.0))
 
     breakdown = {

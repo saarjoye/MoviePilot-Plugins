@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
-from threading import Lock
+from threading import Condition
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
@@ -12,8 +12,21 @@ from apscheduler.triggers.cron import CronTrigger
 from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
 
-from .client import PandaClientError, PandaFriendTradeClient
-from .engine import AutomationEngine, build_daily_summary, enrich_audit_record
+from .client import (
+    PandaAuthError,
+    PandaClientError,
+    PandaClientPolicyError,
+    PandaFriendTradeClient,
+    PandaSchemaError,
+    safe_error_message,
+)
+from .engine import (
+    AutomationEngine,
+    build_daily_summary,
+    build_failure_notification,
+    enrich_audit_record,
+    failure_context,
+)
 from .presentation import build_home_view
 from .strategy import market_candidate_decision, rank_market_candidates
 
@@ -113,7 +126,7 @@ class PandaTradeAssistant(_PluginBase):
     plugin_name = "熊猫交易助手"
     plugin_desc = "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。"
     plugin_icon = "pandatradeassistant.png"
-    plugin_version = "0.2.18"
+    plugin_version = "0.2.23"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "pandatradeassistant_"
@@ -125,7 +138,10 @@ class PandaTradeAssistant(_PluginBase):
         self._config = normalize_config(None)
         self._state: Dict[str, Any] = {}
         self._history: List[Dict[str, Any]] = []
-        self._lock = Lock()
+        self._run_condition = Condition()
+        self._run_active = False
+        self._active_run_kind: Optional[str] = None
+        self._scheduled_waiters = 0
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
         self._config = normalize_config(config)
@@ -177,17 +193,11 @@ class PandaTradeAssistant(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
-        return "vue", "dist/assets-v0218"
+        return "vue", "dist/assets-v0223"
 
     @staticmethod
     def get_sidebar_nav() -> List[Dict[str, Any]]:
-        return [{
-            "title": "熊猫交易助手",
-            "icon": "mdi-handshake-outline",
-            "section": "system",
-            "nav_key": "main",
-            "order": 30,
-        }]
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         sites = PandaFriendTradeClient.available_sites()
@@ -214,7 +224,7 @@ class PandaTradeAssistant(_PluginBase):
             {"component": "VSwitch", "props": {"model": "notify_failures", "label": "异常即时通知"}},
             {"component": "VSwitch", "props": {"model": "notify_success", "label": "成功任务通知"}},
             {"component": "VSwitch", "props": {"model": "daily_summary_enabled", "label": "每日汇总通知"}},
-            {"component": "VSwitch", "props": {"model": "notification_include_details", "label": "通知包含任务与收益明细"}},
+            {"component": "VSwitch", "props": {"model": "notification_include_details", "label": "每日汇总包含完成任务明细"}},
         ]}]
         return form, deepcopy(DEFAULT_CONFIG)
 
@@ -271,6 +281,8 @@ class PandaTradeAssistant(_PluginBase):
 
     def _audit(self, record: Dict[str, Any]) -> None:
         clean = sanitize(record)
+        clean.setdefault("trigger", getattr(self, "_active_trigger", "系统内部"))
+        clean.setdefault("phase", getattr(self, "_active_phase", "系统处理"))
         self._history.append(clean)
         self._prune_history()
 
@@ -295,9 +307,31 @@ class PandaTradeAssistant(_PluginBase):
             return False
         return str(snapshot.get("site_id")) == str(self._config.get("site_id"))
 
+    def _post_notification(self, title: str, text: str) -> bool:
+        """发送通知并隔离渠道异常，禁止通知失败递归触发通知。"""
+        try:
+            self.post_message(mtype=NotificationType.Plugin, title=title, text=text[:500])
+            return True
+        except Exception as error:
+            reason = safe_error_message("通知推送", str(error))
+            self._audit({
+                "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "subsystem": "notification", "action": "dispatch", "success": False,
+                "message": reason, "failure_reason": reason,
+                "error_type": type(error).__name__, "impact": "本次通知未送达",
+                "action_required": True,
+                "recovery_hint": "检查 MoviePilot 全局通知渠道配置",
+                "severity": "warning",
+            })
+            try:
+                self._persist()
+            except Exception:
+                pass
+            return False
+
     def _notify_failure(self, title: str, text: str) -> None:
         if self._config.get("notify_failures"):
-            self.post_message(mtype=NotificationType.Plugin, title=title, text=text[:500])
+            self._post_notification(title, text)
 
     def _notification_text(self, records: List[Mapping[str, Any]], prefix: str) -> str:
         lines = [prefix]
@@ -318,68 +352,202 @@ class PandaTradeAssistant(_PluginBase):
     def _notify_success(self, records: List[Mapping[str, Any]]) -> None:
         completed = [item for item in records if item.get("success") and not (item.get("skipped") or item.get("planned"))]
         if self._config.get("notify_success") and completed:
-            self.post_message(
-                mtype=NotificationType.Plugin,
-                title="熊猫交易助手执行完成",
-                text=self._notification_text(completed, f"本次成功完成 {len(completed)} 项任务。"),
+            self._post_notification(
+                "熊猫交易助手执行完成",
+                self._notification_text(completed, f"本次成功完成 {len(completed)} 项任务。"),
             )
 
-    def _run(self, modules: Optional[List[str]] = None, force_selected: bool = False) -> Dict[str, Any]:
+    def _notify_run_failure(
+        self, result: Mapping[str, Any], circuit_before: bool, trigger: str = "未标明",
+    ) -> None:
+        failed = [
+            enrich_audit_record(item)
+            for item in (result.get("records") or [])
+            if not item.get("success") and not (item.get("skipped") or item.get("planned"))
+        ]
+        circuit_open = bool(result.get("circuit_open") or self._state.get("circuit_open"))
+        if circuit_open and circuit_before:
+            return
+        if failed or circuit_open:
+            title, text = build_failure_notification(
+                failed, trigger=trigger, circuit_open=circuit_open,
+                consecutive_failures=int(self._state.get("consecutive_failures") or 0),
+                read_failure_streak=int(self._state.get("read_failure_streak") or 0),
+            )
+            self._notify_failure(title, text)
+
+    def _execution_gate_message(self) -> Optional[str]:
         if self._config.get("site_id") is None:
-            return {"success": False, "message": "请先在设置中选择熊猫站点"}
+            return "请先在设置中选择熊猫站点"
         if not self._config.get("risk_acknowledged") or not self._config.get("enabled"):
-            return {"success": False, "message": "请先确认风险并启用自动执行"}
+            return "请先确认风险并启用自动执行"
         if self._state.get("paused"):
-            return {"success": False, "message": "插件已暂停，未执行任何任务；请点击“恢复”后重试"}
+            return "插件已暂停，未执行任何任务；请点击“恢复”后重试"
         if self._state.get("circuit_open"):
-            return {"success": False, "message": "插件已熔断，未执行任何任务；请检查审计记录并点击“恢复”"}
-        if not self._lock.acquire(blocking=False):
+            return "插件已熔断，未执行任何任务；请检查审计记录并点击“恢复”"
+        return None
+
+    def _acquire_run_slot(self, run_kind: str) -> Tuple[bool, bool]:
+        """常规任务等待当前运行结束；市场和手动任务不排队。"""
+        with self._run_condition:
+            if run_kind == "scheduled":
+                waited = self._run_active
+                self._scheduled_waiters += 1
+                try:
+                    while self._run_active:
+                        self._run_condition.wait()
+                    self._run_active = True
+                    self._active_run_kind = run_kind
+                    return True, waited
+                finally:
+                    self._scheduled_waiters -= 1
+            if self._run_active or self._scheduled_waiters:
+                return False, False
+            self._run_active = True
+            self._active_run_kind = run_kind
+            return True, False
+
+    def _release_run_slot(self) -> None:
+        with self._run_condition:
+            self._run_active = False
+            self._active_run_kind = None
+            self._run_condition.notify_all()
+
+    def _remember_run_result(
+        self, result: Mapping[str, Any], modules: Optional[List[str]], trigger: str,
+        run_kind: str, finished_at: str,
+    ) -> Dict[str, Any]:
+        snapshot = sanitize({
+            "success": bool(result.get("success")),
+            "time": finished_at,
+            "modules": list(modules or ["all"]),
+            "trigger": trigger,
+            "run_kind": run_kind,
+            "records": list(result.get("records") or [])[-50:],
+            "post_refresh": result.get("post_refresh"),
+        })
+        self._state["last_run_at"] = finished_at
+        self._state["last_result"] = snapshot
+        state_key = {
+            "scheduled": "last_scheduled_result",
+            "market": "last_market_watch_result",
+            "manual": "last_manual_result",
+        }.get(run_kind)
+        if state_key:
+            self._state[state_key] = dict(snapshot)
+        return snapshot
+
+    def _run(
+        self, modules: Optional[List[str]] = None, force_selected: bool = False,
+        trigger: str = "手动执行", run_kind: str = "manual",
+    ) -> Dict[str, Any]:
+        gate_message = self._execution_gate_message()
+        if gate_message:
+            return {"success": False, "message": gate_message}
+        acquired, waited = self._acquire_run_slot(run_kind)
+        if not acquired:
+            if run_kind == "market":
+                return {
+                    "success": True, "busy": True, "skipped": True,
+                    "message": "常规自动任务正在执行或等待，市场巡检跳过本轮",
+                }
             return {"success": False, "busy": True, "message": "已有任务正在执行"}
+        circuit_before = bool(self._state.get("circuit_open"))
+        phase = "站点初始化"
+        if waited and run_kind == "scheduled":
+            trigger = "常规定时（冲突后补跑）"
+        self._active_trigger = trigger
+        self._active_phase = phase
         try:
-            engine = AutomationEngine(self._client(), self._config, self._state, self._audit)
+            gate_message = self._execution_gate_message()
+            if gate_message:
+                return {"success": False, "message": gate_message}
+            if waited and run_kind == "scheduled":
+                self._active_phase = "调度协调"
+                self._audit({
+                    "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "subsystem": "scheduler", "action": "deferred_run", "success": True,
+                    "message": "市场巡检结束后补跑本轮常规自动任务",
+                    "trigger": trigger, "phase": "调度协调",
+                })
+            client = self._client()
+            phase = "实时读取与任务执行"
+            self._active_phase = phase
+            engine = AutomationEngine(
+                client, self._config, self._state, self._audit, trigger=trigger,
+            )
             result = sanitize(engine.run(modules, force_selected=force_selected))
+            phase = "结果保存"
+            self._active_phase = phase
             finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
-            self._state["last_run_at"] = finished_at
-            self._state["last_result"] = sanitize({
-                "success": result["success"],
-                "time": finished_at,
-                "modules": list(modules or ["all"]),
-                "records": list(result.get("records") or [])[-50:],
-                "post_refresh": result.get("post_refresh"),
-            })
+            self._remember_run_result(result, modules, trigger, run_kind, finished_at)
             self._persist()
+            phase = "通知发送"
+            self._active_phase = phase
             if not result["success"] or result.get("circuit_open"):
-                self._notify_failure("熊猫交易助手执行异常", "任务失败或已触发熔断，请在插件审计记录中查看。")
+                self._notify_run_failure(result, circuit_before, trigger)
             else:
                 self._notify_success(result.get("records") or [])
             return result
         except Exception as error:
+            should_circuit = isinstance(error, (PandaAuthError, PandaSchemaError, PandaClientPolicyError)) or not isinstance(error, PandaClientError)
+            if should_circuit:
+                self._state["circuit_open"] = True
+                self._state["circuit_scope"] = "write"
+                self._state["circuit_reason"] = type(error).__name__
             self._state["last_error"] = type(error).__name__
-            self._audit({"time": datetime.now().astimezone().isoformat(timespec="seconds"), "subsystem": "plugin", "action": "run", "success": False, "message": str(error)})
+            reason = safe_error_message("插件任务", str(error))
+            record = {
+                "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "subsystem": "plugin", "action": "run", "success": False,
+                "message": reason, "failure_reason": reason,
+                "error_type": type(error).__name__,
+                "result_unknown": bool(getattr(error, "result_unknown", False)),
+                "trigger": trigger, "phase": phase,
+            }
+            record.update(failure_context(
+                record, circuit_open=bool(self._state.get("circuit_open")),
+                read_failure_streak=int(self._state.get("read_failure_streak") or 0),
+            ))
+            self._audit(record)
+            finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._remember_run_result(
+                {"success": False, "records": [record]}, modules, trigger, run_kind, finished_at,
+            )
             self._persist()
-            self._notify_failure("熊猫交易助手执行失败", "插件无法完成任务，请检查站点配置与审计记录。")
-            return {"success": False, "message": str(error)}
+            title, text = build_failure_notification(
+                [record], trigger=trigger,
+                circuit_open=bool(self._state.get("circuit_open")),
+                consecutive_failures=int(self._state.get("consecutive_failures") or 0),
+                read_failure_streak=int(self._state.get("read_failure_streak") or 0),
+            )
+            self._notify_failure(title, text)
+            return {"success": False, "message": reason}
         finally:
-            self._lock.release()
+            self._active_phase = "系统处理"
+            self._release_run_slot()
 
-    def run_scheduled(self) -> None:
-        self._run()
+    def run_scheduled(self) -> Dict[str, Any]:
+        return self._run(trigger="常规定时", run_kind="scheduled")
 
-    def run_market_watch(self) -> None:
+    def run_market_watch(self) -> Dict[str, Any]:
         """定期检查真实佣人数量，在存在空槽时按市场策略补位。"""
-        self._run(["market"], force_selected=True)
+        return self._run(
+            ["market"], force_selected=True, trigger="市场补位", run_kind="market",
+        )
 
     def send_daily_summary(self) -> None:
         if not self._config.get("daily_summary_enabled"):
             return
-        today = datetime.now().astimezone().date().isoformat()
+        now = datetime.now().astimezone()
+        today = now.date().isoformat()
         records = [item for item in self._history if str(item.get("time", "")).startswith(today)]
-        self.post_message(
-            mtype=NotificationType.Plugin,
-            title="熊猫交易助手每日汇总",
-            text=build_daily_summary(
+        self._post_notification(
+            f"熊猫交易助手 · {now.month}月{now.day}日汇总",
+            build_daily_summary(
                 records,
                 include_details=bool(self._config.get("notification_include_details")),
+                state=self._state,
             ),
         )
 
@@ -406,10 +574,14 @@ class PandaTradeAssistant(_PluginBase):
             "risk_acknowledged": self._config.get("risk_acknowledged"),
             "paused": self._state.get("paused", False), "circuit_open": self._state.get("circuit_open", False),
             "circuit_reason": self._state.get("circuit_reason"), "circuit_scope": self._state.get("circuit_scope"),
+            "consecutive_failures": int(self._state.get("consecutive_failures") or 0),
             "screening_circuit": self._state.get("screening_circuit"),
             "read_failure_streak": int(self._state.get("read_failure_streak") or 0),
             "last_run_at": self._state.get("last_run_at"),
             "last_result": self._state.get("last_result"),
+            "last_scheduled_result": self._state.get("last_scheduled_result"),
+            "last_market_watch_result": self._state.get("last_market_watch_result"),
+            "last_manual_result": self._state.get("last_manual_result"),
             "snapshot_at": (self._state.get("snapshot") or {}).get("refreshed_at") if self._snapshot_matches_site() else None,
             "refresh_attempted_at": (self._state.get("snapshot") or {}).get("refresh_attempted_at") if self._snapshot_matches_site() else None,
             "snapshot_valid": self._snapshot_matches_site(),
@@ -520,19 +692,26 @@ class PandaTradeAssistant(_PluginBase):
     def api_refresh(self) -> Dict[str, Any]:
         if self._config.get("site_id") is None:
             return {"success": False, "message": "请先在设置中选择熊猫站点"}
+        acquired, _ = self._acquire_run_slot("manual")
+        if not acquired:
+            return {"success": False, "busy": True, "message": "已有任务正在执行"}
         try:
-            with self._lock:
-                engine = AutomationEngine(self._client(), self._config, self._state, self._audit)
-                snapshot = sanitize(engine.refresh())
-                self._persist()
+            engine = AutomationEngine(self._client(), self._config, self._state, self._audit)
+            snapshot = sanitize(engine.refresh())
+            self._persist()
             return {"success": True, "data": snapshot}
         except PandaClientError as error:
             return {"success": False, "message": str(error)}
+        finally:
+            self._release_run_slot()
 
     def api_run(self, module: str) -> Dict[str, Any]:
         if module not in MODULES and module != "all":
             return {"success": False, "message": "未知模块"}
-        return self._run(None if module == "all" else [module], force_selected=module != "all")
+        return self._run(
+            None if module == "all" else [module],
+            force_selected=module != "all", trigger="手动执行", run_kind="manual",
+        )
 
     def api_pause(self) -> Dict[str, Any]:
         self._state["paused"] = True

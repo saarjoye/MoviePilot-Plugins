@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -13,6 +14,58 @@ ENUMS = {
     "rotation": (0, 90, 180, 270),
 }
 CARD_FIELDS = ("tone", "motif", "layout", "rotation", "title", "code")
+
+
+def _site_datetime(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def submission_wait_seconds(
+    challenge: Mapping[str, Any],
+    submission: Mapping[str, str],
+    safety_ms: int = 150,
+) -> float:
+    """按服务端时钟计算提交事件尚需等待的时间。"""
+    started_at = _site_datetime(challenge.get("started_at"))
+    server_now = _site_datetime(challenge.get("server_now"))
+    if started_at is None or server_now is None:
+        raise ValueError("放映挑战缺少服务端计时字段")
+    if (started_at.tzinfo is None) != (server_now.tzinfo is None):
+        raise ValueError("放映挑战时间时区不一致")
+    try:
+        events = json.loads(str(submission.get("events_json") or "[]"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("放映提交事件结构无效") from error
+    if not isinstance(events, list):
+        raise ValueError("放映提交事件结构无效")
+    event_times = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            raise ValueError("放映提交事件结构无效")
+        elapsed = event.get("elapsed_ms")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or elapsed < 0:
+            raise ValueError("放映提交事件缺少有效时间")
+        event_times.append(float(elapsed))
+    required_ms = max(event_times, default=0.0)
+    elapsed_ms = max(0.0, (server_now - started_at).total_seconds() * 1000.0)
+    remaining_ms = max(0.0, required_ms - elapsed_ms)
+    wait_ms = remaining_ms + max(0, int(safety_ms)) if remaining_ms > 0 else 0.0
+    expires_at = _site_datetime(challenge.get("expires_at"))
+    if expires_at is not None:
+        if (expires_at.tzinfo is None) != (server_now.tzinfo is None):
+            raise ValueError("放映挑战时间时区不一致")
+        if server_now.timestamp() + wait_ms / 1000.0 >= expires_at.timestamp():
+            raise ValueError("放映挑战将在可提交前过期")
+    return wait_ms / 1000.0
 
 
 def calibration_position(prompt: Mapping[str, Any], elapsed_ms: int) -> int:

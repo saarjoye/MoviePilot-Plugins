@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin
 
 from app.core.config import settings
@@ -49,8 +49,53 @@ FORBIDDEN_ACTIONS = frozenset({
 })
 
 
+SAFE_ERROR_FIELDS = frozenset({
+    "reason", "message", "code", "error_code", "status",
+    "available_at", "can_buy_at", "blocked_until", "retry_at",
+})
+SAFE_ERROR_CONTAINERS = frozenset({"restriction", "cooldown", "limit"})
+BUSINESS_CODE_RULES = {
+    "buyback_restricted": ("buyback_restricted", "target"),
+    "repurchase_restricted": ("buyback_restricted", "target"),
+    "buyback_limit": ("buyback_restricted", "target"),
+    "repurchase_limit": ("buyback_restricted", "target"),
+    "target_buyback_restricted": ("buyback_restricted", "target"),
+    "already_owned": ("already_owned", "target"),
+    "already_held": ("already_owned", "target"),
+    "player_already_owned": ("already_owned", "target"),
+    "protection_period": ("protection_period", "target"),
+    "target_protected": ("protection_period", "target"),
+    "slot_full": ("slot_full", "market"),
+    "capacity_full": ("slot_full", "market"),
+    "no_capacity": ("slot_full", "market"),
+    "screening_preview_active": ("screening_preview_active", "screening"),
+    "poster_preview_active": ("screening_preview_active", "screening"),
+}
+
+
 class PandaClientError(RuntimeError):
-    """站点客户端基础异常。"""
+    """站点客户端基础异常，仅保存脱敏后的响应元数据。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action: Optional[str] = None,
+        ret: Any = None,
+        code: Any = None,
+        data: Any = None,
+        result_unknown: bool = False,
+        business_rule: Optional[str] = None,
+        rule_scope: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.action = action
+        self.ret = ret
+        self.code = code
+        self.data = sanitize_error_data(data)
+        self.result_unknown = bool(result_unknown)
+        self.business_rule = business_rule
+        self.rule_scope = rule_scope
 
 
 class PandaAuthError(PandaClientError):
@@ -59,6 +104,22 @@ class PandaAuthError(PandaClientError):
 
 class PandaSchemaError(PandaClientError):
     """站点返回结构不符合契约。"""
+
+
+class PandaBusinessRuleError(PandaClientError):
+    """站点明确拒绝且能够确认写操作未执行。"""
+
+
+class PandaTransportError(PandaClientError):
+    """网络、超时或无响应错误。"""
+
+
+class PandaServiceError(PandaClientError):
+    """结构有效但无法归类为已知业务规则的服务端错误。"""
+
+
+class PandaClientPolicyError(PandaClientError):
+    """本地动作白名单或安全策略错误。"""
 
 
 class RankTableParser(HTMLParser):
@@ -140,38 +201,69 @@ class PandaFriendTradeClient:
         return RequestUtils(cookies=self.cookie, ua=self.ua, proxies=self.proxies, timeout=self.timeout)
 
     @staticmethod
-    def _validate_response(action: str, payload: Any) -> Dict[str, Any]:
+    def _validate_response(action: str, payload: Any, write: bool = False) -> Dict[str, Any]:
         if not isinstance(payload, dict) or not isinstance(payload.get("ret"), int):
-            raise PandaSchemaError(f"{action} 返回结构无效")
+            raise PandaSchemaError(
+                f"{action} 返回结构无效", action=action,
+                data=payload, result_unknown=write,
+            )
         if payload.get("ret") != 0:
             message = str(payload.get("msg") or nested_reason(payload.get("data")) or f"{action} 执行失败")
-            if "Cookie" in message or "登录" in message:
-                raise PandaAuthError(f"{action} 认证失效")
-            raise PandaClientError(safe_error_message(action, message))
+            code = response_code(payload)
+            safe_data = sanitize_error_data(payload.get("data"))
+            if is_auth_failure_message(message):
+                raise PandaAuthError(
+                    f"{action} 认证失效", action=action, ret=payload.get("ret"),
+                    code=code, data=safe_data,
+                )
+            business = classify_business_rule(action, code, safe_data, message)
+            if business:
+                rule, scope = business
+                raise PandaBusinessRuleError(
+                    safe_error_message(action, message), action=action,
+                    ret=payload.get("ret"), code=code, data=safe_data,
+                    business_rule=rule, rule_scope=scope,
+                )
+            raise PandaServiceError(
+                safe_error_message(action, message), action=action,
+                ret=payload.get("ret"), code=code, data=safe_data,
+            )
         if action in READ_ACTIONS and not isinstance(payload.get("data"), (dict, list)):
-            raise PandaSchemaError(f"{action} 返回 data 类型无效")
+            raise PandaSchemaError(
+                f"{action} 返回 data 类型无效", action=action,
+                ret=payload.get("ret"), data=payload.get("data"),
+            )
         return payload
 
     def post_action(self, action: str, params: Optional[Mapping[str, Any]] = None, write: bool = False) -> Dict[str, Any]:
         """执行白名单动作并验证 JSON 响应。"""
         if action in FORBIDDEN_ACTIONS:
-            raise PandaClientError(f"动作被安全策略禁止: {action}")
+            raise PandaClientPolicyError(f"动作被安全策略禁止: {action}", action=action)
         allowed = WRITE_ACTIONS if write else READ_ACTIONS
         if action not in allowed:
-            raise PandaClientError(f"动作不在{'写' if write else '读'}白名单: {action}")
+            raise PandaClientPolicyError(f"动作不在{'写' if write else '读'}白名单: {action}", action=action)
         body: Dict[str, Any] = {"action": action}
         for key, value in (params or {}).items():
             body[f"params[{key}]"] = value
-        response = self._request().post_res(url=urljoin(self.base_url, "ajax.php"), data=body)
+        try:
+            response = self._request().post_res(url=urljoin(self.base_url, "ajax.php"), data=body)
+        except Exception as error:
+            raise PandaTransportError(
+                f"{action} 请求失败: {type(error).__name__}", action=action,
+                result_unknown=write,
+            ) from error
         if response is None:
-            raise PandaClientError(f"{action} 无响应")
+            raise PandaTransportError(f"{action} 无响应", action=action, result_unknown=write)
         if response.status_code in (401, 403):
-            raise PandaAuthError(f"{action} 认证失败")
+            raise PandaAuthError(f"{action} 认证失败", action=action)
         try:
             payload = response.json()
         except ValueError as error:
-            raise PandaSchemaError(f"{action} 未返回 JSON") from error
-        return self._validate_response(action, payload)
+            raise PandaSchemaError(
+                f"{action} 未返回 JSON", action=action,
+                result_unknown=write,
+            ) from error
+        return self._validate_response(action, payload, write=write)
 
     def get_rankings(self) -> List[Dict[str, Any]]:
         """只读抓取排行榜页面并返回表格摘要。"""
@@ -193,6 +285,86 @@ def nested_reason(data: Any) -> Optional[str]:
     if isinstance(data, Mapping):
         reason = data.get("reason") or data.get("message")
         return str(reason) if reason else None
+    return None
+
+
+def sanitize_error_data(data: Any) -> Dict[str, Any]:
+    """仅保留分类和限期判断需要的低风险响应字段。"""
+    if not isinstance(data, Mapping):
+        return {}
+    result: Dict[str, Any] = {}
+    for raw_key, raw_value in data.items():
+        key = str(raw_key)
+        if key in SAFE_ERROR_FIELDS and isinstance(raw_value, (str, int, float, bool)):
+            result[key] = raw_value
+        elif key in SAFE_ERROR_CONTAINERS and isinstance(raw_value, Mapping):
+            nested = sanitize_error_data(raw_value)
+            if nested:
+                result[key] = nested
+    return result
+
+
+def response_code(payload: Mapping[str, Any]) -> Any:
+    """按稳定优先级提取业务代码，不把通用 ret 猜测成业务规则。"""
+    if payload.get("code") not in (None, ""):
+        return payload.get("code")
+    data = payload.get("data")
+    if isinstance(data, Mapping):
+        for key in ("code", "error_code"):
+            if data.get(key) not in (None, ""):
+                return data.get(key)
+    return None
+
+
+def normalize_code(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def is_auth_failure_message(message: str) -> bool:
+    """仅匹配明确的认证失效提示，避免把普通登录任务误判为认证故障。"""
+    text = " ".join(str(message).split()).lower()
+    return any(marker in text for marker in (
+        "cookie 失效", "cookie失效", "请先登录", "登录已失效", "登录状态失效",
+        "未登录", "需要登录", "重新登录",
+    ))
+
+
+def classify_business_rule(
+    action: str,
+    code: Any,
+    data: Mapping[str, Any],
+    message: str,
+) -> Optional[Tuple[str, str]]:
+    """优先使用结构字段，最后才兼容已确认的站点中文文案。"""
+    normalized = normalize_code(code)
+    if normalized in BUSINESS_CODE_RULES:
+        return BUSINESS_CODE_RULES[normalized]
+    if action in {"friendTradeBuy", "friendTradeSnatch"} and any(
+        find_error_value(data, key) not in (None, "")
+        for key in ("available_at", "can_buy_at", "blocked_until")
+    ):
+        return "buyback_restricted", "target"
+    text = " ".join(str(message).split())
+    if "回购限制" in text:
+        return "buyback_restricted", "target"
+    if "已持有该玩家" in text or "已经持有该玩家" in text:
+        return "already_owned", "target"
+    if "保护期" in text:
+        return "protection_period", "target"
+    if "槽位已满" in text or "没有空余槽位" in text:
+        return "slot_full", "market"
+    if action == "friendTradeScreeningSubmit" and "海报仍在展示中" in text:
+        return "screening_preview_active", "screening"
+    return None
+
+
+def find_error_value(data: Mapping[str, Any], key: str) -> Any:
+    if key in data:
+        return data.get(key)
+    for container in SAFE_ERROR_CONTAINERS:
+        nested = data.get(container)
+        if isinstance(nested, Mapping) and key in nested:
+            return nested.get(key)
     return None
 
 
