@@ -1,0 +1,55 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="HDHavenSignin">
+  <defs>
+    <linearGradient id="bg" x1="20" y1="20" x2="236" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1A1B2F"/>
+      <stop offset="50%" stop-color="#162447"/>
+      <stop offset="100%" stop-color="#1F4068"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="40" y1="40" x2="216" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E43F5A" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#FF758C" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="80" y1="60" x2="180" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF5376"/>
+      <stop offset="100%" stop-color="#E43F5A"/>
+    </linearGradient>
+    <linearGradient id="badgeGrad" x1="90" y1="70" x2="170" y2="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00F2FE"/>
+      <stop offset="100%" stop-color="#4FACFE"/>
+    </linearGradient>
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="256" height="256" rx="54" fill="url(#bg)"/>
+  
+  <!-- Subtle Cinematic Spotlight Arc -->
+  <path d="M40 216 C90 140 166 140 216 216" fill="none" stroke="url(#glow)" stroke-width="4" opacity="0.4"/>
+  <circle cx="128" cy="116" r="68" fill="url(#glow)" opacity="0.12"/>
+
+  <!-- Cinema Clapper / Haven Star / Film Reel Center Motif -->
+  <g filter="url(#dropShadow)">
+    <!-- Outer Ring with Film Sprockets Motif -->
+    <circle cx="128" cy="112" r="54" fill="#0F172A" stroke="url(#accent)" stroke-width="5"/>
+    
+    <!-- Film Reel Center Circle -->
+    <circle cx="128" cy="112" r="22" fill="url(#badgeGrad)"/>
+    <circle cx="128" cy="112" r="8" fill="#0F172A"/>
+
+    <!-- Film Reel Spokes / Holes -->
+    <circle cx="128" cy="80" r="7" fill="#1E293B"/>
+    <circle cx="128" cy="144" r="7" fill="#1E293B"/>
+    <circle cx="96" cy="112" r="7" fill="#1E293B"/>
+    <circle cx="160" cy="112" r="7" fill="#1E293B"/>
+
+    <!-- Sign-in Success Checkmark Badge floating at bottom-right of reel -->
+    <circle cx="168" cy="148" r="24" fill="#00C853" stroke="#0F172A" stroke-width="4"/>
+    <path d="M157 148 l7 7 l16 -16" fill="none" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Brand Text -->
+  <text x="128" y="208" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="28" font-weight="800" fill="#FFFFFF" letter-spacing="3">栖影签到</text>
+  <text x="128" y="228" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="1.5">HDHAVEN AUTO SIGN-IN</text>
+</svg>

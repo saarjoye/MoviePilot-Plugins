@@ -190,5 +190,17 @@
       "v0.2.18": "工作与互动改为独立自动开关和手动入口；执行后刷新真实状态，并显示最近一轮具体动作、时间与结果。",
       "v0.2.23": "每日放映续接站点进行中的挑战，按服务端时钟等待预览或操作时机后提交；展示中拒绝改为可恢复等待。"
     }
+  },
+  "HDHavenSignin": {
+    "name": "栖影签到",
+    "description": "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。",
+    "labels": "影视,工具",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/HDHavenSignin.svg",
+    "author": "wYw",
+    "level": 1,
+    "history": {
+      "v1.0.0": "栖影 (HDHaven) 自动签到 1.0.0 发布：支持普通/赌狗双签到模式、积分风控保护、MoviePilot系统梯子代理与走势看板"
+    }
   }
 }
