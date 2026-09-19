@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import pytz
 import requests
 from requests.exceptions import ProxyError, ConnectTimeout, SSLError, RequestException
+import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -27,7 +28,8 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
+    _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "hdhavensignin_"
@@ -243,17 +245,23 @@ class HDHavenSignin(_PluginBase):
                 self._user_agent = (config.get("user_agent") or "").strip()
 
             if self._onlyonce:
-                tz = getattr(settings, "TZ", "Asia/Shanghai")
+                self._onlyonce = False
+                self.update_config(self._get_config())
+                if self._scheduler:
+                    try:
+                        self._scheduler.shutdown(wait=False)
+                    except Exception:
+                        pass
+                    self._scheduler = None
+                tz_obj = self._get_timezone()
                 self._scheduler = BackgroundScheduler(timezone=tz_obj)
                 logger.info(f"{self.plugin_name}: 立即执行一次签到任务")
                 self._scheduler.add_job(
                     func=self._signin,
                     trigger="date",
-                    run_date=datetime.now(tz=pytz.timezone(tz)) + timedelta(seconds=2),
+                    run_date=datetime.now(tz=tz_obj) + timedelta(seconds=2),
                     name="栖影签到-即时执行"
                 )
-                self._onlyonce = False
-                self.update_config(self._get_config())
                 if self._scheduler.get_jobs():
                     self._scheduler.start()
 
@@ -606,6 +614,20 @@ class HDHavenSignin(_PluginBase):
         return res.status_code, res_data
 
     def _signin(self, retry_index: int = 0) -> Dict[str, Any]:
+        if not self._signin_lock.acquire(blocking=False):
+            logger.warning(f"{self.plugin_name}: 已有签到任务正在执行中，跳过本次并发请求")
+            return {
+                "success": False,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "message": "已有签到任务正在执行中，跳过并发执行",
+                "action": "skipped"
+            }
+        try:
+            return self._execute_signin_flow(retry_index)
+        finally:
+            self._signin_lock.release()
+
+    def _execute_signin_flow(self, retry_index: int = 0) -> Dict[str, Any]:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not self._is_configured():
             msg = "未配置栖影 Cookie (hdh_session)" if self._auth_mode == "cookie" else "未配置用户名或密码"
@@ -667,7 +689,8 @@ class HDHavenSignin(_PluginBase):
                     "message": "今日已在其他端完成签到，无需重复操作",
                     "action": "already_signed",
                     "status": "already_signed_in",
-                    "points_change": 0,
+                    "points_awarded": earned_val,
+                    "points_change": earned_val,
                     "risk_downgraded": False,
                     "detail": f"今日已签到 ({formula})" if formula else "今日已签到，无需重复签到",
                     "mode": self._signin_mode,
@@ -686,12 +709,14 @@ class HDHavenSignin(_PluginBase):
                         f"━━━━━━━━━━━━━━━\n"
                         f"👤 用户：{user_display}\n"
                         f"🎖️ 等级：{level_name}{vip_suffix}\n"
-                        f"💰 当前积分：{current_points:g} 积分\n"
+                        f"🎲 签到模式：{self._signin_mode_options.get(self._signin_mode, '普通签到')}\n"
+                        f"🎁 今日奖励：+{earned_val:g} 积分\n"
+                        f"💰 当前总积分：{current_points:g} 积分\n"
                         f"📅 连续签到：{streak} 天{exp_text}\n"
                         f"📝 签到明细：{formula}\n"
                         f"🌐 网络环境：{proxy_desc}\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"🕒 记录时间：{timestamp}"
+                        f"🕒 检查时间：{timestamp}"
                     ),
                 )
                 return result
@@ -818,7 +843,8 @@ class HDHavenSignin(_PluginBase):
                     "message": f"今日已完成签到，请勿重复操作 ({mode_name})",
                     "action": "already_signed",
                     "status": "already_signed_in",
-                    "points_change": 0,
+                    "points_awarded": earned_val,
+                    "points_change": earned_val,
                     "risk_downgraded": False,
                     "detail": f"今日已签到 ({formula})" if formula else "今日已签到，无需重复签到",
                     "mode": target_mode,
@@ -837,8 +863,9 @@ class HDHavenSignin(_PluginBase):
                         f"━━━━━━━━━━━━━━━\n"
                         f"👤 用户：{user_display}\n"
                         f"🎖️ 等级：{level_name}{vip_suffix}\n"
-                        f"🎲 默认模式：{mode_name}\n"
-                        f"💰 当前积分：{current_points:g} 积分\n"
+                        f"🎲 签到模式：{mode_name}\n"
+                        f"🎁 今日奖励：+{earned_val:g} 积分\n"
+                        f"💰 当前总积分：{current_points:g} 积分\n"
                         f"📅 连续签到：{streak} 天{exp_text}\n"
                         f"📝 签到明细：{formula}\n"
                         f"🌐 网络环境：{proxy_desc}\n"
@@ -979,14 +1006,94 @@ class HDHavenSignin(_PluginBase):
     def _clear_pending_task(self):
         self.save_data("pending_task", None)
 
+    def _clean_history(self, history: List[dict]) -> List[dict]:
+        """
+        清洗历史记录：
+        1. 剔除完全重复或同时间戳（秒级）的冗余记录
+        2. 同一自然日若有多条 already_signed，仅保留最新一条，防止单日重复记录
+        3. 为旧记录自动补全 points_awarded，使历史明细与走势图正常展示
+        """
+        if not history or not isinstance(history, list):
+            return []
+
+        cleaned: List[dict] = []
+        seen_timestamps = set()
+        seen_day_already_signed = set()
+
+        sorted_hist = sorted(history, key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+
+        for item in sorted_hist:
+            if not isinstance(item, dict):
+                continue
+            ts = str(item.get("timestamp") or "").strip()
+            if not ts:
+                continue
+
+            # 1. 剔除同时间戳冗余
+            if ts in seen_timestamps:
+                continue
+            seen_timestamps.add(ts)
+
+            # 2. 补全 points_awarded 字段（兼容旧版历史数据）
+            if item.get("points_awarded") is None and item.get("action") in ("signed", "already_signed"):
+                pts = self._to_number(item.get("points_change"))
+                if pts is None or pts == 0:
+                    detail_str = str(item.get("detail") or "") + " " + str(item.get("message") or "")
+                    m = re.search(r"([+-]?\d+(?:\.\d+)?)\s*积分", detail_str)
+                    if m:
+                        pts = self._to_number(m.group(1), 5.0)
+                    else:
+                        pts = 5.0 if item.get("mode") != "gamble" else 0.0
+                item["points_awarded"] = pts
+
+            # 3. 同一自然日内的重复 already_signed 去重
+            dt_val = self._parse_history_datetime(ts)
+            if dt_val:
+                day_key = dt_val.strftime("%Y-%m-%d")
+                if item.get("action") == "already_signed":
+                    if day_key in seen_day_already_signed:
+                        continue
+                    seen_day_already_signed.add(day_key)
+
+            cleaned.append(item)
+
+        return cleaned
+
     def _record_history(self, record: Dict[str, Any]) -> None:
         history = self.get_data("history") or []
         if not isinstance(history, list):
             history = []
-        history.append(record)
-        history = sorted(history, key=lambda x: x.get("timestamp") or "", reverse=True)
+
+        new_ts = str(record.get("timestamp") or "").strip()
+        new_dt = self._parse_history_datetime(new_ts)
+        new_day = new_dt.strftime("%Y-%m-%d") if new_dt else None
+        new_action = record.get("action")
+
+        updated = False
+        # 如果历史中已经存在同时间戳或同一天的 already_signed 记录，直接更新替换
+        for idx, item in enumerate(history):
+            if not isinstance(item, dict):
+                continue
+            item_ts = str(item.get("timestamp") or "").strip()
+            if item_ts == new_ts:
+                history[idx] = record
+                updated = True
+                break
+            if new_action == "already_signed" and item.get("action") == "already_signed" and new_day:
+                item_dt = self._parse_history_datetime(item_ts)
+                if item_dt and item_dt.strftime("%Y-%m-%d") == new_day:
+                    history[idx] = record
+                    updated = True
+                    break
+
+        if not updated:
+            history.insert(0, record)
+
+        # 执行清洗与截断
+        history = self._clean_history(history)
         if len(history) > self._history_count:
             history = history[:self._history_count]
+
         self.save_data("history", history)
         self.save_data("latest_result", record)
 
@@ -1026,14 +1133,33 @@ class HDHavenSignin(_PluginBase):
         now = datetime.now()
         days_in_month = monthrange(now.year, now.month)[1]
         points_by_day = {day: 0.0 for day in range(1, days_in_month + 1)}
+        recorded_days = set()
 
         for item in history:
+            if not isinstance(item, dict):
+                continue
             dt_val = self._parse_history_datetime(item.get("timestamp"))
             if not dt_val or dt_val.year != now.year or dt_val.month != now.month:
                 continue
             if item.get("action") not in ("signed", "already_signed"):
                 continue
-            points_by_day[dt_val.day] += self._to_number(item.get("points_awarded"), 0.0)
+
+            day = dt_val.day
+            # 关键：同一自然日只计入一次有效签到积分，坚决防止重复记分
+            if day in recorded_days:
+                continue
+
+            awarded = self._to_number(item.get("points_awarded"))
+            if awarded is None:
+                awarded = 5.0 if item.get("mode") != "gamble" else 0.0
+
+            points_by_day[day] = awarded
+            recorded_days.add(day)
+
+        # 保底检查：若当前账号今日已签到，但当天历史缺失或为0，计入 5.0 分
+        user_info = self.get_data("user_info") or {}
+        if user_info.get("checkin_today") and points_by_day[now.day] == 0:
+            points_by_day[now.day] = 5.0
 
         series = [{"day": day, "points": points_by_day[day]} for day in range(1, days_in_month + 1)]
         total_points = sum(item["points"] for item in series)
@@ -1069,6 +1195,9 @@ class HDHavenSignin(_PluginBase):
         for i, (x, y) in enumerate(pts):
             path_d += f"{'M' if i == 0 else ' L'} {x:.1f} {y:.1f}"
 
+        zero_y = y_at(0)
+        area_d = f"{path_d} L {pts[-1][0]:.1f} {zero_y:.1f} L {pts[0][0]:.1f} {zero_y:.1f} Z"
+
         grid_nodes = []
         for i in range(5):
             val = y_min + (y_max - y_min) * i / 4
@@ -1089,10 +1218,56 @@ class HDHavenSignin(_PluginBase):
             for idx in x_indexes if 0 <= idx < len(series)
         ]
 
-        circles = [
-            {"component": "circle", "props": {"cx": x, "cy": y, "r": 3.8, "fill": "#3b82f6", "stroke": "#ffffff", "stroke-width": 2}}
-            for x, y in pts
+        chart_elements = [
+            {
+                "component": "defs",
+                "content": [
+                    {
+                        "component": "linearGradient",
+                        "props": {"id": "hdh_chart_grad", "x1": "0%", "y1": "0%", "x2": "0%", "y2": "100%"},
+                        "content": [
+                            {"component": "stop", "props": {"offset": "0%", "stop-color": "#3b82f6", "stop-opacity": "0.35"}},
+                            {"component": "stop", "props": {"offset": "100%", "stop-color": "#3b82f6", "stop-opacity": "0.02"}}
+                        ]
+                    }
+                ]
+            },
+            *grid_nodes,
+            {"component": "line", "props": {"x1": left, "y1": zero_y, "x2": width - right, "y2": zero_y, "stroke": "#cbd5e1", "stroke-width": 1.2}},
+            {"component": "path", "props": {"d": area_d, "fill": "url(#hdh_chart_grad)"}},
+            {"component": "path", "props": {"d": path_d, "fill": "none", "stroke": "#2563eb", "stroke-width": 3.5, "stroke-linecap": "round", "stroke-linejoin": "round"}},
         ]
+
+        for i, it in enumerate(series):
+            x, y = pts[i]
+            p_val = self._to_number(it.get("points"), 0.0)
+            if p_val > 0:
+                chart_elements.append({
+                    "component": "circle",
+                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#10b981", "stroke": "#ffffff", "stroke-width": 2.5}
+                })
+                chart_elements.append({
+                    "component": "text",
+                    "props": {"x": x, "y": y - 10, "text-anchor": "middle", "fill": "#10b981", "font-size": 11, "font-weight": "bold"},
+                    "text": f"+{p_val:g}"
+                })
+            elif p_val < 0:
+                chart_elements.append({
+                    "component": "circle",
+                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#ef4444", "stroke": "#ffffff", "stroke-width": 2.5}
+                })
+                chart_elements.append({
+                    "component": "text",
+                    "props": {"x": x, "y": y + 16, "text-anchor": "middle", "fill": "#ef4444", "font-size": 11, "font-weight": "bold"},
+                    "text": f"{p_val:g}"
+                })
+            else:
+                chart_elements.append({
+                    "component": "circle",
+                    "props": {"cx": x, "cy": y, "r": 3.0, "fill": "#93c5fd", "stroke": "#ffffff", "stroke-width": 1.5}
+                })
+
+        chart_elements.extend(x_labels)
 
         return {
             "component": "div",
@@ -1101,13 +1276,7 @@ class HDHavenSignin(_PluginBase):
                 {
                     "component": "svg",
                     "props": {"viewBox": f"0 0 {width} {height}", "style": "width: 100%; min-width: 600px; height: auto; display: block;"},
-                    "content": [
-                        *grid_nodes,
-                        {"component": "line", "props": {"x1": left, "y1": y_at(0), "x2": width - right, "y2": y_at(0), "stroke": "#cbd5e1", "stroke-width": 1.2}},
-                        {"component": "path", "props": {"d": path_d, "fill": "none", "stroke": "#2563eb", "stroke-width": 3.5, "stroke-linecap": "round", "stroke-linejoin": "round"}},
-                        *circles,
-                        *x_labels,
-                    ]
+                    "content": chart_elements
                 }
             ]
         }
@@ -1379,8 +1548,12 @@ class HDHavenSignin(_PluginBase):
         ], self._get_config()
 
     def get_page(self) -> List[dict]:
-        latest = self.get_data("latest_result") or {}
-        history = self.get_data("history") or []
+        raw_history = self.get_data("history") or []
+        history = self._clean_history(raw_history)
+        if len(history) != len(raw_history) or any(h.get("points_awarded") != r.get("points_awarded") for h, r in zip(history, raw_history) if isinstance(h, dict) and isinstance(r, dict)):
+            self.save_data("history", history)
+
+        latest = self.get_data("latest_result") or (history[0] if history else {})
         user_info = self.get_data("user_info") or {}
 
         username = self._format_user_display(user_info)
@@ -1428,13 +1601,22 @@ class HDHavenSignin(_PluginBase):
         for h in history[:15]:
             h_action = h.get("action", "")
             h_text, h_color = action_labels.get(h_action, ("未知", "default"))
+            awarded = h.get("points_awarded")
+            if awarded is not None:
+                awarded_num = self._to_number(awarded, 0.0)
+                awarded_display = f"{awarded_num:+g}"
+                awarded_color = "#10b981" if awarded_num > 0 else ("#ef4444" if awarded_num < 0 else "#64748b")
+            else:
+                awarded_display = "--"
+                awarded_color = "#64748b"
+
             table_rows.append({
                 "component": "tr",
                 "content": [
                     {"component": "td", "props": {"class": "text-caption py-2"}, "text": h.get("timestamp", "--")},
                     {"component": "td", "props": {"class": "py-2"}, "content": [{"component": "VChip", "props": {"size": "x-small", "color": "purple", "variant": "tonal"}, "text": h.get("mode_name", h.get("mode", "--"))}]},
                     {"component": "td", "props": {"class": "py-2"}, "content": [{"component": "VChip", "props": {"size": "x-small", "color": h_color, "variant": "tonal"}, "text": h_text}]},
-                    {"component": "td", "props": {"class": "py-2 font-weight-bold", "style": "color: #10b981;"}, "text": f"{h.get('points_awarded', 0):+g}" if h.get("points_awarded") is not None else "--"},
+                    {"component": "td", "props": {"class": "py-2 font-weight-bold", "style": f"color: {awarded_color};"}, "text": awarded_display},
                     {"component": "td", "props": {"class": "py-2 font-weight-bold"}, "text": str(h.get("points", "--"))},
                     {"component": "td", "props": {"class": "py-2 text-caption text-medium-emphasis"}, "text": h.get("proxy_status", "--")},
                     {"component": "td", "props": {"class": "py-2 text-caption"}, "text": h.get("message", "--")},
