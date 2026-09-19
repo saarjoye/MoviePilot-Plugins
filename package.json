@@ -252,12 +252,13 @@
     "name": "栖影签到",
     "description": "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。",
     "labels": "影视,工具",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/HDHavenSignin.svg",
     "author": "wYw",
     "level": 1,
     "history": {
-      "v1.0.0": "栖影 (HDHaven) 自动签到 1.0.0 发布：支持普通/赌狗双签到模式、积分风控保护、MoviePilot系统梯子代理与走势看板"
+      "v1.0.0": "栖影 (HDHaven) 自动签到 1.0.0 发布：支持普通/赌狗双签到模式、积分风控保护、MoviePilot系统梯子代理与走势看板",
+      "v1.0.1": "v1.0.1: 优化用户信息与称谓展示，完善未读通知结算明细解析与连续签到天数显示"
     },
     "v2": true
   }

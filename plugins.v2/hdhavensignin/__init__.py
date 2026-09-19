@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import ast
 from calendar import monthrange
 from datetime import datetime, timedelta
 import json
@@ -26,7 +27,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "hdhavensignin_"
@@ -243,7 +244,7 @@ class HDHavenSignin(_PluginBase):
 
             if self._onlyonce:
                 tz = getattr(settings, "TZ", "Asia/Shanghai")
-                self._scheduler = BackgroundScheduler(timezone=tz)
+                self._scheduler = BackgroundScheduler(timezone=tz_obj)
                 logger.info(f"{self.plugin_name}: 立即执行一次签到任务")
                 self._scheduler.add_job(
                     func=self._signin,
@@ -321,6 +322,168 @@ class HDHavenSignin(_PluginBase):
                 self._scheduler = None
         except Exception as err:
             logger.debug(f"{self.plugin_name}: 停止内部调度器异常 - {err}")
+
+    @staticmethod
+    def _extract_level_name(val: Any) -> str:
+        """从字典、字符串或复杂对象中提纯等级名称"""
+        if not val:
+            return "初来乍到"
+        if isinstance(val, dict):
+            return str(val.get("name") or val.get("chinese") or val.get("title") or val.get("english") or val.get("key") or "初来乍到")
+        if isinstance(val, str):
+            s = val.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, dict):
+                        return str(parsed.get("name") or parsed.get("chinese") or parsed.get("title") or parsed.get("english") or parsed.get("key") or "初来乍到")
+                except Exception:
+                    pass
+                try:
+                    import json
+                    parsed = json.loads(s.replace("'", '"'))
+                    if isinstance(parsed, dict):
+                        return str(parsed.get("name") or parsed.get("chinese") or parsed.get("title") or parsed.get("english") or parsed.get("key") or "初来乍到")
+                except Exception:
+                    pass
+            return s
+        return str(val)
+
+    @staticmethod
+    def _format_user_display(user_info: Dict[str, Any]) -> str:
+        """优雅格式化用户名，去重冗余的 UID: username 展现"""
+        if not isinstance(user_info, dict):
+            return "栖影用户"
+        nickname = str(user_info.get("nickname") or "").strip()
+        username = str(user_info.get("username") or "").strip()
+        user_id = str(user_info.get("id") or "").strip()
+
+        display_name = nickname or username or "栖影用户"
+        if not user_id or user_id in ("--", "None", "null", "") or user_id == display_name or user_id == username:
+            return display_name
+        return f"{display_name} (UID: {user_id})"
+
+    @staticmethod
+    def _extract_streak_from_dict(data: Any) -> Optional[int]:
+        """递归/多字段安全提取连续签到天数"""
+        if not isinstance(data, dict):
+            return None
+        for k in ("streak", "checkin_streak", "consecutive_signin", "continuous_days", "continuous_checkins", "signin_streak"):
+            if k in data and data[k] is not None:
+                try:
+                    v = int(data[k])
+                    if v >= 0:
+                        return v
+                except (ValueError, TypeError):
+                    pass
+        for sub_key in ("stats", "checkin", "points_info", "points", "data", "user"):
+            sub = data.get(sub_key)
+            if isinstance(sub, dict):
+                res = HDHavenSignin._extract_streak_from_dict(sub)
+                if res is not None:
+                    return res
+        return None
+
+    @staticmethod
+    def _parse_checkin_notice_text(text: str) -> Dict[str, Any]:
+        """
+        从站点通知文本中提取连续签到天数、获得经验、结算公式及积分余额
+        示例: '普通签到 5 + 等级加成 0 + 会员加成 0 = 5 积分；连续签到 1 天，获得 5 经验，当前余额 25 积分。'
+        """
+        res: Dict[str, Any] = {}
+        if not text or not isinstance(text, str):
+            return res
+
+        m_streak = re.search(r"连续签到\s*([0-9]+)\s*天", text)
+        if m_streak:
+            res["streak"] = int(m_streak.group(1))
+
+        m_exp = re.search(r"获得\s*([0-9]+)\s*(?:点)?(?:经验|EXP|exp)", text, re.I)
+        if m_exp:
+            res["exp"] = int(m_exp.group(1))
+
+        m_bal = re.search(r"(?:当前余额|积分余额|当前积分)\s*([0-9.]+)\s*积分", text)
+        if m_bal:
+            try:
+                res["balance"] = float(m_bal.group(1))
+            except ValueError:
+                pass
+
+        m_formula = re.search(r"((?:普通|赌狗|阶梯)?签到\s*[0-9.+-/*\s]+=\s*[0-9.]+\s*积分)", text)
+        if m_formula:
+            res["formula"] = m_formula.group(1).strip()
+        else:
+            m_alt_formula = re.search(r"([^；;\n\r]+?=\s*[0-9.]+\s*积分)", text)
+            if m_alt_formula:
+                res["formula"] = m_alt_formula.group(1).strip()
+
+        m_earned = re.search(r"(?:[+＋]|获得\s*|=\s*)([0-9.]+)\s*积分", text)
+        if m_earned:
+            try:
+                res["earned"] = float(m_earned.group(1))
+            except ValueError:
+                pass
+
+        return res
+
+    def _synthesize_checkin_formula(self, mode: str, earned: float, user_info: Dict[str, Any]) -> str:
+        """当未从通知接口获取到文字明细时，根据用户等级和VIP加成合成结算明细"""
+        if mode == "gamble":
+            return f"赌狗签到结算：获得 {earned:+g} 积分"
+        level_info = user_info.get("level_info")
+        if not isinstance(level_info, dict):
+            raw_lvl = user_info.get("level")
+            level_info = raw_lvl if isinstance(raw_lvl, dict) else {}
+        bonus = self._to_number(level_info.get("checkin_bonus", 0), 0)
+        vip_bonus = 0
+        base = 5
+        return f"普通签到 {base} + 等级加成 {int(bonus)} + 会员加成 {vip_bonus} = {int(earned) if earned == int(earned) else earned:g} 积分"
+
+    def _fetch_latest_checkin_notice(self, session: requests.Session, proxies: Optional[dict]) -> Tuple[Optional[str], Dict[str, Any]]:
+        """尝试从站点消息通知接口获取最近的签到结算明细"""
+        candidate_urls = [
+            f"{self._base_url}/api/account/unread",
+            f"{self._base_url}/api/account/notifications?page=1&limit=5",
+            f"{self._base_url}/api/notifications?limit=5",
+            f"{self._base_url}/api/account/messages?limit=5",
+        ]
+        for url in candidate_urls:
+            try:
+                resp = session.get(
+                    url,
+                    headers=self._build_request_headers(referer=f"{self._base_url}/me#account-points"),
+                    proxies=proxies,
+                    timeout=(self._connect_timeout, self._read_timeout)
+                )
+                if resp.status_code != 200:
+                    continue
+                try:
+                    payload = resp.json()
+                except Exception:
+                    continue
+
+                items = []
+                if isinstance(payload, list):
+                    items = payload
+                elif isinstance(payload, dict):
+                    items = payload.get("data") or payload.get("items") or payload.get("notifications") or payload.get("messages") or []
+                    if not isinstance(items, list):
+                        items = [payload]
+
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    title = str(it.get("title") or it.get("subject") or "")
+                    content = str(it.get("content") or it.get("message") or it.get("body") or it.get("text") or "")
+                    combined = f"{title} {content}".strip()
+                    if "签到" in combined or "checkin" in combined.lower() or "积分" in combined:
+                        text_to_parse = content if ("积分" in content or "签到" in content) else combined
+                        parsed = self._parse_checkin_notice_text(text_to_parse)
+                        return text_to_parse, parsed
+            except Exception as err:
+                logger.debug(f"{self.plugin_name}: 请求通知接口 {url} 异常 - {err}")
+                continue
+        return None, {}
 
     def _format_http_error(self, response: requests.Response, res_data: Optional[dict] = None) -> str:
         code = response.status_code
@@ -403,14 +566,19 @@ class HDHavenSignin(_PluginBase):
                 elif "class_name" not in data_dict:
                     data_dict["class_name"] = str(cls_val or "")
 
-                if "level" not in data_dict or not data_dict["level"]:
-                    data_dict["level"] = data_dict["class_name"] or data_dict.get("role") or "会员"
+                raw_lvl = data_dict.get("level") or data_dict.get("class")
+                if isinstance(raw_lvl, dict):
+                    data_dict["level_info"] = raw_lvl
+                data_dict["level"] = self._extract_level_name(raw_lvl or data_dict.get("class_name") or data_dict.get("role") or "初来乍到")
 
                 checked = data_dict.get("checkin_today") if "checkin_today" in data_dict else data_dict.get("checkedInToday", False)
                 data_dict["checkin_today"] = bool(checked)
                 data_dict["checkedInToday"] = bool(checked)
 
-                streak = data_dict.get("checkin_streak") or data_dict.get("consecutive_signin") or data_dict.get("streak", 0)
+                extracted_streak = self._extract_streak_from_dict(data_dict)
+                if data_dict["checkin_today"] and (extracted_streak is None or extracted_streak < 1):
+                    extracted_streak = 1
+                streak = extracted_streak if extracted_streak is not None else 0
                 data_dict["streak"] = streak
                 data_dict["checkin_streak"] = streak
 
@@ -471,15 +639,28 @@ class HDHavenSignin(_PluginBase):
                 logger.warning(f"{self.plugin_name}: 获取用户信息异常 - {e}")
                 user_info = self.get_data("user_info") or {}
 
-            nickname = user_info.get("nickname") or user_info.get("username") or "栖影用户"
-            user_id = user_info.get("id", "--")
-            level = user_info.get("level") or "普通用户"
+            user_display = self._format_user_display(user_info)
+            level_name = self._extract_level_name(user_info.get("level"))
             is_vip = bool(user_info.get("vip", False))
+            vip_suffix = " (VIP)" if is_vip else ""
             current_points = self._to_number(user_info.get("points", 0))
 
-    # 基础运行配置
+            # 检查今日是否已在其他端完成签到
             if user_info.get("checkin_today") is True:
-                streak = user_info.get("checkin_streak", user_info.get("consecutive_signin", "--"))
+                streak = self._extract_streak_from_dict(user_info)
+                if streak is None or streak < 1:
+                    streak = 1
+
+                notice_text, notice_parsed = self._fetch_latest_checkin_notice(session, proxies)
+                if notice_parsed.get("streak"):
+                    streak = notice_parsed["streak"]
+                if notice_parsed.get("balance") is not None:
+                    current_points = self._to_number(notice_parsed["balance"], current_points)
+
+                earned_val = notice_parsed.get("earned", 5.0 if self._signin_mode == "normal" else 0.0)
+                formula = notice_parsed.get("formula") or self._synthesize_checkin_formula(self._signin_mode, earned_val, user_info)
+                exp_text = f"\n⭐ 获得经验：+{notice_parsed['exp']} EXP" if "exp" in notice_parsed else ""
+
                 result = {
                     "success": True,
                     "timestamp": timestamp,
@@ -488,7 +669,7 @@ class HDHavenSignin(_PluginBase):
                     "status": "already_signed_in",
                     "points_change": 0,
                     "risk_downgraded": False,
-                    "detail": "今日已签到，无需重复签到",
+                    "detail": f"今日已签到 ({formula})" if formula else "今日已签到，无需重复签到",
                     "mode": self._signin_mode,
                     "mode_name": self._signin_mode_options.get(self._signin_mode, "普通签到"),
                     "points": current_points,
@@ -498,18 +679,19 @@ class HDHavenSignin(_PluginBase):
                 self._record_history(result)
                 self._clear_pending_task()
                 self._notify_result(
-                    title="【栖影签到】今日已签到 \U0001f7e1",
+                    title="【栖影签到】今日已签到 🟡",
                     text=(
                         f"━━━━━━━━━━━━━━━\n"
                         f"✨ 状态：今日已完成签到\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f464 用户：{nickname} (UID: {user_id})\n"
-                        f"\U0001f396️ 等级：{level} {'(VIP)' if is_vip else ''}\n"
-                        f"\U0001f4b0 当前积分：{current_points}\n"
-                        f"\U0001f4c5 连续签到：{streak} 天\n"
-                        f"\U0001f310 网络环境：{proxy_desc}\n"
+                        f"👤 用户：{user_display}\n"
+                        f"🎖️ 等级：{level_name}{vip_suffix}\n"
+                        f"💰 当前积分：{current_points:g} 积分\n"
+                        f"📅 连续签到：{streak} 天{exp_text}\n"
+                        f"📝 签到明细：{formula}\n"
+                        f"🌐 网络环境：{proxy_desc}\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f552 记录时间：{timestamp}"
+                        f"🕒 记录时间：{timestamp}"
                     ),
                 )
                 return result
@@ -542,14 +724,31 @@ class HDHavenSignin(_PluginBase):
                     updated_profile = self._fetch_user_profile(session, proxies)
                     if updated_profile:
                         self.save_data("user_info", updated_profile)
+                        user_info = updated_profile
                         new_points = updated_profile.get("points", new_points)
-                        streak = updated_profile.get("checkin_streak", updated_profile.get("consecutive_signin", 1))
+                        streak = updated_profile.get("checkin_streak", 1)
                     else:
-                        streak = data_obj.get("checkin_streak", 1)
+                        streak = self._extract_streak_from_dict(data_obj) or 1
                 except Exception:
-                    streak = data_obj.get("checkin_streak", 1)
+                    streak = self._extract_streak_from_dict(data_obj) or 1
+
+                if streak is None or streak < 1:
+                    streak = 1
+
+                notice_text, notice_parsed = self._fetch_latest_checkin_notice(session, proxies)
+                if notice_parsed.get("streak"):
+                    streak = notice_parsed["streak"]
+                if notice_parsed.get("balance") is not None:
+                    new_points = notice_parsed["balance"]
 
                 new_points_num = self._to_number(new_points, current_points + earned)
+                formula = notice_parsed.get("formula") or self._synthesize_checkin_formula(target_mode, earned, user_info)
+                exp_text = f"\n⭐ 获得经验：+{notice_parsed['exp']} EXP" if "exp" in notice_parsed else ""
+
+                user_display = self._format_user_display(user_info)
+                level_name = self._extract_level_name(user_info.get("level"))
+                vip_suffix = " (VIP)" if is_vip else ""
+
                 signed_msg = f"{mode_name}成功，获得 {earned:g} 积分！"
                 if downgrade_reason:
                     signed_msg += f" [{downgrade_reason}]"
@@ -569,31 +768,50 @@ class HDHavenSignin(_PluginBase):
                     "proxy_status": proxy_desc,
                     "downgraded": downgraded,
                     "risk_downgraded": downgraded,
-                    "detail": signed_msg,
+                    "detail": formula or signed_msg,
                 }
                 self._record_history(result)
                 self._clear_pending_task()
                 self._notify_result(
-                    title="【栖影签到】成功 \U0001f7e2",
+                    title="【栖影签到】成功 🟢",
                     text=(
                         f"━━━━━━━━━━━━━━━\n"
                         f"✨ 状态：签到成功\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f464 用户：{nickname} (UID: {user_id})\n"
-                        f"\U0001f396️ 等级：{level} {'(VIP)' if is_vip else ''}\n"
-                        f"\U0001f3b2 签到模式：{mode_name}\n"
-                        f"\U0001f381 获得积分：{earned:+g}\n"
-                        f"\U0001f4b0 当前总积分：{new_points_num:g}\n"
-                        f"\U0001f4c5 连续签到：{streak} 天\n"
-                        f"\U0001f310 网络环境：{proxy_desc}\n"
+                        f"👤 用户：{user_display}\n"
+                        f"🎖️ 等级：{level_name}{vip_suffix}\n"
+                        f"🎲 签到模式：{mode_name}\n"
+                        f"🎁 获得积分：{earned:+g} 积分\n"
+                        f"💰 当前总积分：{new_points_num:g} 积分\n"
+                        f"📅 连续签到：{streak} 天{exp_text}\n"
+                        f"📝 结算明细：{formula}\n"
+                        f"🌐 网络环境：{proxy_desc}\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f552 签到时间：{timestamp}"
+                        f"🕒 签到时间：{timestamp}"
                     ),
                 )
                 return result
 
             # HTTP 409 Conflict: 今日已签到
             elif status_code == 409:
+                streak = self._extract_streak_from_dict(user_info) or 1
+                if streak < 1:
+                    streak = 1
+
+                notice_text, notice_parsed = self._fetch_latest_checkin_notice(session, proxies)
+                if notice_parsed.get("streak"):
+                    streak = notice_parsed["streak"]
+                if notice_parsed.get("balance") is not None:
+                    current_points = self._to_number(notice_parsed["balance"], current_points)
+
+                earned_val = notice_parsed.get("earned", 5.0 if target_mode == "normal" else 0.0)
+                formula = notice_parsed.get("formula") or self._synthesize_checkin_formula(target_mode, earned_val, user_info)
+                exp_text = f"\n⭐ 获得经验：+{notice_parsed['exp']} EXP" if "exp" in notice_parsed else ""
+
+                user_display = self._format_user_display(user_info)
+                level_name = self._extract_level_name(user_info.get("level"))
+                vip_suffix = " (VIP)" if is_vip else ""
+
                 result = {
                     "success": True,
                     "timestamp": timestamp,
@@ -602,27 +820,30 @@ class HDHavenSignin(_PluginBase):
                     "status": "already_signed_in",
                     "points_change": 0,
                     "risk_downgraded": False,
-                    "detail": "今日已签到，无需重复签到",
+                    "detail": f"今日已签到 ({formula})" if formula else "今日已签到，无需重复签到",
                     "mode": target_mode,
                     "mode_name": mode_name,
                     "points": current_points,
-                    "checkin_days": user_info.get("checkin_streak", "--"),
+                    "checkin_days": streak,
                     "proxy_status": proxy_desc,
                 }
                 self._record_history(result)
                 self._clear_pending_task()
                 self._notify_result(
-                    title="【栖影签到】今日已签到 \U0001f7e1",
+                    title="【栖影签到】今日已签到 🟡",
                     text=(
                         f"━━━━━━━━━━━━━━━\n"
                         f"✨ 状态：今日已完成签到\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f464 用户：{nickname} (UID: {user_id})\n"
-                        f"\U0001f3b2 默认模式：{mode_name}\n"
-                        f"\U0001f4b0 当前积分：{current_points}\n"
-                        f"\U0001f310 网络环境：{proxy_desc}\n"
+                        f"👤 用户：{user_display}\n"
+                        f"🎖️ 等级：{level_name}{vip_suffix}\n"
+                        f"🎲 默认模式：{mode_name}\n"
+                        f"💰 当前积分：{current_points:g} 积分\n"
+                        f"📅 连续签到：{streak} 天{exp_text}\n"
+                        f"📝 签到明细：{formula}\n"
+                        f"🌐 网络环境：{proxy_desc}\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"\U0001f552 检查时间：{timestamp}"
+                        f"🕒 检查时间：{timestamp}"
                     ),
                 )
                 return result
@@ -645,7 +866,7 @@ class HDHavenSignin(_PluginBase):
                 self._clear_pending_task()
 
             user_info = self.get_data("user_info") or {}
-            nickname = user_info.get("nickname") or "栖影用户"
+            user_display = self._format_user_display(user_info)
             result = {
                 "success": False,
                 "timestamp": timestamp,
@@ -662,18 +883,18 @@ class HDHavenSignin(_PluginBase):
             }
             self._record_history(result)
             self._notify_result(
-                title="【栖影签到】异常 \U0001f534",
+                title="【栖影签到】异常 🔴",
                 text=(
                     f"━━━━━━━━━━━━━━━\n"
                     f"⚠️ 状态：签到执行失败\n"
                     f"━━━━━━━━━━━━━━━\n"
-                    f"\U0001f464 用户：{nickname}\n"
+                    f"👤 用户：{user_display}\n"
                     f"❌ 失败原因：{err_msg}\n"
-                    f"\U0001f504 重试进度：{retry_index}/{self._retry_count}\n"
+                    f"🔄 重试进度：{retry_index}/{self._retry_count}\n"
                     f"⏰ 下次重试：{next_retry_time or '无'}\n"
-                    f"\U0001f310 网络环境：{proxy_desc}\n"
+                    f"🌐 网络环境：{proxy_desc}\n"
                     f"━━━━━━━━━━━━━━━\n"
-                    f"\U0001f552 执行时间：{timestamp}"
+                    f"🕒 执行时间：{timestamp}"
                 ),
             )
             return result
@@ -708,7 +929,7 @@ class HDHavenSignin(_PluginBase):
         logger.info(f"{self.plugin_name}: 随机延迟 {delay} 秒，预计于 {run_date.strftime('%H:%M:%S')} 执行签到")
         try:
             if not self._scheduler:
-                self._scheduler = BackgroundScheduler(timezone=tz)
+                self._scheduler = BackgroundScheduler(timezone=tz_obj)
             self._scheduler.add_job(
                 func=self._execute_delayed_signin,
                 trigger="date",
@@ -734,7 +955,7 @@ class HDHavenSignin(_PluginBase):
         logger.info(f"{self.plugin_name}: 将在 {interval} 秒后进行第 {next_retry_index} 次签到重试")
         try:
             if not self._scheduler:
-                self._scheduler = BackgroundScheduler(timezone=tz)
+                self._scheduler = BackgroundScheduler(timezone=tz_obj)
             self._scheduler.add_job(
                 func=self._execute_delayed_signin,
                 trigger="date",
@@ -773,8 +994,9 @@ class HDHavenSignin(_PluginBase):
         if not self._notify:
             return
         try:
+            mtype = getattr(NotificationType, "SiteMessage", getattr(NotificationType, "Plugin", getattr(NotificationType, "Manual", None)))
             self.post_message(
-                mtype=NotificationType.SiteMessage,
+                mtype=mtype,
                 title=title,
                 text=text,
             )
@@ -1161,14 +1383,24 @@ class HDHavenSignin(_PluginBase):
         history = self.get_data("history") or []
         user_info = self.get_data("user_info") or {}
 
-        username = user_info.get("nickname") or user_info.get("username") or "栖影用户"
-        user_id = user_info.get("id", "--")
-        level = user_info.get("level", "初来乍到")
+        username = self._format_user_display(user_info)
+        user_id = str(user_info.get("id", "--")).strip()
+        level = self._extract_level_name(user_info.get("level", "初来乍到"))
         is_vip = bool(user_info.get("vip", False))
-        avatar_char = username[0] if username else "?"
+        avatar_char = (user_info.get("nickname") or user_info.get("username") or "栖")[0].upper()
 
         current_points = user_info.get("points", latest.get("points", "--"))
-        streak = user_info.get("checkin_streak", latest.get("checkin_days", "--"))
+        raw_streak = self._extract_streak_from_dict(user_info)
+        if raw_streak is None or raw_streak == 0:
+            raw_streak = latest.get("checkin_days")
+        if user_info.get("checkin_today") and (not raw_streak or raw_streak == "--" or raw_streak == 0):
+            raw_streak = 1
+        streak = raw_streak if raw_streak is not None and raw_streak != "" else "--"
+
+        if not user_id or user_id in ("--", "None", "null", "") or user_id == username or user_id == str(user_info.get("nickname", "")) or user_id == str(user_info.get("username", "")):
+            uid_subtitle = "账号会话正常"
+        else:
+            uid_subtitle = f"UID: {user_id} · 会话正常" 
 
         proxy_enabled, proxy_desc = self._get_proxy_status_display()
         signin_mode_name = self._signin_mode_options.get(self._signin_mode, "普通签到")
@@ -1258,7 +1490,7 @@ class HDHavenSignin(_PluginBase):
                                                             {"component": "VChip", "props": {"size": "x-small", "color": "amber-darken-3", "variant": "flat", "style": f"display: {'inline-flex' if is_vip else 'none'}"}, "text": "VIP会员"}
                                                         ]
                                                     },
-                                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": f"UID: {user_id} · 会话正常"}
+                                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": uid_subtitle}
                                                 ]
                                             }
                                         ]
