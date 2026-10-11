@@ -214,7 +214,7 @@
     "name": "豆瓣影音档案",
     "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
     "labels": "影视,工具",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "icon": "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png",
     "author": "wYw",
     "level": 1,
@@ -228,7 +228,8 @@
       "v1.0.9": "兼容电影年份标签差异，按中国大陆上映日期严格确认豆瓣条目",
       "v1.0.10": "修复媒体标题尾部年份导致上映日期匹配未触发，并解除旧匹配失败",
       "v1.0.11": "修复搜索类型标签和详情日期多格式解析，避免访问限制页被误判为条目无日期",
-      "v1.0.12": "修复播放提交被受限登录冷却阻断，获得CK后直接尝试标记，并解除旧匹配失败抑制"
+      "v1.0.12": "修复播放提交被受限登录冷却阻断，获得CK后直接尝试标记，并解除旧匹配失败抑制",
+      "v1.0.13": "适配MoviePilot V3媒体识别接口，使用MediaSource与media_id替换旧tmdbid参数"
     },
     "v2": true
   },
