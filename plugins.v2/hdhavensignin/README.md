@@ -39,6 +39,15 @@
 
 ## 📝 更新日志
 
+### v1.0.4 (2026-10-11)
+- **解决 HDHaven 站点 BROWSER_REQUIRED 403 假失效拦截**:
+  - 补充完整浏览器客户端特征请求头：`sec-ch-ua`、`sec-ch-ua-mobile`、`sec-ch-ua-platform`、`sec-fetch-site: same-origin`、`sec-fetch-mode: cors`、`sec-fetch-dest: empty`；
+  - 彻底规避站点自动化反爬策略触发的 `HTTP 403 (BROWSER_REQUIRED)` 拦截与误报“登录态失效”；
+- **优化账号密码登录模式的人机防护识别**:
+  - 识别站点 Cloudflare Turnstile 人机验证拦截（HTTP 400 `请先完成人机验证`），友好提示需改用 Cookie 模式并填入 `hdh_session`；
+- **新增 `/api/account/overview` 聚合接口明细解析**:
+  - 优先从站点 overview 聚合接口提取最新 notifications 与 ledger 变动记录，精准解析连续签到天数、获得经验（EXP）、获得积分及最新余额，杜绝 0 积分与虚假明细；
+
 ### v1.0.3
 - **彻底根治 403 登录态失效误报已打卡得 0 分**:
   - 彻底切断认证失效时静默回退旧缓存的漏洞；401/403 登录态失效立即向上抛出并中断执行，严禁将历史残留的 `checkin_today: True` 误判为今日已在站点签到；
