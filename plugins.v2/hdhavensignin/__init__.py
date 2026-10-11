@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import pytz
 import requests
-from requests.exceptions import ProxyError, ConnectTimeout, SSLError, RequestException
+from requests.exceptions import ProxyError, ConnectTimeout, SSLError, RequestException, Timeout, ReadTimeout
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -28,7 +28,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -541,7 +541,7 @@ class HDHavenSignin(_PluginBase):
                 raise ValueError("检测到站点启用了 Cloudflare 人机验证 (Turnstile)，密码登录受阻。请在插件配置中切换为【Cookie 模式】并填入 hdh_session 会话。")
             raise ValueError(f"账号密码登录失败 - {err_text}")
         except RequestException as e:
-            if isinstance(e, (ProxyError, ConnectTimeout)):
+            if isinstance(e, (ProxyError, ConnectTimeout, Timeout)):
                 raise ValueError(f"代理网络异常，无法连接到栖影站点: {e}")
             raise
 
@@ -591,6 +591,7 @@ class HDHavenSignin(_PluginBase):
                 data_dict["checkin_streak"] = streak
 
                 data_dict["points"] = self._to_number(data_dict.get("points"), 0.0)
+                data_dict["_updated_date"] = datetime.now().strftime("%Y-%m-%d")
                 return data_dict
         return {}
 
@@ -652,23 +653,35 @@ class HDHavenSignin(_PluginBase):
             if self._auth_mode == "password":
                 self._login_with_password(session, proxies)
 
-            # 1. 账号身份认证校验
+            # 1. 账号身份认证校验（实时获取最新状态）
+            user_info = None
             try:
                 user_info = self._fetch_user_profile(session, proxies)
                 if user_info:
+                    user_info["_updated_date"] = datetime.now().strftime("%Y-%m-%d")
                     self.save_data("user_info", user_info)
             except Exception as e:
+                err_text = str(e)
+                # 认证失效 (401/403) 绝对不能吞，必须直接向上抛出中断执行并报警
+                if "401" in err_text or "403" in err_text or "登录态失效" in err_text:
+                    raise
+                # 超时与网络类异常 (Timeout, RequestException) 直接抛出，立即进入失败重试调度，
+                # 避免在网络已阻断时仍盲目发起二次超时签到请求
+                if isinstance(e, (RequestException, Timeout)) or "Timeout" in type(e).__name__ or "Connect" in type(e).__name__:
+                    raise
+                # 其他异常（如解析异常）：记录警告，允许尝试使用历史缓存兜底展示基础信息，但严禁将历史缓存当作今日签到依据！
                 logger.warning(f"{self.plugin_name}: 获取用户信息异常 - {e}")
-                user_info = self.get_data("user_info") or {}
+                user_info = None
 
-            user_display = self._format_user_display(user_info)
-            level_name = self._extract_level_name(user_info.get("level"))
-            is_vip = bool(user_info.get("vip", False))
+            profile_for_display = user_info or (self.get_data("user_info") or {})
+            user_display = self._format_user_display(profile_for_display)
+            level_name = self._extract_level_name(profile_for_display.get("level"))
+            is_vip = bool(profile_for_display.get("vip", False))
             vip_suffix = " (VIP)" if is_vip else ""
-            current_points = self._to_number(user_info.get("points", 0))
+            current_points = self._to_number(profile_for_display.get("points", 0))
 
-            # 检查今日是否已在其他端完成签到
-            if user_info.get("checkin_today") is True:
+            # 检查今日是否已在其他端完成签到（必须以本次实时请求返回为准，绝对不能使用历史缓存）
+            if user_info and user_info.get("checkin_today") is True:
                 streak = self._extract_streak_from_dict(user_info)
                 if streak is None or streak < 1:
                     streak = 1
@@ -679,8 +692,20 @@ class HDHavenSignin(_PluginBase):
                 if notice_parsed.get("balance") is not None:
                     current_points = self._to_number(notice_parsed["balance"], current_points)
 
-                earned_val = notice_parsed.get("earned", 5.0 if self._signin_mode == "normal" else 0.0)
-                formula = notice_parsed.get("formula") or self._synthesize_checkin_formula(self._signin_mode, earned_val, user_info)
+                earned_val = notice_parsed.get("earned")
+                if earned_val is None:
+                    if self._signin_mode == "normal":
+                        earned_val = 5.0
+                        reward_display = "+5 积分"
+                        formula = "今日已在站点完成签到 (普通签到基础奖励)"
+                    else:
+                        earned_val = 0.0
+                        reward_display = "以站点账单为准"
+                        formula = "今日已在站点完成签到 (博弈签到积分以站点账单为准)"
+                else:
+                    reward_display = f"+{earned_val:g} 积分"
+                    formula = notice_parsed.get("formula") or f"获得 +{earned_val:g} 积分"
+
                 exp_text = f"\n⭐ 获得经验：+{notice_parsed['exp']} EXP" if "exp" in notice_parsed else ""
 
                 result = {
@@ -710,7 +735,7 @@ class HDHavenSignin(_PluginBase):
                         f"👤 用户：{user_display}\n"
                         f"🎖️ 等级：{level_name}{vip_suffix}\n"
                         f"🎲 签到模式：{self._signin_mode_options.get(self._signin_mode, '普通签到')}\n"
-                        f"🎁 今日奖励：+{earned_val:g} 积分\n"
+                        f"🎁 今日奖励：{reward_display}\n"
                         f"💰 当前总积分：{current_points:g} 积分\n"
                         f"📅 连续签到：{streak} 天{exp_text}\n"
                         f"📝 签到明细：{formula}\n"
@@ -748,6 +773,7 @@ class HDHavenSignin(_PluginBase):
                 try:
                     updated_profile = self._fetch_user_profile(session, proxies)
                     if updated_profile:
+                        updated_profile["_updated_date"] = datetime.now().strftime("%Y-%m-%d")
                         self.save_data("user_info", updated_profile)
                         user_info = updated_profile
                         new_points = updated_profile.get("points", new_points)
@@ -819,7 +845,7 @@ class HDHavenSignin(_PluginBase):
 
             # HTTP 409 Conflict: 今日已签到
             elif status_code == 409:
-                streak = self._extract_streak_from_dict(user_info) or 1
+                streak = self._extract_streak_from_dict(profile_for_display) or 1
                 if streak < 1:
                     streak = 1
 
@@ -829,12 +855,24 @@ class HDHavenSignin(_PluginBase):
                 if notice_parsed.get("balance") is not None:
                     current_points = self._to_number(notice_parsed["balance"], current_points)
 
-                earned_val = notice_parsed.get("earned", 5.0 if target_mode == "normal" else 0.0)
-                formula = notice_parsed.get("formula") or self._synthesize_checkin_formula(target_mode, earned_val, user_info)
+                earned_val = notice_parsed.get("earned")
+                if earned_val is None:
+                    if target_mode == "normal":
+                        earned_val = 5.0
+                        reward_display = "+5 积分"
+                        formula = "今日已在站点完成签到 (普通签到基础奖励)"
+                    else:
+                        earned_val = 0.0
+                        reward_display = "以站点账单为准"
+                        formula = "今日已在站点完成签到 (博弈签到积分以站点账单为准)"
+                else:
+                    reward_display = f"+{earned_val:g} 积分"
+                    formula = notice_parsed.get("formula") or f"获得 +{earned_val:g} 积分"
+
                 exp_text = f"\n⭐ 获得经验：+{notice_parsed['exp']} EXP" if "exp" in notice_parsed else ""
 
-                user_display = self._format_user_display(user_info)
-                level_name = self._extract_level_name(user_info.get("level"))
+                user_display = self._format_user_display(profile_for_display)
+                level_name = self._extract_level_name(profile_for_display.get("level"))
                 vip_suffix = " (VIP)" if is_vip else ""
 
                 result = {
@@ -864,7 +902,7 @@ class HDHavenSignin(_PluginBase):
                         f"👤 用户：{user_display}\n"
                         f"🎖️ 等级：{level_name}{vip_suffix}\n"
                         f"🎲 签到模式：{mode_name}\n"
-                        f"🎁 今日奖励：+{earned_val:g} 积分\n"
+                        f"🎁 今日奖励：{reward_display}\n"
                         f"💰 当前总积分：{current_points:g} 积分\n"
                         f"📅 连续签到：{streak} 天{exp_text}\n"
                         f"📝 签到明细：{formula}\n"
@@ -875,6 +913,10 @@ class HDHavenSignin(_PluginBase):
                 )
                 return result
 
+            # 401 / 403 明确标识登录态失效
+            elif status_code in (401, 403):
+                raise ValueError(f"登录态失效 (HTTP {status_code})，请更新 hdh_session 会话 Cookie")
+
             # 其它 HTTP 异常状态码处理
             else:
                 err_text = f"HTTP {status_code}: {res_data.get('message') or res_data.get('error') or '接口响应异常'}"
@@ -884,13 +926,29 @@ class HDHavenSignin(_PluginBase):
             err_msg = str(err)
             if isinstance(err, (ProxyError, ConnectTimeout)) or "ProxyError" in type(err).__name__:
                 err_msg = f"代理梯子连接失败，请检查MoviePilot全局代理或自定义代理设置是否可用 ({err})"
+            elif isinstance(err, (Timeout, ConnectTimeout)) or "Timeout" in type(err).__name__:
+                err_msg = f"连接栖影站点超时，请检查代理梯子连通性或稍后重试 ({err})"
             logger.error(f"{self.plugin_name}: 执行签到失败 - {err_msg}")
 
+            is_auth_error = any(k in err_msg for k in ("401", "403", "登录态失效", "Cookie"))
+
             next_retry_time = None
-            if retry_index < self._retry_count:
-                next_retry_time = self._schedule_retry_signin(retry_index + 1)
-            else:
+            if is_auth_error:
+                # 认证失效无需重试，直接清理 pending 任务并告警
                 self._clear_pending_task()
+                action = "auth_error"
+                status = "auth_error"
+                title = "【栖影签到】登录态失效 🔴"
+                state_text = "⚠️ 状态：登录态已失效 (需更新配置)"
+            else:
+                action = "failed"
+                status = "failed"
+                if retry_index < self._retry_count:
+                    next_retry_time = self._schedule_retry_signin(retry_index + 1)
+                else:
+                    self._clear_pending_task()
+                title = "【栖影签到】异常 🔴"
+                state_text = "⚠️ 状态：签到执行失败"
 
             user_info = self.get_data("user_info") or {}
             user_display = self._format_user_display(user_info)
@@ -898,8 +956,8 @@ class HDHavenSignin(_PluginBase):
                 "success": False,
                 "timestamp": timestamp,
                 "message": err_msg,
-                "action": "failed",
-                "status": "failed",
+                "action": action,
+                "status": status,
                 "detail": err_msg,
                 "points_change": 0,
                 "risk_downgraded": False,
@@ -909,11 +967,23 @@ class HDHavenSignin(_PluginBase):
                 "proxy_status": proxy_desc,
             }
             self._record_history(result)
-            self._notify_result(
-                title="【栖影签到】异常 🔴",
-                text=(
+
+            if is_auth_error:
+                notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
-                    f"⚠️ 状态：签到执行失败\n"
+                    f"{state_text}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"👤 用户：{user_display}\n"
+                    f"❌ 失败原因：{err_msg}\n"
+                    f"💡 处理建议：Cookie 已失效，请在插件设置中重新配置并保存 hdh_session\n"
+                    f"🌐 网络环境：{proxy_desc}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"🕒 执行时间：{timestamp}"
+                )
+            else:
+                notify_body = (
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"{state_text}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"👤 用户：{user_display}\n"
                     f"❌ 失败原因：{err_msg}\n"
@@ -922,8 +992,8 @@ class HDHavenSignin(_PluginBase):
                     f"🌐 网络环境：{proxy_desc}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"🕒 执行时间：{timestamp}"
-                ),
-            )
+                )
+            self._notify_result(title=title, text=notify_body)
             return result
 
     def _parse_random_delay(self) -> int:
@@ -1156,9 +1226,10 @@ class HDHavenSignin(_PluginBase):
             points_by_day[day] = awarded
             recorded_days.add(day)
 
-        # 保底检查：若当前账号今日已签到，但当天历史缺失或为0，计入 5.0 分
+        # 保底检查：若当前账号今日已签到，但当天历史缺失或为0，计入 5.0 分 (防旧缓存污染：必须是今日更新的数据)
         user_info = self.get_data("user_info") or {}
-        if user_info.get("checkin_today") and points_by_day[now.day] == 0:
+        today_str = now.strftime("%Y-%m-%d")
+        if user_info.get("checkin_today") and user_info.get("_updated_date") == today_str and points_by_day[now.day] == 0:
             points_by_day[now.day] = 5.0
 
         series = [{"day": day, "points": points_by_day[day]} for day in range(1, days_in_month + 1)]
@@ -1204,17 +1275,17 @@ class HDHavenSignin(_PluginBase):
             y = y_at(val)
             grid_nodes.append({
                 "component": "line",
-                "props": {"x1": left, "y1": y, "x2": width - right, "y2": y, "stroke": "#e2e8f0", "stroke-width": 1, "stroke-dasharray": "4 4"}
+                "props": {"x1": left, "y1": y, "x2": width - right, "y2": y, "stroke": "currentColor", "stroke-opacity": 0.15, "stroke-width": 1, "stroke-dasharray": "4 4"}
             })
             grid_nodes.append({
                 "component": "text",
-                "props": {"x": left - 10, "y": y + 4, "text-anchor": "end", "fill": "#94a3b8", "font-size": 11},
+                "props": {"x": left - 10, "y": y + 4, "text-anchor": "end", "fill": "currentColor", "fill-opacity": 0.65, "font-size": 11},
                 "text": f"{val:.0f}"
             })
 
         x_indexes = sorted(set([0, len(series) - 1, max(0, len(series) // 4), max(0, len(series) // 2), max(0, len(series) * 3 // 4)]))
         x_labels = [
-            {"component": "text", "props": {"x": x_at(idx), "y": height - 16, "text-anchor": "middle", "fill": "#94a3b8", "font-size": 11}, "text": f"{series[idx]['day']}日"}
+            {"component": "text", "props": {"x": x_at(idx), "y": height - 16, "text-anchor": "middle", "fill": "currentColor", "fill-opacity": 0.65, "font-size": 11}, "text": f"{series[idx]['day']}日"}
             for idx in x_indexes if 0 <= idx < len(series)
         ]
 
@@ -1233,9 +1304,9 @@ class HDHavenSignin(_PluginBase):
                 ]
             },
             *grid_nodes,
-            {"component": "line", "props": {"x1": left, "y1": zero_y, "x2": width - right, "y2": zero_y, "stroke": "#cbd5e1", "stroke-width": 1.2}},
+            {"component": "line", "props": {"x1": left, "y1": zero_y, "x2": width - right, "y2": zero_y, "stroke": "currentColor", "stroke-opacity": 0.35, "stroke-width": 1.2}},
             {"component": "path", "props": {"d": area_d, "fill": "url(#hdh_chart_grad)"}},
-            {"component": "path", "props": {"d": path_d, "fill": "none", "stroke": "#2563eb", "stroke-width": 3.5, "stroke-linecap": "round", "stroke-linejoin": "round"}},
+            {"component": "path", "props": {"d": path_d, "fill": "none", "stroke": "#3b82f6", "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round"}},
         ]
 
         for i, it in enumerate(series):
@@ -1244,7 +1315,7 @@ class HDHavenSignin(_PluginBase):
             if p_val > 0:
                 chart_elements.append({
                     "component": "circle",
-                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#10b981", "stroke": "#ffffff", "stroke-width": 2.5}
+                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#10b981", "stroke": "currentColor", "stroke-opacity": 0.8, "stroke-width": 2}
                 })
                 chart_elements.append({
                     "component": "text",
@@ -1254,7 +1325,7 @@ class HDHavenSignin(_PluginBase):
             elif p_val < 0:
                 chart_elements.append({
                     "component": "circle",
-                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#ef4444", "stroke": "#ffffff", "stroke-width": 2.5}
+                    "props": {"cx": x, "cy": y, "r": 5.5, "fill": "#ef4444", "stroke": "currentColor", "stroke-opacity": 0.8, "stroke-width": 2}
                 })
                 chart_elements.append({
                     "component": "text",
@@ -1264,7 +1335,7 @@ class HDHavenSignin(_PluginBase):
             else:
                 chart_elements.append({
                     "component": "circle",
-                    "props": {"cx": x, "cy": y, "r": 3.0, "fill": "#93c5fd", "stroke": "#ffffff", "stroke-width": 1.5}
+                    "props": {"cx": x, "cy": y, "r": 3.0, "fill": "#3b82f6", "fill-opacity": 0.7}
                 })
 
         chart_elements.extend(x_labels)
@@ -1282,14 +1353,24 @@ class HDHavenSignin(_PluginBase):
         }
 
     @staticmethod
-    def _section_card(header_bg: str, icon: str, title: str, content: List[dict], badge: Optional[dict] = None) -> Dict[str, Any]:
+    def _section_card(color_or_bg: str, icon: str, title: str, content: List[dict], badge: Optional[dict] = None) -> Dict[str, Any]:
+        color_map = {
+            "#f8fafc": "primary",
+            "#f0fdf4": "success",
+            "#eff6ff": "info",
+            "#fffbeb": "warning",
+        }
+        icon_color = color_map.get(color_or_bg, color_or_bg)
+        if not icon_color or icon_color.startswith("#"):
+            icon_color = "primary"
+
         header_items = [
             {
                 "component": "div",
                 "props": {"class": "d-flex align-center ga-2"},
                 "content": [
-                    {"component": "VIcon", "props": {"size": 22, "color": "primary"}, "text": icon},
-                    {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold text-high-emphasis"}, "text": title},
+                    {"component": "VIcon", "props": {"size": 22, "color": icon_color}, "text": icon},
+                    {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold"}, "text": title},
                 ]
             }
         ]
@@ -1297,17 +1378,28 @@ class HDHavenSignin(_PluginBase):
             header_items.append(badge)
 
         return {
-            "component": "div",
-            "props": {"style": "border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #ffffff; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);"},
+            "component": "VCard",
+            "props": {
+                "variant": "flat",
+                "color": "surface",
+                "border": True,
+                "class": "mb-4 rounded-lg overflow-hidden",
+            },
             "content": [
                 {
-                    "component": "div",
-                    "props": {"class": "d-flex align-center justify-space-between flex-wrap ga-2", "style": f"background: {header_bg}; padding: 14px 20px;"},
-                    "content": header_items
+                    "component": "VCardItem",
+                    "props": {"class": "px-4 pt-4 pb-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "d-flex align-center justify-space-between flex-wrap ga-2"},
+                            "content": header_items,
+                        }
+                    ]
                 },
                 {
-                    "component": "div",
-                    "props": {"style": "padding: 18px 20px;"},
+                    "component": "VCardText",
+                    "props": {"class": "px-4 pb-4 pt-1"},
                     "content": content
                 }
             ]
@@ -1573,7 +1665,7 @@ class HDHavenSignin(_PluginBase):
         if not user_id or user_id in ("--", "None", "null", "") or user_id == username or user_id == str(user_info.get("nickname", "")) or user_id == str(user_info.get("username", "")):
             uid_subtitle = "账号会话正常"
         else:
-            uid_subtitle = f"UID: {user_id} · 会话正常" 
+            uid_subtitle = f"UID: {user_id} · 会话正常"
 
         proxy_enabled, proxy_desc = self._get_proxy_status_display()
         signin_mode_name = self._signin_mode_options.get(self._signin_mode, "普通签到")
@@ -1584,6 +1676,7 @@ class HDHavenSignin(_PluginBase):
             "signed": ("签到成功", "success"),
             "already_signed": ("今日已签到", "info"),
             "failed": ("签到失败", "error"),
+            "auth_error": ("登录态失效", "error"),
             "config_required": ("待配置", "warning")
         }
         latest_act = latest.get("action", "")
@@ -1605,10 +1698,15 @@ class HDHavenSignin(_PluginBase):
             if awarded is not None:
                 awarded_num = self._to_number(awarded, 0.0)
                 awarded_display = f"{awarded_num:+g}"
-                awarded_color = "#10b981" if awarded_num > 0 else ("#ef4444" if awarded_num < 0 else "#64748b")
+                if awarded_num > 0:
+                    awarded_class = "py-2 font-weight-bold text-success"
+                elif awarded_num < 0:
+                    awarded_class = "py-2 font-weight-bold text-error"
+                else:
+                    awarded_class = "py-2 font-weight-bold text-medium-emphasis"
             else:
                 awarded_display = "--"
-                awarded_color = "#64748b"
+                awarded_class = "py-2 font-weight-bold text-medium-emphasis"
 
             table_rows.append({
                 "component": "tr",
@@ -1616,10 +1714,10 @@ class HDHavenSignin(_PluginBase):
                     {"component": "td", "props": {"class": "text-caption py-2"}, "text": h.get("timestamp", "--")},
                     {"component": "td", "props": {"class": "py-2"}, "content": [{"component": "VChip", "props": {"size": "x-small", "color": "purple", "variant": "tonal"}, "text": h.get("mode_name", h.get("mode", "--"))}]},
                     {"component": "td", "props": {"class": "py-2"}, "content": [{"component": "VChip", "props": {"size": "x-small", "color": h_color, "variant": "tonal"}, "text": h_text}]},
-                    {"component": "td", "props": {"class": "py-2 font-weight-bold", "style": f"color: {awarded_color};"}, "text": awarded_display},
+                    {"component": "td", "props": {"class": awarded_class}, "text": awarded_display},
                     {"component": "td", "props": {"class": "py-2 font-weight-bold"}, "text": str(h.get("points", "--"))},
                     {"component": "td", "props": {"class": "py-2 text-caption text-medium-emphasis"}, "text": h.get("proxy_status", "--")},
-                    {"component": "td", "props": {"class": "py-2 text-caption"}, "text": h.get("message", "--")},
+                    {"component": "td", "props": {"class": "py-2 text-caption text-truncate", "style": "max-width: 260px;"}, "text": h.get("message", "--")},
                 ]
             })
 
@@ -1631,135 +1729,161 @@ class HDHavenSignin(_PluginBase):
                 ]
             })
 
-        return [
-            {
-                "component": "div",
-                "props": {"class": "pa-1"},
-                "content": [
-                    self._section_card(
-                        "#f8fafc",
-                        "mdi-information-outline",
-                        "运行状态与环境",
-                        [{"component": "div", "props": {"class": "d-flex flex-wrap ga-2 align-center"}, "content": status_chips}]
-                    ),
-                    self._section_card(
-                        "#f0fdf4",
-                        "mdi-account-badge-outline",
-                        "栖影账号与积分概览",
-                        [
+        page_cards = []
+        if latest_act == "auth_error":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "error",
+                    "variant": "tonal",
+                    "icon": "mdi-alert-circle-outline",
+                    "class": "mb-4 rounded-lg",
+                    "title": "栖影站点登录态已失效 (HTTP 401/403)",
+                    "text": f"最近一次签到失败：{latest.get('message', '登录态失效')}。请前往插件设置中更新 hdh_session 会话 Cookie 并保存。"
+                }
+            })
+
+        page_cards.extend([
+            self._section_card(
+                "primary",
+                "mdi-information-outline",
+                "运行状态与环境",
+                [{"component": "div", "props": {"class": "d-flex flex-wrap ga-2 align-center"}, "content": status_chips}]
+            ),
+            self._section_card(
+                "success",
+                "mdi-account-badge-outline",
+                "栖影账号与积分概览",
+                [
+                    {
+                        "component": "div",
+                        "props": {"class": "d-flex flex-wrap align-center justify-space-between ga-4"},
+                        "content": [
                             {
                                 "component": "div",
-                                "props": {"class": "d-flex flex-wrap align-center justify-space-between ga-4"},
+                                "props": {"class": "d-flex align-center ga-3"},
                                 "content": [
                                     {
-                                        "component": "div",
-                                        "props": {"class": "d-flex align-center ga-3"},
-                                        "content": [
-                                            {
-                                                "component": "VAvatar",
-                                                "props": {"color": "primary", "size": 48, "class": "text-h6 font-weight-bold text-white"},
-                                                "text": avatar_char
-                                            },
-                                            {
-                                                "component": "div",
-                                                "content": [
-                                                    {
-                                                        "component": "div",
-                                                        "props": {"class": "d-flex align-center ga-2"},
-                                                        "content": [
-                                                            {"component": "span", "props": {"class": "text-h6 font-weight-bold"}, "text": username},
-                                                            {"component": "VChip", "props": {"size": "x-small", "color": "info", "variant": "flat"}, "text": level},
-                                                            {"component": "VChip", "props": {"size": "x-small", "color": "amber-darken-3", "variant": "flat", "style": f"display: {'inline-flex' if is_vip else 'none'}"}, "text": "VIP会员"}
-                                                        ]
-                                                    },
-                                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": uid_subtitle}
-                                                ]
-                                            }
-                                        ]
+                                        "component": "VAvatar",
+                                        "props": {"color": "primary", "size": 48, "class": "text-h6 font-weight-bold text-white"},
+                                        "text": avatar_char
                                     },
                                     {
                                         "component": "div",
-                                        "props": {"class": "d-flex flex-wrap ga-3"},
                                         "content": [
                                             {
                                                 "component": "div",
-                                                "props": {"class": "pa-3 text-center", "style": "background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; min-width: 110px;"},
+                                                "props": {"class": "d-flex align-center ga-2"},
                                                 "content": [
-                                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "当前总积分"},
-                                                    {"component": "div", "props": {"class": "text-h6 font-weight-bold text-primary"}, "text": str(current_points)}
+                                                    {"component": "span", "props": {"class": "text-h6 font-weight-bold"}, "text": username},
+                                                    {"component": "VChip", "props": {"size": "x-small", "color": "info", "variant": "flat"}, "text": level},
+                                                    {"component": "VChip", "props": {"size": "x-small", "color": "amber-darken-3", "variant": "flat", "style": f"display: {'inline-flex' if is_vip else 'none'}"}, "text": "VIP会员"}
                                                 ]
                                             },
-                                            {
-                                                "component": "div",
-                                                "props": {"class": "pa-3 text-center", "style": "background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; min-width: 110px;"},
-                                                "content": [
-                                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "连续签到"},
-                                                    {"component": "div", "props": {"class": "text-h6 font-weight-bold text-success"}, "text": f"{streak} 天"}
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    ),
-                    self._section_card(
-                        "#eff6ff",
-                        "mdi-chart-areaspline",
-                        f"本月签到积分走势 ({self._month_label()})",
-                        [
-                            {
-                                "component": "div",
-                                "props": {"class": "d-flex justify-space-between align-center flex-wrap ga-2 mb-2"},
-                                "content": [
-                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "横轴为当月日期，纵轴为当日签到获取积分"},
-                                    {
-                                        "component": "div",
-                                        "props": {"class": "d-flex ga-2"},
-                                        "content": [
-                                            {"component": "VChip", "props": {"size": "x-small", "color": "primary", "variant": "tonal"}, "text": f"本月累计获得: {month_total:g} 分"},
-                                            {"component": "VChip", "props": {"size": "x-small", "color": "cyan", "variant": "tonal"}, "text": f"单日最高: {month_peak:g} 分"}
+                                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": uid_subtitle}
                                         ]
                                     }
                                 ]
                             },
-                            self._build_points_chart(series)
-                        ]
-                    ),
-                    self._section_card(
-                        "#fffbeb",
-                        "mdi-history",
-                        "签到历史明细 (近15次记录)",
-                        [
                             {
-                                "component": "VTable",
-                                "props": {"density": "compact", "hover": True},
+                                "component": "div",
+                                "props": {"class": "d-flex flex-wrap ga-3"},
                                 "content": [
                                     {
-                                        "component": "thead",
+                                        "component": "VCard",
+                                        "props": {
+                                            "variant": "tonal",
+                                            "color": "primary",
+                                            "class": "pa-3 text-center rounded-lg",
+                                            "style": "min-width: 110px;",
+                                        },
                                         "content": [
-                                            {
-                                                "component": "tr",
-                                                "content": [
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "执行时间"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "模式"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "状态"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "奖励"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "余额"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "梯子代理"},
-                                                    {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "结果详情"},
-                                                ]
-                                            }
+                                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "当前总积分"},
+                                            {"component": "div", "props": {"class": "text-h6 font-weight-bold text-primary"}, "text": str(current_points)}
                                         ]
                                     },
                                     {
-                                        "component": "tbody",
-                                        "content": table_rows
+                                        "component": "VCard",
+                                        "props": {
+                                            "variant": "tonal",
+                                            "color": "success",
+                                            "class": "pa-3 text-center rounded-lg",
+                                            "style": "min-width: 110px;",
+                                        },
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "连续签到"},
+                                            {"component": "div", "props": {"class": "text-h6 font-weight-bold text-success"}, "text": f"{streak} 天"}
+                                        ]
                                     }
                                 ]
                             }
                         ]
-                    )
+                    }
                 ]
+            ),
+            self._section_card(
+                "info",
+                "mdi-chart-areaspline",
+                f"本月签到积分走势 ({self._month_label()})",
+                [
+                    {
+                        "component": "div",
+                        "props": {"class": "d-flex justify-space-between align-center flex-wrap ga-2 mb-2"},
+                        "content": [
+                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "横轴为当月日期，纵轴为当日签到获取积分"},
+                            {
+                                "component": "div",
+                                "props": {"class": "d-flex ga-2"},
+                                "content": [
+                                    {"component": "VChip", "props": {"size": "x-small", "color": "primary", "variant": "tonal"}, "text": f"本月累计获得: {month_total:g} 分"},
+                                    {"component": "VChip", "props": {"size": "x-small", "color": "cyan", "variant": "tonal"}, "text": f"单日最高: {month_peak:g} 分"}
+                                ]
+                            }
+                        ]
+                    },
+                    self._build_points_chart(series)
+                ]
+            ),
+            self._section_card(
+                "warning",
+                "mdi-history",
+                "签到历史明细 (近15次记录)",
+                [
+                    {
+                        "component": "VTable",
+                        "props": {"density": "compact", "hover": True},
+                        "content": [
+                            {
+                                "component": "thead",
+                                "content": [
+                                    {
+                                        "component": "tr",
+                                        "content": [
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "执行时间"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "模式"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "状态"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "奖励"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "余额"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "梯子代理"},
+                                            {"component": "th", "props": {"class": "text-caption font-weight-bold"}, "text": "结果详情"},
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "tbody",
+                                "content": table_rows
+                            }
+                        ]
+                    }
+                ]
+            )
+        ])
+
+        return [
+            {
+                "component": "div",
+                "props": {"class": "pa-1"},
+                "content": page_cards
             }
         ]
