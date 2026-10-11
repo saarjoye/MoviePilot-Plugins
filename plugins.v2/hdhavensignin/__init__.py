@@ -23,12 +23,42 @@ from app.scheduler import Scheduler
 from app.schemas import NotificationType
 
 
+class HDHavenError(ValueError):
+    """栖影插件基础异常"""
+    pass
+
+
+class SessionVerifyRequiredError(HDHavenError):
+    """站点检测到网络出口变动，需要人机验证 (SESSION_VERIFY_REQUIRED)"""
+    pass
+
+
+class ScrapeChallengeRequiredError(HDHavenError):
+    """站点触发访问频率风控验证 (SCRAPE_CHALLENGE_REQUIRED)"""
+    pass
+
+
+class AppRequiredError(HDHavenError):
+    """站点要求使用官方 OPENAPI 授权凭证接入 (APP_REQUIRED)"""
+    pass
+
+
+class BrowserRequiredError(HDHavenError):
+    """站点返回浏览器环境拦截 (BROWSER_REQUIRED)"""
+    pass
+
+
+class UnauthorizedError(HDHavenError):
+    """站点登录态失效 (HTTP 401 未知 code)"""
+    pass
+
+
 class HDHavenSignin(_PluginBase):
     # 插件元数据
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -52,9 +82,12 @@ class HDHavenSignin(_PluginBase):
     _use_proxy: bool = True
     _custom_proxy: str = ""
 
-    # 基础运行配置
+    # 账号认证配置
     _auth_mode: str = "cookie"
     _cookie: str = ""
+    _openapi_app_id: str = ""
+    _openapi_app_secret: str = ""
+    _openapi_user_token: str = ""
     _username: str = ""
     _password: str = ""
     _signin_mode: str = "normal"
@@ -75,7 +108,8 @@ class HDHavenSignin(_PluginBase):
     }
 
     _auth_mode_options: Dict[str, str] = {
-        "cookie": "Cookie 会话 (推荐/包含hdh_session)",
+        "cookie": "Cookie 会话 (需保持代理出口一致)",
+        "openapi": "OPENAPI 授权 (推荐/官方API模式，免人机验证)",
         "password": "账号密码登录 (站点已开启人机验证，目前不可用)",
     }
 
@@ -134,10 +168,12 @@ class HDHavenSignin(_PluginBase):
             return f"hdh_session={cookie_str}"
         return cookie_str
 
-    def _normalize_auth_mode(self, mode: Optional[str], has_cookie: bool = False) -> str:
+    def _normalize_auth_mode(self, mode: Optional[str], has_cookie: bool = False, has_openapi: bool = False) -> str:
         val = str(mode or "").strip().lower()
         if val in self._auth_mode_options:
             return val
+        if has_openapi:
+            return "openapi"
         return "cookie" if has_cookie else "cookie"
 
     def _normalize_signin_mode(self, mode: Optional[str]) -> str:
@@ -146,7 +182,95 @@ class HDHavenSignin(_PluginBase):
             return val
         return "normal"
 
+    @property
+    def _is_openapi_active(self) -> bool:
+        """判断当前是否激活 OPENAPI 模式"""
+        return bool(
+            self._auth_mode == "openapi"
+            or (self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+        )
+
+    def _api_url(self, endpoint: str) -> str:
+        """
+        构建请求 API 路径。
+        激活 OPENAPI 授权模式时，自动将 /api/* 切换为 /api/openapi/v1/*
+        """
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            parsed = urlparse(endpoint)
+            path = parsed.path
+            if parsed.query:
+                path += f"?{parsed.query}"
+            base = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+            base = self._base_url.rstrip("/")
+
+        if self._is_openapi_active:
+            if path.startswith("/api/") and not path.startswith("/api/openapi/v1/"):
+                path = "/api/openapi/v1" + path[4:]
+
+        return f"{base}{path}"
+
+    def _classify_site_error(self, res: Any, data: Optional[dict] = None) -> str:
+        """
+        统一解析响应体状态码与拦截 code 字段。
+        返回 ("browser_required"|"session_verify_required"|"scrape_challenge_required"|"app_required"|"unauthorized"|"ok")
+        """
+        if res is None:
+            return "ok"
+
+        status_code = getattr(res, "status_code", 200)
+        if isinstance(res, int):
+            status_code = res
+
+        if status_code in (200, 201, 409):
+            return "ok"
+
+        res_data = data or {}
+        text_content = ""
+        if hasattr(res, "json"):
+            try:
+                res_data = res.json() or {}
+            except Exception:
+                res_data = {}
+        elif isinstance(res, dict):
+            res_data = res
+
+        if hasattr(res, "text"):
+            try:
+                text_content = res.text or ""
+            except Exception:
+                text_content = ""
+        elif isinstance(res_data, dict):
+            text_content = str(res_data)
+
+        code_val = ""
+        if isinstance(res_data, dict):
+            code_val = str(res_data.get("code") or "").strip().upper()
+            if not code_val and isinstance(res_data.get("error"), dict):
+                code_val = str(res_data["error"].get("code") or "").strip().upper()
+
+        if code_val == "SESSION_VERIFY_REQUIRED" or "SESSION_VERIFY_REQUIRED" in text_content:
+            return "session_verify_required"
+        if code_val == "SCRAPE_CHALLENGE_REQUIRED" or "SCRAPE_CHALLENGE_REQUIRED" in text_content:
+            return "scrape_challenge_required"
+        if code_val == "APP_REQUIRED" or "APP_REQUIRED" in text_content:
+            return "app_required"
+        if code_val == "BROWSER_REQUIRED" or "BROWSER_REQUIRED" in text_content:
+            return "browser_required"
+
+        if status_code == 401:
+            return "unauthorized"
+        if status_code == 403:
+            return "browser_required"
+
+        return "ok"
+
     def _is_configured(self) -> bool:
+        if self._is_openapi_active:
+            return bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+        if self._auth_mode == "openapi":
+            return bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
         if self._auth_mode == "cookie":
             return bool(self._cookie and self._cookie.strip())
         return bool(self._username and self._username.strip() and self._password and self._password.strip())
@@ -204,6 +328,14 @@ class HDHavenSignin(_PluginBase):
         }
         if self._cookie and self._cookie.strip():
             headers["Cookie"] = self._cookie.strip()
+        if self._is_openapi_active:
+            if self._openapi_app_id:
+                headers["X-App-Id"] = self._openapi_app_id.strip()
+            if self._openapi_app_secret:
+                headers["X-App-Secret"] = self._openapi_app_secret.strip()
+            if self._openapi_user_token:
+                headers["X-User-Token"] = self._openapi_user_token.strip()
+                headers["Authorization"] = f"Bearer {self._openapi_user_token.strip()}"
         return headers
 
     def init_plugin(self, config: dict = None):
@@ -217,6 +349,9 @@ class HDHavenSignin(_PluginBase):
             self._custom_proxy = ""
             self._auth_mode = "cookie"
             self._cookie = ""
+            self._openapi_app_id = ""
+            self._openapi_app_secret = ""
+            self._openapi_user_token = ""
             self._username = ""
             self._password = ""
             self._signin_mode = "normal"
@@ -237,7 +372,11 @@ class HDHavenSignin(_PluginBase):
                 self._use_proxy = self._to_bool(config.get("use_proxy", True))
                 self._custom_proxy = (config.get("custom_proxy") or "").strip()
                 self._cookie = self._clean_cookie(config.get("cookie"))
-                self._auth_mode = self._normalize_auth_mode(config.get("auth_mode"), bool(self._cookie))
+                self._openapi_app_id = (config.get("openapi_app_id") or "").strip()
+                self._openapi_app_secret = (config.get("openapi_app_secret") or "").strip()
+                self._openapi_user_token = (config.get("openapi_user_token") or "").strip()
+                has_openapi = bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+                self._auth_mode = self._normalize_auth_mode(config.get("auth_mode"), bool(self._cookie), has_openapi)
                 self._username = (config.get("username") or "").strip()
                 self._password = str(config.get("password") or "")
                 self._signin_mode = self._normalize_signin_mode(config.get("signin_mode"))
@@ -456,11 +595,11 @@ class HDHavenSignin(_PluginBase):
     def _fetch_latest_checkin_notice(self, session: requests.Session, proxies: Optional[dict]) -> Tuple[Optional[str], Dict[str, Any]]:
         """尝试从站点消息通知接口获取最近的签到结算明细"""
         candidate_urls = [
-            f"{self._base_url}/api/account/overview",
-            f"{self._base_url}/api/account/unread",
-            f"{self._base_url}/api/account/notifications?page=1&limit=5",
-            f"{self._base_url}/api/notifications?limit=5",
-            f"{self._base_url}/api/account/messages?limit=5",
+            self._api_url("/api/account/overview"),
+            self._api_url("/api/account/unread"),
+            self._api_url("/api/account/notifications?page=1&limit=5"),
+            self._api_url("/api/notifications?limit=5"),
+            self._api_url("/api/account/messages?limit=5"),
         ]
         for url in candidate_urls:
             try:
@@ -575,33 +714,35 @@ class HDHavenSignin(_PluginBase):
             raise
 
     def _fetch_user_profile(self, session: requests.Session, proxies: Optional[dict]) -> dict:
-        url = f"{self._base_url}/api/auth/me"
+        url = self._api_url("/api/auth/me")
         res = session.get(
             url,
             headers=self._build_request_headers(referer=f"{self._base_url}/me"),
             proxies=proxies,
             timeout=(self._connect_timeout, self._read_timeout)
         )
-        if res.status_code == 401:
-            raise ValueError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
-        if res.status_code == 403:
-            try:
-                err_data = res.json()
-                if err_data.get("code") == "BROWSER_REQUIRED":
-                    raise ValueError(f"站点拦截非浏览器请求 (HTTP 403: BROWSER_REQUIRED - {err_data.get('message', '')})")
-                msg = err_data.get("message") or err_data.get("error") or str(err_data)
-                raise ValueError(f"访问受限 (HTTP 403) - {msg}")
-            except Exception as parse_e:
-                if "HTTP 403" in str(parse_e):
-                    raise parse_e
-            raise ValueError("访问受限 (HTTP 403)，可能触发了 Cloudflare 人机防护或站点安全拦截")
-        if res.status_code != 200:
+        res_data = {}
+        try:
+            res_data = res.json()
+        except Exception:
+            res_data = {}
+
+        err_type = self._classify_site_error(res, res_data)
+        if err_type == "session_verify_required":
+            raise SessionVerifyRequiredError("站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致")
+        elif err_type == "scrape_challenge_required":
+            raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
+        elif err_type == "app_required":
+            raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+        elif err_type == "browser_required":
+            msg = res_data.get("message") or res_data.get("error") or ""
+            raise BrowserRequiredError(f"站点返回安全浏览器拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
+        elif err_type == "unauthorized":
+            raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+        elif res.status_code != 200:
             raise ValueError(f"获取用户信息失败 - HTTP {res.status_code}")
 
-        try:
-            data = res.json()
-        except Exception as e:
-            raise ValueError(f"解析用户信息响应异常: {e}")
+        data = res_data
 
         if isinstance(data, dict):
             data_dict = data["data"] if "data" in data and isinstance(data["data"], dict) else (
@@ -637,9 +778,9 @@ class HDHavenSignin(_PluginBase):
 
     def _execute_checkin(self, session: requests.Session, proxies: Optional[dict], target_mode: str) -> Tuple[int, dict]:
         if target_mode == "gamble":
-            url = f"{self._base_url}/api/account/checkin/gamble"
+            url = self._api_url("/api/account/checkin/gamble")
         else:
-            url = f"{self._base_url}/api/account/checkin"
+            url = self._api_url("/api/account/checkin")
 
         res = session.post(
             url,
@@ -651,6 +792,19 @@ class HDHavenSignin(_PluginBase):
             res_data = res.json()
         except Exception:
             res_data = {}
+
+        err_type = self._classify_site_error(res, res_data)
+        if err_type == "session_verify_required":
+            raise SessionVerifyRequiredError("站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致")
+        elif err_type == "scrape_challenge_required":
+            raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
+        elif err_type == "app_required":
+            raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+        elif err_type == "browser_required":
+            msg = res_data.get("message") or res_data.get("error") or "BROWSER_REQUIRED"
+            raise BrowserRequiredError(f"签到请求被站点拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
+        elif err_type == "unauthorized":
+            raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
 
         return res.status_code, res_data
 
@@ -671,7 +825,12 @@ class HDHavenSignin(_PluginBase):
     def _execute_signin_flow(self, retry_index: int = 0) -> Dict[str, Any]:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not self._is_configured():
-            msg = "未配置栖影 Cookie (hdh_session)" if self._auth_mode == "cookie" else "未配置用户名或密码"
+            if self._is_openapi_active or self._auth_mode == "openapi":
+                msg = "未配置栖影 OPENAPI 凭证 (需完整填写 app_id, app_secret, user_token)"
+            elif self._auth_mode == "cookie":
+                msg = "未配置栖影 Cookie (hdh_session)"
+            else:
+                msg = "未配置用户名或密码"
             result = {
                 "success": False,
                 "timestamp": timestamp,
@@ -702,8 +861,11 @@ class HDHavenSignin(_PluginBase):
                     self.save_data("user_info", user_info)
             except Exception as e:
                 err_text = str(e)
-                # 认证失效 (401/403) 绝对不能吞，必须直接向上抛出中断执行并报警
-                if "401" in err_text or "403" in err_text or "登录态失效" in err_text:
+                # 命中已知安全拦截或认证失效时，必须直接向外抛出中断执行
+                if (
+                    isinstance(e, (HDHavenError, SessionVerifyRequiredError, ScrapeChallengeRequiredError, AppRequiredError, BrowserRequiredError, UnauthorizedError))
+                    or any(k in err_text for k in ("401", "403", "登录态失效", "SESSION_VERIFY_REQUIRED", "SCRAPE_CHALLENGE_REQUIRED", "APP_REQUIRED", "BROWSER_REQUIRED"))
+                ):
                     raise
                 # 超时与网络类异常 (Timeout, RequestException) 直接抛出，立即进入失败重试调度，
                 # 避免在网络已阻断时仍盲目发起二次超时签到请求
@@ -977,16 +1139,70 @@ class HDHavenSignin(_PluginBase):
                 err_msg = f"连接栖影站点超时，请检查代理梯子连通性或稍后重试 ({err})"
             logger.error(f"{self.plugin_name}: 执行签到失败 - {err_msg}")
 
-            is_auth_error = any(k in err_msg for k in ("401", "403", "登录态失效", "Cookie"))
+            is_session_verify = (
+                isinstance(err, SessionVerifyRequiredError)
+                or "SESSION_VERIFY_REQUIRED" in err_msg
+                or "网络出口变化" in err_msg
+            )
+            is_scrape_challenge = (
+                isinstance(err, ScrapeChallengeRequiredError)
+                or "SCRAPE_CHALLENGE_REQUIRED" in err_msg
+                or "访问频率风控" in err_msg
+            )
+            is_app_required = (
+                isinstance(err, AppRequiredError)
+                or "APP_REQUIRED" in err_msg
+                or "必须通过已审核应用调用" in err_msg
+                or "改用 OPENAPI 授权" in err_msg
+            )
+            is_auth_error = (
+                isinstance(err, (UnauthorizedError, BrowserRequiredError))
+                or (
+                    not (is_session_verify or is_scrape_challenge or is_app_required)
+                    and any(k in err_msg for k in ("401", "403", "登录态失效", "BROWSER_REQUIRED", "Cookie 已失效"))
+                )
+            )
 
             next_retry_time = None
-            if is_auth_error:
-                # 认证失效无需重试，直接清理 pending 任务并告警
+            if is_session_verify:
+                # 网络出口变化：保留现有 pending 任务，严禁清空 pending_task，避免误判为失效
+                action = "session_verify_required"
+                status = "session_verify_required"
+                title = "【栖影签到】网络出口变动 ⚠️"
+                state_text = "⚠️ 状态：网络出口变动，需人机验证"
+                advice = "站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致"
+            elif is_scrape_challenge:
+                # 触发站点访问频率风控：归入 rate_limit 类，走指数退避自动重试
+                action = "rate_limit"
+                status = "rate_limit"
+                title = "【栖影签到】频控拦截 ⚠️"
+                state_text = "⚠️ 状态：触发站点访问频率风控，已自动延后重试"
+                advice = "站点访问频次过高，插件已自动延后重试，请耐心等待，切勿频繁手动重试"
+                backoff_delays = [60, 180, 300]
+                delay_sec = backoff_delays[min(retry_index, len(backoff_delays) - 1)]
+                if retry_index < self._retry_count:
+                    next_retry_time = self._schedule_retry_signin(retry_index + 1, delay_sec=delay_sec)
+                else:
+                    self._clear_pending_task()
+            elif is_app_required:
+                # 站点要求官方 OPENAPI 授权：清理 pending 任务并明确引导申请
+                self._clear_pending_task()
+                action = "app_required"
+                status = "app_required"
+                title = "【栖影签到】需OPENAPI授权 ⚠️"
+                state_text = "⚠️ 状态：站点要求改用 OPENAPI 授权接入"
+                advice = "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
+            elif is_auth_error:
+                # 认证失效 / 浏览器拦截：清理 pending 任务并告警
                 self._clear_pending_task()
                 action = "auth_error"
                 status = "auth_error"
                 title = "【栖影签到】登录态失效 🔴"
                 state_text = "⚠️ 状态：登录态已失效 (需更新配置)"
+                if "browser" in err_msg.lower() or "403" in err_msg:
+                    advice = "请求被站点安全策略拦截 (403 BROWSER_REQUIRED)，请检查浏览器伪装头或改用 OPENAPI 授权模式"
+                else:
+                    advice = "Cookie 已失效，请在插件设置中重新配置并保存 hdh_session"
             else:
                 action = "failed"
                 status = "failed"
@@ -996,6 +1212,7 @@ class HDHavenSignin(_PluginBase):
                     self._clear_pending_task()
                 title = "【栖影签到】异常 🔴"
                 state_text = "⚠️ 状态：签到执行失败"
+                advice = ""
 
             user_info = self.get_data("user_info") or {}
             user_display = self._format_user_display(user_info)
@@ -1015,14 +1232,28 @@ class HDHavenSignin(_PluginBase):
             }
             self._record_history(result)
 
-            if is_auth_error:
+            if is_session_verify or is_app_required or is_auth_error:
                 notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
                     f"{state_text}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"👤 用户：{user_display}\n"
                     f"❌ 失败原因：{err_msg}\n"
-                    f"💡 处理建议：Cookie 已失效，请在插件设置中重新配置并保存 hdh_session\n"
+                    f"💡 处理建议：{advice}\n"
+                    f"🌐 网络环境：{proxy_desc}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"🕒 执行时间：{timestamp}"
+                )
+            elif is_scrape_challenge:
+                notify_body = (
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"{state_text}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"👤 用户：{user_display}\n"
+                    f"❌ 拦截原因：{err_msg}\n"
+                    f"💡 处理建议：{advice}\n"
+                    f"🔄 重试进度：{retry_index}/{self._retry_count}\n"
+                    f"⏰ 下次重试：{next_retry_time or '已达上限'}\n"
                     f"🌐 网络环境：{proxy_desc}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"🕒 执行时间：{timestamp}"
@@ -1087,8 +1318,8 @@ class HDHavenSignin(_PluginBase):
             logger.error(f"{self.plugin_name}: 启动延迟任务失败 - {e}")
             self._signin(0)
 
-    def _schedule_retry_signin(self, next_retry_index: int) -> Optional[str]:
-        interval = max(self._retry_interval, 5)
+    def _schedule_retry_signin(self, next_retry_index: int, delay_sec: Optional[int] = None) -> Optional[str]:
+        interval = delay_sec if delay_sec is not None else max(self._retry_interval, 5)
         tz_obj = self._get_timezone()
         run_date = datetime.now(tz=tz_obj) + timedelta(seconds=interval)
         self.save_data("pending_task", {
@@ -1462,6 +1693,9 @@ class HDHavenSignin(_PluginBase):
             "custom_proxy": self._custom_proxy,
             "auth_mode": self._auth_mode,
             "cookie": self._cookie,
+            "openapi_app_id": self._openapi_app_id,
+            "openapi_app_secret": self._openapi_app_secret,
+            "openapi_user_token": self._openapi_user_token,
             "username": self._username,
             "password": self._password,
             "signin_mode": self._signin_mode,
@@ -1584,7 +1818,8 @@ class HDHavenSignin(_PluginBase):
                                                             "model": "auth_mode",
                                                             "label": "认证方式",
                                                             "items": [
-                                                                {"title": "Cookie 会话模式 (推荐/稳定绕过人机验证)", "value": "cookie"},
+                                                                {"title": "Cookie 会话模式 (站点已限制直连，需保持出口一致)", "value": "cookie"},
+                                                                {"title": "OPENAPI 授权模式 (推荐/官方API模式，免人机验证)", "value": "openapi"},
                                                                 {"title": "账号密码模式 (站点已开启人机验证，不可用)", "value": "password"}
                                                             ]
                                                         }
@@ -1601,12 +1836,15 @@ class HDHavenSignin(_PluginBase):
                                                             "model": "cookie",
                                                             "label": "Cookie / hdh_session 会话",
                                                             "rows": 3,
-                                                            "hint": "推荐填入。可直接输入 hdh_session=xxxx 或浏览器复制的完整 Cookie 字符串，插件将自动提纯清洗",
+                                                            "hint": "站点已限制程序化 Cookie 直连，建议优先使用 OPENAPI。若使用 Cookie，请确保插件代理出口与浏览器登录时完全一致，避免触发 SESSION_VERIFY_REQUIRED。",
                                                             "persistent-hint": True
                                                         }
                                                     }
                                                 ]
                                             },
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_id", "label": "OPENAPI App ID (选填)", "placeholder": "站点个人中心 → OPENAPI 申请获取"}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_secret", "label": "OPENAPI App Secret (选填)", "type": "password", "placeholder": "应用密钥"}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_user_token", "label": "OPENAPI User Token (选填)", "type": "password", "placeholder": "用户凭证 Token"}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "username", "label": "用户名 / 邮箱 (密码模式下使用)"}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "password", "label": "登录密码 (密码模式下使用)", "type": "password"}}]},
                                         ]
@@ -1719,12 +1957,16 @@ class HDHavenSignin(_PluginBase):
 
         series, month_total, month_peak = self._build_month_points_series(history)
 
+        auth_display = "OPENAPI 授权" if self._is_openapi_active else ("Cookie 会话" if self._auth_mode == "cookie" else "账号密码")
         action_labels = {
             "signed": ("签到成功", "success"),
             "already_signed": ("今日已签到", "info"),
             "failed": ("签到失败", "error"),
             "auth_error": ("登录态失效", "error"),
-            "config_required": ("待配置", "warning")
+            "config_required": ("待配置", "warning"),
+            "session_verify_required": ("出口变化待验证", "warning"),
+            "rate_limit": ("频控延后重试", "warning"),
+            "app_required": ("需OPENAPI授权", "warning"),
         }
         latest_act = latest.get("action", "")
         act_text, act_color = action_labels.get(latest_act, ("暂无记录", "default"))
@@ -1733,6 +1975,7 @@ class HDHavenSignin(_PluginBase):
             {"component": "VChip", "props": {"color": "success" if self._enabled else "default", "variant": "tonal", "size": "small"}, "text": f"插件: {'已启用' if self._enabled else '未启用'}"},
             {"component": "VChip", "props": {"color": "primary", "variant": "tonal", "size": "small"}, "text": f"定时: {self._cron or '未设置'}"},
             {"component": "VChip", "props": {"color": "info" if proxy_enabled else "warning", "variant": "tonal", "size": "small"}, "text": f"梯子: {proxy_desc}"},
+            {"component": "VChip", "props": {"color": "indigo", "variant": "tonal", "size": "small"}, "text": f"鉴权: {auth_display}"},
             {"component": "VChip", "props": {"color": "purple", "variant": "tonal", "size": "small"}, "text": f"默认模式: {signin_mode_name}"},
             {"component": "VChip", "props": {"color": act_color, "variant": "tonal", "size": "small"}, "text": f"最新状态: {act_text}"},
         ]
@@ -1787,6 +2030,42 @@ class HDHavenSignin(_PluginBase):
                     "class": "mb-4 rounded-lg",
                     "title": "栖影站点登录态已失效 (HTTP 401/403)",
                     "text": f"最近一次签到失败：{latest.get('message', '登录态失效')}。请前往插件设置中更新 hdh_session 会话 Cookie 并保存。"
+                }
+            })
+        elif latest_act == "session_verify_required":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "icon": "mdi-shield-alert-outline",
+                    "class": "mb-4 rounded-lg",
+                    "title": "站点检测到网络出口变化 (SESSION_VERIFY_REQUIRED)",
+                    "text": f"最近一次签到被拦截：{latest.get('message', '')}。请保持插件代理与浏览器登录出口一致，并在浏览器访问 /verify-session 完成人机验证。"
+                }
+            })
+        elif latest_act in ("rate_limit", "scrape_challenge_required"):
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "icon": "mdi-speedometer-slow",
+                    "class": "mb-4 rounded-lg",
+                    "title": "触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)",
+                    "text": f"最近一次签到触发站点频率风控：{latest.get('message', '')}。插件已自动延后指数退避重试，无需重新配置。"
+                }
+            })
+        elif latest_act == "app_required":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "icon": "mdi-api",
+                    "class": "mb-4 rounded-lg",
+                    "title": "站点要求改用 OPENAPI 授权 (APP_REQUIRED)",
+                    "text": f"站点已限制程序直连：{latest.get('message', '')}。请前往 站点 → 个人中心 → OPENAPI 申请凭证并在插件设置中配置。"
                 }
             })
 

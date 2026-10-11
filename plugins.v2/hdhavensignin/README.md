@@ -13,9 +13,10 @@
   - 针对国内网络环境，默认开启代理开关（`use_proxy = True`）。
   - 自动无缝接入 MoviePilot 系统设置的梯子代理（`settings.PROXY`）。
   - 支持填入自定义独立代理地址（如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:10808`），留空时自动复用系统梯子。
-- **双认证模式与实时鉴权**:
-  - Cookie 认证（推荐）：支持填入 `hdh_session` 单项或浏览器完整 Cookie，插件自动清洗提取。
-  - 严格实时校验登录态：401/403 认证失效绝不吞错，绝不回退至旧缓存误报打卡，立即弹出登录态失效告警并清理重试任务。
+- **多认证模式与官方 OPENAPI 接入**:
+  - OPENAPI 授权（推荐长效稳定）：支持配置站点 `openapi_app_id`、`openapi_app_secret` 与 `openapi_user_token`，自动切换至 `/api/openapi/v1/*` 标准接口；
+  - Cookie 认证：支持填入 `hdh_session` 单项或浏览器完整 Cookie，插件自动清洗提取；
+  - 智能安全拦截分类：精准区分 `SESSION_VERIFY_REQUIRED`（网络出口变化需人机验证）、`SCRAPE_CHALLENGE_REQUIRED`（频控退避重试）、`APP_REQUIRED`（引导配置 OPENAPI）与 `BROWSER_REQUIRED`，杜绝误报 Cookie 失效；
   - 账号密码认证：支持自动登录，当遇到 Cloudflare Turnstile 人机验证时友好提示。
 - **V3 深度主题自适应与看板**:
   - 完美适配 MoviePilot V3 (Vuetify 3) 深色与浅色模式，根治旧版白底浅字看不清的问题。
@@ -38,6 +39,14 @@
 4. 保存配置并测试执行。
 
 ## 📝 更新日志
+
+### v1.0.5 (2026-10-12)
+- **全面适配站点新版安全风控与拦截码**:
+  - **网络出口变动识别 (`SESSION_VERIFY_REQUIRED`)**: 识别 HTTP 401 下由于代理出口变化触发的人机验证拦截，明确提示用户在浏览器中完成人机验证（`/verify-session`）或使代理出口保持一致，不再误报“Cookie 失效”且不取消定时任务；
+  - **访问频控自动指数退避 (`SCRAPE_CHALLENGE_REQUIRED`)**: 识别高频请求人机挑战拦截，自动触发指数退避延后重试（60s / 180s / 300s），避免盲目重试加重风控；
+  - **官方程序化授权凭证接入 (`APP_REQUIRED`)**: 适配站点针对程序自动化调用的 OPENAPI 强制要求，新增 `openapi_app_id`、`openapi_app_secret`、`openapi_user_token` 凭证配置，自动切换请求路径至 `/api/openapi/v1/*` 并附带授权鉴权头；
+  - **收紧认证失效与重试判定**: 仅当无特殊安全拦截码的常规 401 时才判定登录态失效并清理待执行任务，各风控类型分流独立处理；
+  - **看板与设置项完善**: 设置表单新增 OPENAPI 配置区块及模式引导说明，面板实时展示当前认证模式与安全状态。
 
 ### v1.0.4 (2026-10-11)
 - **解决 HDHaven 站点 BROWSER_REQUIRED 403 假失效拦截**:
