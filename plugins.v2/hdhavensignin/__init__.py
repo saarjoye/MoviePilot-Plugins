@@ -456,6 +456,7 @@ class HDHavenSignin(_PluginBase):
     def _fetch_latest_checkin_notice(self, session: requests.Session, proxies: Optional[dict]) -> Tuple[Optional[str], Dict[str, Any]]:
         """尝试从站点消息通知接口获取最近的签到结算明细"""
         candidate_urls = [
+            f"{self._base_url}/api/account/overview",
             f"{self._base_url}/api/account/unread",
             f"{self._base_url}/api/account/notifications?page=1&limit=5",
             f"{self._base_url}/api/notifications?limit=5",
@@ -476,6 +477,28 @@ class HDHavenSignin(_PluginBase):
                 except Exception:
                     continue
 
+                # 1. 优先解析 overview 聚合接口返回的 notifications 与 ledger
+                if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+                    data_obj = payload.get("data") or {}
+                    notifs = data_obj.get("notifications") or []
+                    ledger = data_obj.get("ledger") or []
+                    for it in notifs:
+                        if not isinstance(it, dict):
+                            continue
+                        title = str(it.get("title") or "")
+                        content = str(it.get("message") or it.get("content") or "")
+                        combined = f"{title}；{content}".strip("； ")
+                        if "签到" in combined or "checkin" in combined.lower() or "积分" in combined:
+                            parsed = self._parse_checkin_notice_text(combined)
+                            for l_it in ledger:
+                                if isinstance(l_it, dict) and ("签到" in str(l_it.get("reason", "")) or "checkin" in str(l_it.get("reason", "")).lower()):
+                                    if parsed.get("earned") is None and l_it.get("delta") is not None:
+                                        parsed["earned"] = self._to_number(l_it.get("delta"))
+                                    if parsed.get("balance") is None and l_it.get("balance") is not None:
+                                        parsed["balance"] = self._to_number(l_it.get("balance"))
+                                    break
+                            return combined, parsed
+
                 items = []
                 if isinstance(payload, list):
                     items = payload
@@ -491,7 +514,7 @@ class HDHavenSignin(_PluginBase):
                     content = str(it.get("content") or it.get("message") or it.get("body") or it.get("text") or "")
                     combined = f"{title} {content}".strip()
                     if "签到" in combined or "checkin" in combined.lower() or "积分" in combined:
-                        text_to_parse = content if ("积分" in content or "签到" in content) else combined
+                        text_to_parse = combined if title else content
                         parsed = self._parse_checkin_notice_text(text_to_parse)
                         return text_to_parse, parsed
             except Exception as err:
