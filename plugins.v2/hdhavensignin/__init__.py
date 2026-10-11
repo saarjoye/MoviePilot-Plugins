@@ -28,7 +28,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -76,7 +76,7 @@ class HDHavenSignin(_PluginBase):
 
     _auth_mode_options: Dict[str, str] = {
         "cookie": "Cookie 会话 (推荐/包含hdh_session)",
-        "password": "账号密码登录",
+        "password": "账号密码登录 (站点已开启人机验证，目前不可用)",
     }
 
     _scheduler: Optional[BackgroundScheduler] = None
@@ -195,6 +195,12 @@ class HDHavenSignin(_PluginBase):
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": referer or f"{self._base_url}/me",
             "Origin": self._base_url,
+            "sec-ch-ua": '"Google Chrome";v="134", "Chromium";v="134", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
         }
         if self._cookie and self._cookie.strip():
             headers["Cookie"] = self._cookie.strip()
@@ -537,7 +543,7 @@ class HDHavenSignin(_PluginBase):
                 return
 
             err_text = self._format_http_error(res, res_data)
-            if "turnstile" in err_text.lower() or "cloudflare" in err_text.lower() or res.status_code == 403:
+            if "turnstile" in err_text.lower() or "cloudflare" in err_text.lower() or "人机" in err_text or "验证" in err_text or res.status_code in (400, 403):
                 raise ValueError("检测到站点启用了 Cloudflare 人机验证 (Turnstile)，密码登录受阻。请在插件配置中切换为【Cookie 模式】并填入 hdh_session 会话。")
             raise ValueError(f"账号密码登录失败 - {err_text}")
         except RequestException as e:
@@ -553,8 +559,19 @@ class HDHavenSignin(_PluginBase):
             proxies=proxies,
             timeout=(self._connect_timeout, self._read_timeout)
         )
-        if res.status_code in (401, 403):
-            raise ValueError(f"登录态失效 (HTTP {res.status_code})，请更新 hdh_session 会话 Cookie")
+        if res.status_code == 401:
+            raise ValueError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+        if res.status_code == 403:
+            try:
+                err_data = res.json()
+                if err_data.get("code") == "BROWSER_REQUIRED":
+                    raise ValueError(f"站点拦截非浏览器请求 (HTTP 403: BROWSER_REQUIRED - {err_data.get('message', '')})")
+                msg = err_data.get("message") or err_data.get("error") or str(err_data)
+                raise ValueError(f"访问受限 (HTTP 403) - {msg}")
+            except Exception as parse_e:
+                if "HTTP 403" in str(parse_e):
+                    raise parse_e
+            raise ValueError("访问受限 (HTTP 403)，可能触发了 Cloudflare 人机防护或站点安全拦截")
         if res.status_code != 200:
             raise ValueError(f"获取用户信息失败 - HTTP {res.status_code}")
 
@@ -913,9 +930,16 @@ class HDHavenSignin(_PluginBase):
                 )
                 return result
 
-            # 401 / 403 明确标识登录态失效
-            elif status_code in (401, 403):
-                raise ValueError(f"登录态失效 (HTTP {status_code})，请更新 hdh_session 会话 Cookie")
+            # 401 明确标识登录态失效
+            elif status_code == 401:
+                raise ValueError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+
+            # 403 明确标识访问受限 / 安全拦截
+            elif status_code == 403:
+                err_text = self._format_http_error(None, res_data) if res_data else "HTTP 403 Forbidden"
+                if "browser" in err_text.lower():
+                    raise ValueError(f"签到请求被站点拦截 (HTTP 403: {err_text})")
+                raise ValueError(f"签到请求访问受限 (HTTP 403) - {err_text}")
 
             # 其它 HTTP 异常状态码处理
             else:
@@ -1538,7 +1562,7 @@ class HDHavenSignin(_PluginBase):
                                                             "label": "认证方式",
                                                             "items": [
                                                                 {"title": "Cookie 会话模式 (推荐/稳定绕过人机验证)", "value": "cookie"},
-                                                                {"title": "账号密码模式 (若遇Cloudflare人机验证需换Cookie)", "value": "password"}
+                                                                {"title": "账号密码模式 (站点已开启人机验证，不可用)", "value": "password"}
                                                             ]
                                                         }
                                                     }
