@@ -126,7 +126,7 @@ class PandaTradeAssistant(_PluginBase):
     plugin_name = "熊猫交易助手"
     plugin_desc = "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。"
     plugin_icon = "pandatradeassistant.png"
-    plugin_version = "0.2.23"
+    plugin_version = "0.2.24"
     plugin_author = "wYw"
     author_url = ""
     plugin_config_prefix = "pandatradeassistant_"
@@ -193,7 +193,7 @@ class PandaTradeAssistant(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
-        return "vue", "dist/assets-v0223"
+        return "vue", "dist/assets-v0224"
 
     @staticmethod
     def get_sidebar_nav() -> List[Dict[str, Any]]:
