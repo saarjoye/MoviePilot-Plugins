@@ -15,7 +15,7 @@ from fastapi import Depends
 
 from app.core.config import settings
 from app.chain.subscribe import SubscribeChain
-from app.db import ScopedSession
+from app.db import ScopedSession, get_scoped_session
 from app.db.models.subscribe import Subscribe
 from app.db.models.subscribehistory import SubscribeHistory
 from app.db.subscribe_oper import SubscribeOper
@@ -518,8 +518,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.42"
-    plugin_release_date = "2026-08-28"
+    plugin_version = "0.6.43"
+    plugin_release_date = "2026-10-12"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -924,7 +924,7 @@ class UpcomingReleases(_PluginBase):
                 "component": "VCard",
                 "props": {"class": "mb-4"},
                 "content": [
-                    {"component": "VCardTitle", "text": "????"},
+                    {"component": "VCardTitle", "text": "插件信息"},
                     {"component": "VDivider"},
                     {
                         "component": "VCardText",
@@ -946,11 +946,16 @@ class UpcomingReleases(_PluginBase):
             return
         event_data: DiscoverSourceEventData = event.event_data
         api_path = f"plugin/{self.__class__.__name__}/upcoming_discover?apikey={settings.API_TOKEN}"
-        if any(getattr(source, "mediaid_prefix", None) == "upcomingreleases" for source in event_data.extra_sources):
+        if any(
+            getattr(source, "mediaid_prefix", None) == "upcomingreleases"
+            or str(getattr(source, "media_source", "") or "") == "upcomingreleases"
+            for source in event_data.extra_sources
+        ):
             return
         event_data.extra_sources.append(
             DiscoverMediaSource(
                 name="即将上映",
+                media_source="upcomingreleases",
                 mediaid_prefix="upcomingreleases",
                 api_path=api_path,
                 filter_params={
@@ -987,13 +992,16 @@ class UpcomingReleases(_PluginBase):
         if not self.get_state():
             return
         event_data: MediaRecognizeConvertEventData = event.event_data
-        mediaid = str(event_data.mediaid or "")
-        if not mediaid.startswith("upcomingreleases:"):
+        if str(getattr(event_data, "media_source", "") or "") != "upcomingreleases":
             return
-        item = self._find_item_by_mediaid(mediaid.split(":", 1)[1])
+        media_id = str(getattr(event_data, "media_id", "") or "").strip()
+        if not media_id:
+            return
+        item = self._find_item_by_mediaid(media_id)
         if not item:
             return
-        media_dict = self._resolve_media_dict(item, event_data.convert_type)
+        target_media_source = str(getattr(event_data, "target_media_source", "") or "")
+        media_dict = self._resolve_media_dict(item, target_media_source)
         if media_dict:
             event_data.media_dict = media_dict
 
@@ -1350,10 +1358,6 @@ class UpcomingReleases(_PluginBase):
             title=item.get("title"),
             year=item.get("year") or "",
             mtype=resolved_mtype,
-            tmdbid=safe_int(recognition.get("tmdb_id"), 0) or None,
-            doubanid=self._clean_text(recognition.get("douban_id")) or None,
-            bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
-            mediaid=self._make_subscribe_mediaid(item),
             media_source=media_source,
             media_id=resolved_media_id,
             season=resolved_season,
@@ -1400,9 +1404,6 @@ class UpcomingReleases(_PluginBase):
         self._set_page_feedback("error", f"{item.get('title')} 订阅失败：{message or '未知原因'}")
         return {"success": False, "message": message or "failed"}
 
-    def _make_subscribe_mediaid(self, item: Dict[str, Any]) -> str:
-        return f"upcomingreleases:{item.get('media_id')}"
-
     def _resolve_subscribe_identity(
         self,
         recognition: Optional[Dict[str, Any]] = None,
@@ -1438,7 +1439,7 @@ class UpcomingReleases(_PluginBase):
         try:
             users = UserOper().list() or []
         except Exception as err:
-            logger.warning(f"[UpcomingReleases] ??????????: {err}")
+            logger.warning(f"[UpcomingReleases] 获取默认订阅用户失败: {err}")
             return None
         for user in users:
             name = self._clean_text(getattr(user, "name", None))
@@ -1450,23 +1451,17 @@ class UpcomingReleases(_PluginBase):
                 return name
         return None
 
-    def _get_subscribe_by_mediaid(self, mediaid: str):
-        if not mediaid:
+    def _get_subscribe_by_identity(self, media_source: Optional[str], media_id: Optional[str]):
+        source_value = self._clean_text(media_source)
+        id_value = self._clean_text(media_id)
+        if not source_value or not id_value:
             return None
-        subscribe_oper = SubscribeOper()
-        mediaid_lookup = getattr(subscribe_oper, "get_by_mediaid", None)
-        if callable(mediaid_lookup):
-            try:
-                result = mediaid_lookup(mediaid)
-                if result:
-                    return result
-            except Exception as err:
-                logger.warning(f"[UpcomingReleases] mediaid ??????: {err}")
         try:
-            return Subscribe.get_by_mediaid(subscribe_oper._db, mediaid)
+            records = SubscribeOper().list_by_media_identity(source_value, id_value) or []
         except Exception as err:
-            logger.warning(f"[UpcomingReleases] ???? mediaid ????: {err}")
+            logger.warning(f"[UpcomingReleases] 订阅媒体身份查询失败: {err}")
             return None
+        return records[0] if records else None
 
     def _get_subscribe_by_sid(self, sid: Any):
         sid_value = safe_int(sid, 0)
@@ -1514,21 +1509,6 @@ class UpcomingReleases(_PluginBase):
             actual_id = self._clean_text(getattr(record, "media_id", None))
             if actual_source != expected_source or actual_id != expected_id:
                 return False, actual_season, "主订阅媒体身份不一致"
-
-        expected_mediaid = self._make_subscribe_mediaid(item)
-        actual_mediaid = self._clean_text(getattr(record, "mediaid", None))
-        if expected_mediaid and actual_mediaid != expected_mediaid:
-            try:
-                SubscribeOper().update(getattr(record, "id", sid), {"mediaid": expected_mediaid})
-            except Exception as err:
-                logger.warning(f"[UpcomingReleases] subscribe mediaid backfill failed: sid={sid} - {err}")
-            else:
-                record = self._get_subscribe_by_sid(sid)
-                actual_mediaid = self._clean_text(getattr(record, "mediaid", None)) if record else ""
-                if actual_mediaid != expected_mediaid:
-                    logger.warning(
-                        f"[UpcomingReleases] subscribe mediaid backfill not confirmed: sid={sid}"
-                    )
         return True, actual_season, ""
 
     def _format_subscribe_result_detail(
@@ -1570,14 +1550,14 @@ class UpcomingReleases(_PluginBase):
         populate_recognition: bool = False,
         recognition: Optional[Dict[str, Any]] = None,
     ):
-        mediaid = self._make_subscribe_mediaid(item)
         recognition = recognition or self._get_cached_recognition(
             item,
             populate=populate_recognition,
             require_ids=False,
         ) or {}
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
-        record = self._get_subscribe_by_mediaid(mediaid)
+        identity_source, identity_id = self._resolve_subscribe_identity(recognition)
+        record = self._get_subscribe_by_identity(identity_source, identity_id)
         if (
             record
             and self._subscribe_record_matches_username(record, username=username)
@@ -1597,32 +1577,27 @@ class UpcomingReleases(_PluginBase):
         type_candidates = self._get_item_type_candidates(item, recognition)
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
         subscribe_oper = SubscribeOper()
-
-        lookup_args = []
-        tmdb_id = safe_int(recognition.get("tmdb_id"), 0)
-        douban_id = self._clean_text(recognition.get("douban_id"))
-        bangumi_id = safe_int(recognition.get("bangumi_id"), 0)
-        if tmdb_id:
-            lookup_args.append({"tmdbid": tmdb_id})
-        if douban_id:
-            lookup_args.append({"doubanid": douban_id})
-        if bangumi_id:
-            lookup_args.append({"bangumiid": bangumi_id})
-
-        for type_key in type_candidates:
-            expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
-            for lookup in lookup_args:
+        identity_source, identity_id = self._resolve_subscribe_identity(recognition)
+
+        if identity_source and identity_id:
+            for type_key in type_candidates:
+                expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
                 try:
-                    record = subscribe_oper.get_by(type=expected_type, season=expected_season, **lookup)
-                except Exception as err:
-                    logger.warning(f"[UpcomingReleases] subscribe ID lookup failed: {lookup} - {err}")
-                    record = None
+                    record = subscribe_oper.get_by(
+                        type=expected_type,
+                        media_source=identity_source,
+                        media_id=identity_id,
+                        season=expected_season,
+                    )
+                except Exception as err:
+                    logger.warning(f"[UpcomingReleases] subscribe identity lookup failed: {err}")
+                    record = None
                 if (
                     record
                     and self._subscribe_record_matches_username(record, username=username)
                     and self._subscribe_season_matches(expected_season, getattr(record, "season", None))
                 ):
-                    return record
+                    return record
 
         try:
             subscribes = subscribe_oper.list() or []
@@ -1918,12 +1893,8 @@ class UpcomingReleases(_PluginBase):
             return False
 
         payload = {}
-        expected_mediaid = self._make_subscribe_mediaid(item)
-        current_mediaid = self._clean_text(getattr(subscribe, "mediaid", None))
         if target_username and not current_username:
             payload["username"] = target_username
-        if not current_mediaid:
-            payload["mediaid"] = expected_mediaid
 
         if payload:
             try:
@@ -2164,7 +2135,8 @@ class UpcomingReleases(_PluginBase):
         return MediaType.TV.value, season or 1
 
     def _list_subscribe_history(self) -> List[Any]:
-        db = ScopedSession()
+        registry = get_scoped_session()
+        db = registry()
         try:
             return db.query(SubscribeHistory).all() or []
         except Exception as err:
@@ -2174,27 +2146,33 @@ class UpcomingReleases(_PluginBase):
             try:
                 db.close()
             finally:
-                ScopedSession.remove()
+                registry.remove()
 
-    def _get_subscribe_history_by_mediaid(self, mediaid: str):
-        if not mediaid:
+    def _get_subscribe_history_by_identity(self, media_source: Optional[str], media_id: Optional[str]):
+        source_value = self._clean_text(media_source)
+        id_value = self._clean_text(media_id)
+        if not source_value or not id_value:
             return None
-        db = ScopedSession()
+        registry = get_scoped_session()
+        db = registry()
         try:
             return (
                 db.query(SubscribeHistory)
-                .filter(SubscribeHistory.mediaid == mediaid)
+                .filter(
+                    SubscribeHistory.media_source == source_value,
+                    SubscribeHistory.media_id == id_value,
+                )
                 .first()
             )
         except Exception as err:
-            logger.warning(f"[UpcomingReleases] subscribe history mediaid lookup failed: {err}")
+            logger.warning(f"[UpcomingReleases] subscribe history identity lookup failed: {err}")
             return None
         finally:
             try:
                 db.close()
             finally:
-                ScopedSession.remove()
-
+                registry.remove()
+
     def _find_existing_subscribe_history(
         self,
         item: Dict[str, Any],
@@ -2202,14 +2180,14 @@ class UpcomingReleases(_PluginBase):
         populate_recognition: bool = False,
         recognition: Optional[Dict[str, Any]] = None,
     ):
-        mediaid = self._make_subscribe_mediaid(item)
         recognition = recognition or self._get_cached_recognition(
             item,
             populate=populate_recognition,
             require_ids=False,
         ) or {}
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
-        record = self._get_subscribe_history_by_mediaid(mediaid)
+        identity_source, identity_id = self._resolve_subscribe_identity(recognition)
+        record = self._get_subscribe_history_by_identity(identity_source, identity_id)
         if (
             record
             and self._subscribe_record_matches_username(record, username=username)
@@ -2231,9 +2209,6 @@ class UpcomingReleases(_PluginBase):
         ) or {}
         type_candidates = self._get_item_type_candidates(item, recognition)
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
-        tmdb_id = safe_int(recognition.get("tmdb_id"), 0)
-        douban_id = self._clean_text(recognition.get("douban_id"))
-        bangumi_id = safe_int(recognition.get("bangumi_id"), 0)
         histories = self._list_subscribe_history()
         if not histories:
             return None
@@ -2246,15 +2221,14 @@ class UpcomingReleases(_PluginBase):
                 if self._clean_text(getattr(history, "type", None)) != expected_type:
                     continue
                 history_season = getattr(history, "season", None)
-                if tmdb_id and getattr(history, "tmdbid", None) == tmdb_id:
-                    if self._subscribe_season_matches(expected_season, history_season):
-                        return history
-                if douban_id and self._clean_text(getattr(history, "doubanid", None)) == douban_id:
-                    if self._subscribe_season_matches(expected_season, history_season):
-                        return history
-                if bangumi_id and safe_int(getattr(history, "bangumiid", None), 0) == bangumi_id:
-                    if self._subscribe_season_matches(expected_season, history_season):
-                        return history
+                if (
+                    identity_source
+                    and identity_id
+                    and self._clean_text(getattr(history, "media_source", None)) == identity_source
+                    and self._clean_text(getattr(history, "media_id", None)) == identity_id
+                    and self._subscribe_season_matches(expected_season, history_season)
+                ):
+                    return history
 
         for type_key in type_candidates:
             expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
@@ -2328,7 +2302,7 @@ class UpcomingReleases(_PluginBase):
             return release_date
         if release_text:
             return release_text
-        return "??"
+        return "待定"
 
     def _get_production_country_text(self, item: Dict[str, Any]) -> str:
         country_labels = [self._region_label(code) for code in sorted(self._get_production_country_codes(item))]
@@ -2950,12 +2924,11 @@ class UpcomingReleases(_PluginBase):
         overview = item.get("story") or ""
         overview = f"{summary}\n{overview}" if overview else summary
         return MediaInfo(
-            source="upcomingreleases",
+            media_source="upcomingreleases",
             type=media_type,
             title=item.get("title"),
             year=item.get("year"),
             title_year=build_title_year(item.get("title"), item.get("year")),
-            mediaid_prefix="upcomingreleases",
             media_id=item.get("media_id"),
             tmdb_id=None,
             douban_id=None,
@@ -3552,12 +3525,12 @@ class UpcomingReleases(_PluginBase):
             "season_source": season_source,
         }
 
-    def _resolve_media_dict(self, item: Dict[str, Any], convert_type: str) -> Dict[str, Any]:
+    def _resolve_media_dict(self, item: Dict[str, Any], target_media_source: str) -> Dict[str, Any]:
         record = self._get_cached_recognition_record(item)
         if record:
-            if convert_type == "themoviedb" and record.get("tmdb_id"):
+            if target_media_source == "themoviedb" and record.get("tmdb_id"):
                 return {"id": record.get("tmdb_id")}
-            if convert_type == "douban" and record.get("douban_id"):
+            if target_media_source == "douban" and record.get("douban_id"):
                 return {"id": record.get("douban_id")}
             if self._is_failed_recognition_record(record) and self._is_current_recognition_strategy(record):
                 return {}
@@ -3566,9 +3539,9 @@ class UpcomingReleases(_PluginBase):
             return {}
         resolved_type = self._media_to_type_key(media)
         self._cache_recognition(item, media, resolved_type)
-        if convert_type == "themoviedb" and media.tmdb_id:
+        if target_media_source == "themoviedb" and media.tmdb_id:
             return {"id": media.tmdb_id}
-        if convert_type == "douban" and media.douban_id:
+        if target_media_source == "douban" and media.douban_id:
             return {"id": media.douban_id}
         return {}
 
@@ -3784,10 +3757,6 @@ class UpcomingReleases(_PluginBase):
                         title=item.get("title"),
                         year=item.get("year") or "",
                         mtype=resolved_mtype,
-                        tmdbid=safe_int(recognition.get("tmdb_id"), 0) or None,
-                        doubanid=self._clean_text(recognition.get("douban_id")) or None,
-                        bangumiid=safe_int(recognition.get("bangumi_id"), 0) or None,
-                        mediaid=self._make_subscribe_mediaid(item),
                         media_source=media_source,
                         media_id=media_id,
                         season=resolved_season,
