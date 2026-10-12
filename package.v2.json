@@ -160,7 +160,7 @@
     "name": "豆瓣影音档案",
     "description": "追剧观影自动同步进度到豆瓣，打造专属观影档案",
     "labels": "影视,工具",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "icon": "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png",
     "author": "wYw",
     "level": 1,
@@ -174,7 +174,41 @@
       "v1.0.9": "兼容电影年份标签差异，按中国大陆上映日期严格确认豆瓣条目",
       "v1.0.10": "修复媒体标题尾部年份导致上映日期匹配未触发，并解除旧匹配失败",
       "v1.0.11": "修复搜索类型标签和详情日期多格式解析，避免访问限制页被误判为条目无日期",
-      "v1.0.12": "修复播放提交被受限登录冷却阻断，获得CK后直接尝试标记，并解除旧匹配失败抑制"
+      "v1.0.12": "修复播放提交被受限登录冷却阻断，获得CK后直接尝试标记，并解除旧匹配失败抑制",
+      "v1.0.13": "适配MoviePilot V3媒体识别接口，使用MediaSource与media_id替换旧tmdbid参数"
+    }
+  },
+  "PandaTradeAssistant": {
+    "name": "熊猫交易助手",
+    "description": "汇总好友买卖玩法并提供受控的奖励、培养、市场、事务所和每日放映自动化。",
+    "labels": "站点,娱乐,自动化",
+    "version": "0.2.24",
+    "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/PandaTradeAssistant.png",
+    "author": "wYw",
+    "level": 1,
+    "history": {
+      "v0.2.13": "按真实站点字段修复资产、魔力、经营 EXP 与市场数据；刷新改为缓存优先、后台并发和失败模块保留。",
+      "v0.2.15": "分离只读刷新健康与写操作熔断；失败模块禁止使用旧快照执行，并自动清除旧版读取异常造成的遗留熔断。",
+      "v0.2.18": "工作与互动改为独立自动开关和手动入口；执行后刷新真实状态，并显示最近一轮具体动作、时间与结果。",
+      "v0.2.23": "每日放映续接站点进行中的挑战，按服务端时钟等待预览或操作时机后提交；展示中拒绝改为可恢复等待。",
+      "v0.2.24": "适配 MoviePilot V3 深色主题与联邦宿主样式：横幅提示条、指标数值、数据表格与卡片文本显式声明高对比度颜色，修复浅色底白色文字不可见。"
+    }
+  },
+  "HDHavenSignin": {
+    "name": "栖影签到",
+    "description": "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。",
+    "labels": "影视,工具",
+    "version": "1.0.5",
+    "icon": "HDHavenSignin.svg",
+    "author": "wYw",
+    "level": 1,
+    "history": {
+      "v1.0.0": "栖影 (HDHaven) 自动签到 1.0.0 发布：支持普通/赌狗双签到模式、积分风控保护、MoviePilot系统梯子代理与走势看板",
+      "v1.0.1": "v1.0.1: 优化用户信息与称谓展示，完善未读通知结算明细解析与连续签到天数显示",
+      "v1.0.2": "v1.0.2: 修复历史记录并发重复追加与去重，补全已签到积分字段以修复走势图无积分展示",
+      "v1.0.3": "v1.0.3: 彻底根治403登录态失效与网络超时静默回退旧缓存误报打卡得0分，增加失效红色告警与重试防护；全面适配MoviePilot V3深色模式与Vuetify 3卡片/警报组件",
+      "v1.0.4": "v1.0.4: 完善浏览器 Sec-Fetch 与 Client Hints 请求头，彻底解决 HDHaven 站点 BROWSER_REQUIRED 403 拦截及登录态假失效问题；支持 /api/account/overview 聚合接口解析签到与积分流水；优化人机验证提示",
+      "v1.0.5": "v1.0.5: 适配站点新版安全拦截机制，新增 SESSION_VERIFY_REQUIRED 出口变动提示、SCRAPE_CHALLENGE_REQUIRED 频控退避重试与 APP_REQUIRED 官方 OPENAPI 授权凭证接入"
     }
   }
 }

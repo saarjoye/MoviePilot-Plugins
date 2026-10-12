@@ -8,7 +8,7 @@ from app.core.metainfo import MetaInfo
 from app.plugins import _PluginBase
 from .doubanapi import DoubanApi
 from app.schemas import WebhookEventInfo, MediaInfo
-from app.schemas.types import EventType, MediaType
+from app.schemas.types import EventType, MediaType, MediaSource
 import re
 from app.log import logger
 from app.schemas import Notification, NotificationType, MessageChannel
@@ -48,7 +48,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.12"
+    plugin_version = "1.0.13"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -292,7 +292,15 @@ class DoubanMediaFolio(_PluginBase):
         )
 
     def _recognize_media(self, meta: MetaInfo, tmdb_id: Optional[int]) -> Optional[MediaInfo]:
-        return MediaChain().recognize_media(meta=meta, mtype=meta.type, tmdbid=tmdb_id, cache=True)
+        if tmdb_id:
+            return MediaChain().recognize_media(
+                meta=meta,
+                mtype=meta.type,
+                media_source=MediaSource.TMDB,
+                media_id=str(tmdb_id),
+                cache=True,
+            )
+        return MediaChain().recognize_media(meta=meta, mtype=meta.type, cache=True)
 
     def _get_douban_helper(self) -> DoubanApi:
         return DoubanApi(

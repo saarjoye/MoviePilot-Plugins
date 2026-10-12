@@ -1,0 +1,1 @@
+const s="plugin/PandaTradeAssistant";function n(a){const t=a?.data??a;if(t?.success===!1)throw new Error(t.message||"请求失败");return t?.data??t??{}}function r(a){return{get:async t=>n(await a.get(`${s}/${t}`)),post:async(t,e)=>n(await a.post(`${s}/${t}`,e))}}export{r as p};
