@@ -68,7 +68,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -220,6 +220,18 @@ class HDHavenSignin(_PluginBase):
                 path = "/api/openapi/v1" + path[4:]
 
         return f"{base}{path}"
+
+    def _app_required_message(self) -> str:
+        """
+        站点返回 APP_REQUIRED 时的提示文案。
+        已配置 OPENAPI 凭证仍被拒时，问题在凭证本身，不能引导用户再去申请。
+        """
+        if self._is_openapi_active:
+            return (
+                "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效；"
+                "请核对 app_id/app_secret/user_token 是否正确、应用是否已审核通过、用户授权 Token 是否过期"
+            )
+        return "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
 
     @staticmethod
     def _is_session_cookie_revoked(res: Any) -> bool:
@@ -781,7 +793,7 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
         elif err_type == "app_required":
-            raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+            raise AppRequiredError(self._app_required_message())
         elif err_type == "browser_required":
             msg = res_data.get("message") or res_data.get("error") or ""
             raise BrowserRequiredError(f"站点返回安全浏览器拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
@@ -851,7 +863,7 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
         elif err_type == "app_required":
-            raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+            raise AppRequiredError(self._app_required_message())
         elif err_type == "browser_required":
             msg = res_data.get("message") or res_data.get("error") or "BROWSER_REQUIRED"
             raise BrowserRequiredError(f"签到请求被站点拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
@@ -1179,7 +1191,7 @@ class HDHavenSignin(_PluginBase):
                 if err_type == "scrape_challenge_required":
                     raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
                 if err_type == "app_required":
-                    raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+                    raise AppRequiredError(self._app_required_message())
                 if err_type == "cookie_session_revoked":
                     raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式")
                 if err_type == "browser_required":
@@ -1282,13 +1294,19 @@ class HDHavenSignin(_PluginBase):
                 state_text = "⚠️ 状态：站点已作废 hdh_session，需改用 OPENAPI"
                 advice = "站点在返回 401 的同时通过 Set-Cookie 主动清空了 hdh_session，说明服务端已作废该会话并限制程序化 Cookie 直连，重新粘贴 Cookie 通常无效。请前往 站点 → 个人中心 → OPENAPI 申请应用，并回填 app_id/app_secret/user_token 后切换到 OPENAPI 授权模式"
             elif is_app_required:
-                # 站点要求官方 OPENAPI 授权：清理 pending 任务并明确引导申请
+                # 站点要求官方 OPENAPI 授权：清理 pending 任务并给出与当前配置相符的指引
                 self._clear_pending_task()
                 action = "app_required"
                 status = "app_required"
-                title = "【栖影签到】需OPENAPI授权 ⚠️"
-                state_text = "⚠️ 状态：站点要求改用 OPENAPI 授权接入"
-                advice = "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
+                if self._is_openapi_active:
+                    # 已配置 OPENAPI 凭证仍被拒：问题是凭证本身，不能引导用户再去申请
+                    title = "【栖影签到】OPENAPI 凭证未通过 ⚠️"
+                    state_text = "⚠️ 状态：已配置 OPENAPI 凭证但被站点拒绝"
+                    advice = "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效。请核对 app_id / app_secret / user_token 是否正确、应用是否已审核通过、用户授权 Token 是否过期，或前往 站点 → 个人中心 → OPENAPI 确认应用状态"
+                else:
+                    title = "【栖影签到】需OPENAPI授权 ⚠️"
+                    state_text = "⚠️ 状态：站点要求改用 OPENAPI 授权接入"
+                    advice = "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
             elif is_auth_error:
                 # 认证失效 / 浏览器拦截：清理 pending 任务并告警
                 self._clear_pending_task()
@@ -2168,6 +2186,12 @@ class HDHavenSignin(_PluginBase):
                 }
             })
         elif latest_act == "app_required":
+            if self._is_openapi_active:
+                app_req_title = "OPENAPI 凭证未通过 (APP_REQUIRED)"
+                app_req_text = f"最近一次签到失败：{latest.get('message', '')}。已配置 OPENAPI 凭证但被站点拒绝，请核对 app_id / app_secret / user_token、应用审核状态与授权 Token 有效期。"
+            else:
+                app_req_title = "站点要求改用 OPENAPI 授权 (APP_REQUIRED)"
+                app_req_text = f"站点已限制程序直连：{latest.get('message', '')}。请前往 站点 → 个人中心 → OPENAPI 申请凭证并在插件设置中配置。"
             page_cards.append({
                 "component": "VAlert",
                 "props": {
@@ -2175,8 +2199,8 @@ class HDHavenSignin(_PluginBase):
                     "variant": "tonal",
                     "icon": "mdi-api",
                     "class": "mb-4 rounded-lg",
-                    "title": "站点要求改用 OPENAPI 授权 (APP_REQUIRED)",
-                    "text": f"站点已限制程序直连：{latest.get('message', '')}。请前往 站点 → 个人中心 → OPENAPI 申请凭证并在插件设置中配置。"
+                    "title": app_req_title,
+                    "text": app_req_text
                 }
             })
         elif latest_act == "cookie_session_revoked":

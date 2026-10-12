@@ -40,6 +40,13 @@
 
 ## 📝 更新日志
 
+### v1.0.8 (2026-10-12)
+- **修复已配置 OPENAPI 凭证被拒时仍引导“去申请 OPENAPI”的误导文案**:
+  - 实测确认 `/api/openapi/v1/*` 在任何情况下都返回 `APP_REQUIRED` 且**不会**清空 Cookie，因此 OPENAPI 用户不会被误判为 `cookie_session_revoked`；但当用户**已经配置** `openapi_app_id/app_secret/user_token` 仍被站点拒绝时，v1.0.7 依旧输出“请前往 站点 → 个人中心 → OPENAPI 申请应用”，属于无效指引；
+  - 新增 `_app_required_message()` 统一文案：未配置凭证时继续引导申请；**已配置凭证时改为提示核对** `app_id / app_secret / user_token` 是否正确、应用是否已审核通过、用户授权 Token 是否过期；
+  - 通知标题与看板 `VAlert` 卡片同步按上下文分流（已配置 → 「OPENAPI 凭证未通过」，未配置 → 「需OPENAPI授权」）；
+  - 实测：以占位 OPENAPI 凭证走真实请求，正确输出 `app_required` 状态与「OPENAPI 凭证未通过」文案，且不再出现“申请应用”。
+
 ### v1.0.7 (2026-10-12)
 - **修复 v1.0.6 仍误报“请更新 hdh_session 会话 Cookie”的最后一层根因：裸 401 + 服务端主动清空会话**:
   - 实测确认站点在判定程序化 Cookie 直连受限时，会返回 **HTTP 401 裸响应（无 `code` 字段）**，并同时下发 `Set-Cookie: hdh_session=; Max-Age=0` **主动作废服务端会话**；真实 48-hex Cookie 与随机假 Cookie 表现完全一致（同码、同清空响应头），证明该 Cookie 已不再被站点视为有效会话；
