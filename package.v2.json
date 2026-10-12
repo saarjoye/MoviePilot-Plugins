@@ -198,7 +198,7 @@
     "name": "栖影签到",
     "description": "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。",
     "labels": "影视,工具",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "icon": "HDHavenSignin.svg",
     "author": "wYw",
     "level": 1,
@@ -208,7 +208,8 @@
       "v1.0.2": "v1.0.2: 修复历史记录并发重复追加与去重，补全已签到积分字段以修复走势图无积分展示",
       "v1.0.3": "v1.0.3: 彻底根治403登录态失效与网络超时静默回退旧缓存误报打卡得0分，增加失效红色告警与重试防护；全面适配MoviePilot V3深色模式与Vuetify 3卡片/警报组件",
       "v1.0.4": "v1.0.4: 完善浏览器 Sec-Fetch 与 Client Hints 请求头，彻底解决 HDHaven 站点 BROWSER_REQUIRED 403 拦截及登录态假失效问题；支持 /api/account/overview 聚合接口解析签到与积分流水；优化人机验证提示",
-      "v1.0.5": "v1.0.5: 适配站点新版安全拦截机制，新增 SESSION_VERIFY_REQUIRED 出口变动提示、SCRAPE_CHALLENGE_REQUIRED 频控退避重试与 APP_REQUIRED 官方 OPENAPI 授权凭证接入"
+      "v1.0.5": "v1.0.5: 适配站点新版安全拦截机制，新增 SESSION_VERIFY_REQUIRED 出口变动提示、SCRAPE_CHALLENGE_REQUIRED 频控退避重试与 APP_REQUIRED 官方 OPENAPI 授权凭证接入",
+      "v1.0.6": "v1.0.6: 修复 v1.0.5 漏识别 SESSION_DEVICE_CHANGED（HTTP 401 设备/环境变化）导致仍误报 Cookie 失效的根因；新增独立分类与提示，保留 pending 任务不误清理，并收紧普通 401 建议"
     }
   }
 }

@@ -16,7 +16,7 @@
 - **多认证模式与官方 OPENAPI 接入**:
   - OPENAPI 授权（推荐长效稳定）：支持配置站点 `openapi_app_id`、`openapi_app_secret` 与 `openapi_user_token`，自动切换至 `/api/openapi/v1/*` 标准接口；
   - Cookie 认证：支持填入 `hdh_session` 单项或浏览器完整 Cookie，插件自动清洗提取；
-  - 智能安全拦截分类：精准区分 `SESSION_VERIFY_REQUIRED`（网络出口变化需人机验证）、`SCRAPE_CHALLENGE_REQUIRED`（频控退避重试）、`APP_REQUIRED`（引导配置 OPENAPI）与 `BROWSER_REQUIRED`，杜绝误报 Cookie 失效；
+  - 智能安全拦截分类：精准区分 `SESSION_VERIFY_REQUIRED`（网络出口变化需人机验证）、`SESSION_DEVICE_CHANGED`（登录设备/环境变化需重新登录）、`SCRAPE_CHALLENGE_REQUIRED`（频控退避重试）、`APP_REQUIRED`（引导配置 OPENAPI）与 `BROWSER_REQUIRED`，杜绝误报 Cookie 失效；
   - 账号密码认证：支持自动登录，当遇到 Cloudflare Turnstile 人机验证时友好提示。
 - **V3 深度主题自适应与看板**:
   - 完美适配 MoviePilot V3 (Vuetify 3) 深色与浅色模式，根治旧版白底浅字看不清的问题。
@@ -39,6 +39,13 @@
 4. 保存配置并测试执行。
 
 ## 📝 更新日志
+
+### v1.0.6 (2026-10-12)
+- **修复 v1.0.5 仍误报“Cookie 已失效”的根因：漏识别 `SESSION_DEVICE_CHANGED`**:
+  - 站点在登录设备 / UA / 环境指纹变化时返回 **HTTP 401 `{"code":"SESSION_DEVICE_CHANGED"}`**，v1.0.5 未识别该码，被兜底逻辑归入普通 401，从而误报“登录态失效，请更新 hdh_session”；
+  - 新增 `session_device_changed` 分类与独立异常分支：**不清理 pending 任务**、不进入 `auth_error`，通知文案改为“登录设备/环境变化，需在浏览器重新登录或使用与插件相同的设备、UA 与网络出口完成验证，随后更新 hdh_session”，并明确标注“这不是 Cookie 过期”；
+  - 兜底普通 401 的建议同步收紧：不再直接断言 Cookie 已失效，改为提示先确认是否更换过设备 / 网络出口，并可访问 `/api/security/session` 查看是否要求人机验证；
+  - 看板新增“设备变化待登录”状态标签与 `VAlert` 告警卡片，设置页 Cookie 说明补充 UA 一致性提示。
 
 ### v1.0.5 (2026-10-12)
 - **全面适配站点新版安全风控与拦截码**:

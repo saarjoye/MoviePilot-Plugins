@@ -33,6 +33,11 @@ class SessionVerifyRequiredError(HDHavenError):
     pass
 
 
+class SessionDeviceChangedError(HDHavenError):
+    """站点检测到登录设备/环境指纹变化，需重新登录或同设备验证 (SESSION_DEVICE_CHANGED)"""
+    pass
+
+
 class ScrapeChallengeRequiredError(HDHavenError):
     """站点触发访问频率风控验证 (SCRAPE_CHALLENGE_REQUIRED)"""
     pass
@@ -58,7 +63,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -214,7 +219,7 @@ class HDHavenSignin(_PluginBase):
     def _classify_site_error(self, res: Any, data: Optional[dict] = None) -> str:
         """
         统一解析响应体状态码与拦截 code 字段。
-        返回 ("browser_required"|"session_verify_required"|"scrape_challenge_required"|"app_required"|"unauthorized"|"ok")
+        返回 ("browser_required"|"session_verify_required"|"session_device_changed"|"scrape_challenge_required"|"app_required"|"unauthorized"|"ok")
         """
         if res is None:
             return "ok"
@@ -252,6 +257,8 @@ class HDHavenSignin(_PluginBase):
 
         if code_val == "SESSION_VERIFY_REQUIRED" or "SESSION_VERIFY_REQUIRED" in text_content:
             return "session_verify_required"
+        if code_val == "SESSION_DEVICE_CHANGED" or "SESSION_DEVICE_CHANGED" in text_content:
+            return "session_device_changed"
         if code_val == "SCRAPE_CHALLENGE_REQUIRED" or "SCRAPE_CHALLENGE_REQUIRED" in text_content:
             return "scrape_challenge_required"
         if code_val == "APP_REQUIRED" or "APP_REQUIRED" in text_content:
@@ -730,6 +737,8 @@ class HDHavenSignin(_PluginBase):
         err_type = self._classify_site_error(res, res_data)
         if err_type == "session_verify_required":
             raise SessionVerifyRequiredError("站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致")
+        elif err_type == "session_device_changed":
+            raise SessionDeviceChangedError("站点检测到登录设备或环境指纹变化，需在浏览器重新登录栖影，或在同一设备/网络环境完成验证后更新 hdh_session")
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
         elif err_type == "app_required":
@@ -796,6 +805,8 @@ class HDHavenSignin(_PluginBase):
         err_type = self._classify_site_error(res, res_data)
         if err_type == "session_verify_required":
             raise SessionVerifyRequiredError("站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致")
+        elif err_type == "session_device_changed":
+            raise SessionDeviceChangedError("站点检测到登录设备或环境指纹变化，需在浏览器重新登录栖影，或在同一设备/网络环境完成验证后更新 hdh_session")
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
         elif err_type == "app_required":
@@ -863,8 +874,8 @@ class HDHavenSignin(_PluginBase):
                 err_text = str(e)
                 # 命中已知安全拦截或认证失效时，必须直接向外抛出中断执行
                 if (
-                    isinstance(e, (HDHavenError, SessionVerifyRequiredError, ScrapeChallengeRequiredError, AppRequiredError, BrowserRequiredError, UnauthorizedError))
-                    or any(k in err_text for k in ("401", "403", "登录态失效", "SESSION_VERIFY_REQUIRED", "SCRAPE_CHALLENGE_REQUIRED", "APP_REQUIRED", "BROWSER_REQUIRED"))
+                    isinstance(e, (HDHavenError, SessionVerifyRequiredError, SessionDeviceChangedError, ScrapeChallengeRequiredError, AppRequiredError, BrowserRequiredError, UnauthorizedError))
+                    or any(k in err_text for k in ("401", "403", "登录态失效", "SESSION_VERIFY_REQUIRED", "SESSION_DEVICE_CHANGED", "SCRAPE_CHALLENGE_REQUIRED", "APP_REQUIRED", "BROWSER_REQUIRED"))
                 ):
                     raise
                 # 超时与网络类异常 (Timeout, RequestException) 直接抛出，立即进入失败重试调度，
@@ -1115,9 +1126,20 @@ class HDHavenSignin(_PluginBase):
                 )
                 return result
 
-            # 401 明确标识登录态失效
+            # 401 需先按 code 精确分类，避免把设备/出口变化误判为 Cookie 失效
             elif status_code == 401:
-                raise ValueError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+                err_type = self._classify_site_error(status_code, res_data)
+                if err_type == "session_verify_required":
+                    raise SessionVerifyRequiredError("站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致")
+                if err_type == "session_device_changed":
+                    raise SessionDeviceChangedError("站点检测到登录设备或环境指纹变化，需在浏览器重新登录栖影，或在同一设备/网络环境完成验证后更新 hdh_session")
+                if err_type == "scrape_challenge_required":
+                    raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
+                if err_type == "app_required":
+                    raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+                if err_type == "browser_required":
+                    raise BrowserRequiredError("站点返回安全浏览器拦截 (HTTP 401: BROWSER_REQUIRED)")
+                raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
 
             # 403 明确标识访问受限 / 安全拦截
             elif status_code == 403:
@@ -1144,6 +1166,12 @@ class HDHavenSignin(_PluginBase):
                 or "SESSION_VERIFY_REQUIRED" in err_msg
                 or "网络出口变化" in err_msg
             )
+            is_session_device_changed = (
+                isinstance(err, SessionDeviceChangedError)
+                or "SESSION_DEVICE_CHANGED" in err_msg
+                or "登录设备" in err_msg
+                or "环境指纹" in err_msg
+            )
             is_scrape_challenge = (
                 isinstance(err, ScrapeChallengeRequiredError)
                 or "SCRAPE_CHALLENGE_REQUIRED" in err_msg
@@ -1158,7 +1186,7 @@ class HDHavenSignin(_PluginBase):
             is_auth_error = (
                 isinstance(err, (UnauthorizedError, BrowserRequiredError))
                 or (
-                    not (is_session_verify or is_scrape_challenge or is_app_required)
+                    not (is_session_verify or is_session_device_changed or is_scrape_challenge or is_app_required)
                     and any(k in err_msg for k in ("401", "403", "登录态失效", "BROWSER_REQUIRED", "Cookie 已失效"))
                 )
             )
@@ -1171,6 +1199,13 @@ class HDHavenSignin(_PluginBase):
                 title = "【栖影签到】网络出口变动 ⚠️"
                 state_text = "⚠️ 状态：网络出口变动，需人机验证"
                 advice = "站点检测到网络出口变化，需在浏览器完成一次人机验证（/verify-session），或将插件代理出口与浏览器登录时保持一致"
+            elif is_session_device_changed:
+                # 设备/环境指纹变化：保留现有 pending 任务，严禁清空 pending_task 或误报 Cookie 失效
+                action = "session_device_changed"
+                status = "session_device_changed"
+                title = "【栖影签到】登录设备变化 ⚠️"
+                state_text = "⚠️ 状态：登录设备/环境变化，需重新登录"
+                advice = "站点检测到登录设备或环境指纹变化。请在浏览器重新登录栖影（或使用与插件相同的设备、UA 与网络出口完成验证），随后更新 hdh_session；这不是 Cookie 过期。"
             elif is_scrape_challenge:
                 # 触发站点访问频率风控：归入 rate_limit 类，走指数退避自动重试
                 action = "rate_limit"
@@ -1202,7 +1237,7 @@ class HDHavenSignin(_PluginBase):
                 if "browser" in err_msg.lower() or "403" in err_msg:
                     advice = "请求被站点安全策略拦截 (403 BROWSER_REQUIRED)，请检查浏览器伪装头或改用 OPENAPI 授权模式"
                 else:
-                    advice = "Cookie 已失效，请在插件设置中重新配置并保存 hdh_session"
+                    advice = "若确认未更换设备或网络出口，再更新 hdh_session；也可先在浏览器访问 /api/security/session 查看是否要求人机验证，避免把设备/出口变化误判为 Cookie 过期"
             else:
                 action = "failed"
                 status = "failed"
@@ -1232,7 +1267,7 @@ class HDHavenSignin(_PluginBase):
             }
             self._record_history(result)
 
-            if is_session_verify or is_app_required or is_auth_error:
+            if is_session_verify or is_session_device_changed or is_app_required or is_auth_error:
                 notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
                     f"{state_text}\n"
@@ -1836,7 +1871,7 @@ class HDHavenSignin(_PluginBase):
                                                             "model": "cookie",
                                                             "label": "Cookie / hdh_session 会话",
                                                             "rows": 3,
-                                                            "hint": "站点已限制程序化 Cookie 直连，建议优先使用 OPENAPI。若使用 Cookie，请确保插件代理出口与浏览器登录时完全一致，避免触发 SESSION_VERIFY_REQUIRED。",
+                                                            "hint": "站点已限制程序化 Cookie 直连，建议优先使用 OPENAPI。若使用 Cookie，请确保插件代理出口、User-Agent 与浏览器登录时完全一致，避免触发 SESSION_VERIFY_REQUIRED 或 SESSION_DEVICE_CHANGED。",
                                                             "persistent-hint": True
                                                         }
                                                     }
@@ -1965,6 +2000,7 @@ class HDHavenSignin(_PluginBase):
             "auth_error": ("登录态失效", "error"),
             "config_required": ("待配置", "warning"),
             "session_verify_required": ("出口变化待验证", "warning"),
+            "session_device_changed": ("设备变化待登录", "warning"),
             "rate_limit": ("频控延后重试", "warning"),
             "app_required": ("需OPENAPI授权", "warning"),
         }
@@ -2042,6 +2078,18 @@ class HDHavenSignin(_PluginBase):
                     "class": "mb-4 rounded-lg",
                     "title": "站点检测到网络出口变化 (SESSION_VERIFY_REQUIRED)",
                     "text": f"最近一次签到被拦截：{latest.get('message', '')}。请保持插件代理与浏览器登录出口一致，并在浏览器访问 /verify-session 完成人机验证。"
+                }
+            })
+        elif latest_act == "session_device_changed":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "icon": "mdi-laptop-off",
+                    "class": "mb-4 rounded-lg",
+                    "title": "站点检测到登录设备/环境变化 (SESSION_DEVICE_CHANGED)",
+                    "text": f"最近一次签到被拦截：{latest.get('message', '')}。请在浏览器重新登录栖影（或使用与插件相同的设备、UA 与网络出口完成验证）后更新 hdh_session；这不是 Cookie 过期。"
                 }
             })
         elif latest_act in ("rate_limit", "scrape_challenge_required"):
