@@ -255,7 +255,7 @@
     "name": "栖影签到",
     "description": "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。",
     "labels": "影视,工具",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "icon": "HDHavenSignin.svg",
     "author": "wYw",
     "level": 1,
@@ -268,7 +268,8 @@
       "v1.0.5": "v1.0.5: 适配站点新版安全拦截机制，新增 SESSION_VERIFY_REQUIRED 出口变动提示、SCRAPE_CHALLENGE_REQUIRED 频控退避重试与 APP_REQUIRED 官方 OPENAPI 授权凭证接入",
       "v1.0.6": "v1.0.6: 修复 v1.0.5 漏识别 SESSION_DEVICE_CHANGED（HTTP 401 设备/环境变化）导致仍误报 Cookie 失效的根因；新增独立分类与提示，保留 pending 任务不误清理，并收紧普通 401 建议",
       "v1.0.7": "v1.0.7: 修复站点以裸 401（无 code）+ Set-Cookie 主动清空 hdh_session 作废会话时仍误报“请更新 Cookie”的根因；新增 COOKIE_SESSION_REVOKED 分类与独立告警，明确重新粘贴 Cookie 通常无效并引导改用 OPENAPI 授权，看板新增红色告警卡片",
-      "v1.0.8": "v1.0.8: 修复已配置 OPENAPI 凭证仍被站点拒绝时依旧提示“去申请 OPENAPI”的误导文案；新增 _app_required_message 按上下文分流——未配置引导申请，已配置改为核对 app_id/app_secret/user_token、应用审核状态与授权 Token 有效期，通知与看板卡片同步区分「OPENAPI 凭证未通过」"
+      "v1.0.8": "v1.0.8: 修复已配置 OPENAPI 凭证仍被站点拒绝时依旧提示“去申请 OPENAPI”的误导文案；新增 _app_required_message 按上下文分流——未配置引导申请，已配置改为核对 app_id/app_secret/user_token、应用审核状态与授权 Token 有效期，通知与看板卡片同步区分「OPENAPI 凭证未通过」",
+      "v1.0.9": "v1.0.9: 按站点真实 OPENAPI 契约重写授权接入——鉴权头改为 X-HDHaven-App-Key(hda_)+Bearer(hdt_)，端点修正为 /api/openapi/v1/me|checkin|checkin/gamble|notifications，新增 OAuth 授权码自动换取 hdt_ 用户 Token；明确每位用户必须使用自己在站点申请的应用凭证，插件不内置、不共享任何密钥；新增 INVALID_APP_CREDENTIAL/TOKEN_APPLICATION_MISMATCH/APP_IP_DENIED/APP_USER_DENIED/INVALID_ACCESS_TOKEN 错误码识别，兼容旧 openapi_app_secret 配置键"
     },
     "v2": true
   }

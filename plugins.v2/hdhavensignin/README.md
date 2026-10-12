@@ -14,7 +14,7 @@
   - 自动无缝接入 MoviePilot 系统设置的梯子代理（`settings.PROXY`）。
   - 支持填入自定义独立代理地址（如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:10808`），留空时自动复用系统梯子。
 - **多认证模式与官方 OPENAPI 接入**:
-  - OPENAPI 授权（推荐长效稳定）：支持配置站点 `openapi_app_id`、`openapi_app_secret` 与 `openapi_user_token`，自动切换至 `/api/openapi/v1/*` 标准接口；
+  - OPENAPI 授权（推荐长效稳定）：**每位用户使用自己在站点申请的应用**，插件不内置、不共享任何凭证；填写自己的 `应用编号(client_id)` / `应用凭证(hda_)` / `用户授权 Token(hdt_)` 后自动切换至 `/api/openapi/v1/*` 标准接口，并提供 OAuth 授权码一键换取 `hdt_`；
   - Cookie 认证：支持填入 `hdh_session` 单项或浏览器完整 Cookie，插件自动清洗提取；
   - 智能安全拦截分类：精准区分 `SESSION_VERIFY_REQUIRED`（网络出口变化需人机验证）、`SESSION_DEVICE_CHANGED`（登录设备/环境变化需重新登录）、`SCRAPE_CHALLENGE_REQUIRED`（频控退避重试）、`APP_REQUIRED`（引导配置 OPENAPI）与 `BROWSER_REQUIRED`，杜绝误报 Cookie 失效；
   - 账号密码认证：支持自动登录，当遇到 Cloudflare Turnstile 人机验证时友好提示。
@@ -33,12 +33,51 @@
    ```
 2. 在 MoviePilot 插件市场中搜索并安装「栖影签到」。
 3. 打开插件配置：
-   - 填写 Cookie（推荐直接从浏览器复制 `hdh_session=...`）。
+   - **推荐**：选择「OPENAPI 授权模式」，并填写**你自己**在站点申请的应用凭证（见下方《OPENAPI 授权接入》）。
+   - 或填写 Cookie（从浏览器复制 `hdh_session=...`，但站点已限制程序化直连，稳定性差）。
    - 确认代理配置（默认自动使用 MP 系统梯子）。
    - 选择签到模式与保护阈值。
 4. 保存配置并测试执行。
 
+## 🔐 OPENAPI 授权接入（每位用户使用自己的应用）
+
+> 插件**不内置、不共享**任何应用编号 / 应用凭证 / Token。每个 MoviePilot 实例的每位用户都必须使用自己在栖影站点申请的应用，插件只读取你在本机配置里填写的凭证。
+
+站点真实契约（自 `https://hdhaven.com/me#api-docs` 逆向 + 实测）：
+- 接口基址：`https://hdhaven.com/api/openapi/v1`
+- 换 Token：`POST https://hdhaven.com/api/openapi/oauth/token`（不在 `/v1` 下）
+  - 请求头：`X-HDHaven-App-Key: <hda_ 应用凭证>`
+  - 表单体：`grant_type=authorization_code`、`code`、`redirect_uri`
+  - 返回：`access_token`（`hdt_`）、`scope`、`user_number`
+- 调用鉴权头：`Authorization: Bearer <hdt_>` + `X-HDHaven-App-Key: <hda_>`
+- 常用端点：`GET /me`、`POST /checkin`、`POST /checkin/gamble`、`GET /notifications`（签到与 `GET /me` 不计每日额度）
+
+配置步骤：
+1. 登录栖影站点 → 个人中心 → OPENAPI，提交应用申请（应用名自定，回调地址可留空或用你自己的回调），等待管理员审核通过。
+2. 审核通过后，在「我的应用」复制 **应用编号 (client_id)** 与 **应用凭证 (`hda_` 开头)**。
+3. 在插件设置中填入「应用编号」与「应用凭证」，并按需填写「OAuth 回调地址」与「授权范围 scope」（须与应用登记一致）。
+4. 在浏览器打开授权链接：
+   ```text
+   https://hdhaven.com/oauth/authorize?response_type=code&client_id=<你的应用编号>&redirect_uri=<你的回调地址>&scope=<授权范围>&state=<任意随机串>
+   ```
+   完成授权后浏览器会跳转到回调地址，地址栏里带 `?code=...`。
+5. 把整条回调链接（或其中的 `code` 值）粘贴到插件设置的「OAuth 授权码 / 回调链接」并保存。
+   插件会用**你自己的** `hda_` 调用 token 端点，自动换取 `hdt_` 用户授权 Token 并回写本机配置，随后清空授权码输入框。
+6. 认证方式保持「OPENAPI 授权模式」，保存后执行一次签到验证。
+
+> 提示：`hda_` / `hdt_` 均属于机密，只会保存在你的 MoviePilot 本机插件配置中，插件日志与通知不会输出明文。
+
 ## 📝 更新日志
+
+### v1.0.9 (2026-10-12)
+- **按站点真实 OPENAPI 契约重写授权接入，并明确“每位用户使用自己的应用凭证”**:
+  - 修正鉴权头为站点真实契约：应用凭证 `X-HDHaven-App-Key: hda_...`，用户授权 `Authorization: Bearer hdt_...`（移除臆测的 `X-App-Id/X-App-Secret/X-User-Token`）；
+  - 修正端点映射：`/api/auth/me → /api/openapi/v1/me`、`/api/account/checkin → /api/openapi/v1/checkin`、`/api/account/checkin/gamble → /api/openapi/v1/checkin/gamble`、`/api/notifications → /api/openapi/v1/notifications`；
+  - 新增 OAuth 换取用户 Token：用**用户自己的** `hda_` 调用 `POST /api/openapi/oauth/token` 把授权码换成 `hdt_`，自动回写本机配置并清空授权码；
+  - 设置表单新增「应用编号(client_id) / 应用凭证(hda_) / 用户授权 Token(hdt_) / OAuth 回调地址 / 授权范围 / OAuth 授权码」字段，并明确标注**插件不内置、不共享任何凭证**，每人填自己的；
+  - 兼容旧配置键 `openapi_app_secret`（自动迁移读取），旧 cookie / password 模式保持向后兼容；
+  - 新增错误码识别：`INVALID_APP_CREDENTIAL` / `TOKEN_APPLICATION_MISMATCH` / `APP_IP_DENIED` / `APP_USER_DENIED` 归入 `app_required`，`INVALID_ACCESS_TOKEN` 归入登录态失效；
+  - 约束：日志与通知绝不输出 Cookie / Token / 密钥明文。
 
 ### v1.0.8 (2026-10-12)
 - **修复已配置 OPENAPI 凭证被拒时仍引导“去申请 OPENAPI”的误导文案**:

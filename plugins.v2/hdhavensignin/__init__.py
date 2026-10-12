@@ -7,7 +7,7 @@ from pathlib import Path
 import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytz
 import requests
@@ -68,7 +68,7 @@ class HDHavenSignin(_PluginBase):
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -96,8 +96,11 @@ class HDHavenSignin(_PluginBase):
     _auth_mode: str = "cookie"
     _cookie: str = ""
     _openapi_app_id: str = ""
-    _openapi_app_secret: str = ""
+    _openapi_app_key: str = ""
     _openapi_user_token: str = ""
+    _openapi_redirect_uri: str = ""
+    _openapi_scope: str = ""
+    _openapi_authorize_code: str = ""
     _username: str = ""
     _password: str = ""
     _signin_mode: str = "normal"
@@ -197,7 +200,7 @@ class HDHavenSignin(_PluginBase):
         """判断当前是否激活 OPENAPI 模式"""
         return bool(
             self._auth_mode == "openapi"
-            or (self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+            or (self._openapi_app_key and self._openapi_user_token)
         )
 
     def _api_url(self, endpoint: str) -> str:
@@ -216,10 +219,109 @@ class HDHavenSignin(_PluginBase):
             base = self._base_url.rstrip("/")
 
         if self._is_openapi_active:
-            if path.startswith("/api/") and not path.startswith("/api/openapi/v1/"):
-                path = "/api/openapi/v1" + path[4:]
+            path_guard = path.split("?", 1)[0]
+            if path_guard.startswith("/api/openapi/"):
+                # 已是完整 OPENAPI 路径（含 oauth/token 等非 /v1 端点），不得二次改写
+                return f"{base}{path}"
+            # 站点真实 OPENAPI 契约：端点路径与网页接口不同，必须显式映射
+            openapi_path_map = {
+                "/api/auth/me": "/me",
+                "/api/account/checkin": "/checkin",
+                "/api/account/checkin/gamble": "/checkin/gamble",
+                "/api/notifications": "/notifications",
+            }
+            path_only, _, query = path.partition("?")
+            mapped = openapi_path_map.get(path_only)
+            if mapped:
+                path = f"/api/openapi/v1{mapped}"
+                if query:
+                    path += f"?{query}"
+            elif not path_only.startswith("/api/openapi/v1/") and path_only.startswith("/api/"):
+                # 未列入映射表的接口按同名前缀兜底，避免误拼接
+                path = f"/api/openapi/v1{path_only[4:]}"
+                if query:
+                    path += f"?{query}"
 
         return f"{base}{path}"
+
+    def _openapi_token_url(self) -> str:
+        """站点 OAuth 换取用户 Token 的端点（不在 /v1 前缀下）"""
+        return f"{self._base_url.rstrip('/')}/api/openapi/oauth/token"
+
+    def _build_openapi_authorize_url(self, state: str = "") -> str:
+        """
+        生成站点 OAuth 授权链接，供用户在自己的浏览器完成授权后取回 authorization code。
+        所有凭证（client_id / 回调 / scope）均来自用户自己的配置，插件不内置任何凭证。
+        """
+        params = {
+            "response_type": "code",
+            "client_id": (self._openapi_app_id or "").strip(),
+            "redirect_uri": (self._openapi_redirect_uri or "").strip(),
+        }
+        scope = (self._openapi_scope or "").strip()
+        if scope:
+            params["scope"] = scope
+        if state:
+            params["state"] = state
+        return f"{self._base_url.rstrip('/')}/oauth/authorize?{urlencode(params)}"
+
+    def _extract_openapi_code(self, raw: Any) -> str:
+        """从用户粘贴的回调链接 / 裸授权码中提取 code；无法解析时原样返回"""
+        val = str(raw or "").strip()
+        if not val:
+            return ""
+        if val.startswith("http://") or val.startswith("https://"):
+            parsed = urlparse(val)
+            for seg in (parsed.query, parsed.fragment):
+                if not seg:
+                    continue
+                code = (parse_qs(seg).get("code") or [""])[0].strip()
+                if code:
+                    return code
+        return val
+
+    def _exchange_openapi_code(self, code: str) -> str:
+        """
+        用用户自己的应用凭证 (hda_) + 授权码换取用户授权 Token (hdt_)。
+        凭证只来自用户配置，绝不在插件内内置或回显明文。
+        """
+        app_key = (self._openapi_app_key or "").strip()
+        if not app_key:
+            raise AppRequiredError("未配置应用凭证 (hda_)，无法换取用户授权 Token")
+        payload = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": (self._openapi_redirect_uri or "").strip(),
+        }
+        res = requests.post(
+            self._openapi_token_url(),
+            headers={
+                "X-HDHaven-App-Key": app_key,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            data=payload,
+            proxies=self._get_proxies(),
+            timeout=(self._connect_timeout, self._read_timeout),
+        )
+        try:
+            data = res.json() or {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        token = str(data.get("access_token") or "").strip()
+        if not token and isinstance(data.get("data"), dict):
+            token = str((data.get("data") or {}).get("access_token") or "").strip()
+        if res.status_code not in (200, 201) or not token:
+            err_type = self._classify_site_error(res, data)
+            if err_type == "app_required":
+                raise AppRequiredError("换取用户授权 Token 失败：应用凭证无效或未通过审核，请核对 应用凭证(hda_) 与应用状态")
+            if err_type == "unauthorized":
+                raise UnauthorizedError("换取用户授权 Token 失败：授权码无效或已过期，请重新在浏览器完成授权")
+            msg = str(data.get("message") or data.get("error") or "")
+            raise ValueError(f"换取用户授权 Token 失败 (HTTP {res.status_code})" + (f" - {msg}" if msg else ""))
+        return token
 
     def _app_required_message(self) -> str:
         """
@@ -229,9 +331,9 @@ class HDHavenSignin(_PluginBase):
         if self._is_openapi_active:
             return (
                 "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效；"
-                "请核对 app_id/app_secret/user_token 是否正确、应用是否已审核通过、用户授权 Token 是否过期"
+                "请核对 应用编号(client_id)/应用凭证(hda_)/用户授权 Token(hdt_) 是否正确、应用是否已审核通过、用户授权是否有效"
             )
-        return "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
+        return "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 应用编号 / 应用凭证 / 用户授权 Token"
 
     @staticmethod
     def _is_session_cookie_revoked(res: Any) -> bool:
@@ -306,8 +408,10 @@ class HDHavenSignin(_PluginBase):
             return "session_device_changed"
         if code_val == "SCRAPE_CHALLENGE_REQUIRED" or "SCRAPE_CHALLENGE_REQUIRED" in text_content:
             return "scrape_challenge_required"
-        if code_val == "APP_REQUIRED" or "APP_REQUIRED" in text_content:
+        if code_val in ("APP_REQUIRED", "INVALID_APP_CREDENTIAL", "TOKEN_APPLICATION_MISMATCH", "APP_IP_DENIED", "APP_USER_DENIED") or "APP_REQUIRED" in text_content:
             return "app_required"
+        if code_val == "INVALID_ACCESS_TOKEN" or "INVALID_ACCESS_TOKEN" in text_content:
+            return "unauthorized"
         if code_val == "BROWSER_REQUIRED" or "BROWSER_REQUIRED" in text_content:
             return "browser_required"
         if code_val == "COOKIE_SESSION_REVOKED" or "COOKIE_SESSION_REVOKED" in text_content:
@@ -326,9 +430,9 @@ class HDHavenSignin(_PluginBase):
 
     def _is_configured(self) -> bool:
         if self._is_openapi_active:
-            return bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+            return bool(self._openapi_app_key and self._openapi_user_token)
         if self._auth_mode == "openapi":
-            return bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+            return bool(self._openapi_app_key and self._openapi_user_token)
         if self._auth_mode == "cookie":
             return bool(self._cookie and self._cookie.strip())
         return bool(self._username and self._username.strip() and self._password and self._password.strip())
@@ -387,12 +491,10 @@ class HDHavenSignin(_PluginBase):
         if self._cookie and self._cookie.strip():
             headers["Cookie"] = self._cookie.strip()
         if self._is_openapi_active:
-            if self._openapi_app_id:
-                headers["X-App-Id"] = self._openapi_app_id.strip()
-            if self._openapi_app_secret:
-                headers["X-App-Secret"] = self._openapi_app_secret.strip()
+            # 站点真实契约：应用凭证头为 X-HDHaven-App-Key，用户授权 Token 走 Bearer
+            if self._openapi_app_key:
+                headers["X-HDHaven-App-Key"] = self._openapi_app_key.strip()
             if self._openapi_user_token:
-                headers["X-User-Token"] = self._openapi_user_token.strip()
                 headers["Authorization"] = f"Bearer {self._openapi_user_token.strip()}"
         return headers
 
@@ -408,8 +510,11 @@ class HDHavenSignin(_PluginBase):
             self._auth_mode = "cookie"
             self._cookie = ""
             self._openapi_app_id = ""
-            self._openapi_app_secret = ""
+            self._openapi_app_key = ""
             self._openapi_user_token = ""
+            self._openapi_redirect_uri = ""
+            self._openapi_scope = ""
+            self._openapi_authorize_code = ""
             self._username = ""
             self._password = ""
             self._signin_mode = "normal"
@@ -431,9 +536,15 @@ class HDHavenSignin(_PluginBase):
                 self._custom_proxy = (config.get("custom_proxy") or "").strip()
                 self._cookie = self._clean_cookie(config.get("cookie"))
                 self._openapi_app_id = (config.get("openapi_app_id") or "").strip()
-                self._openapi_app_secret = (config.get("openapi_app_secret") or "").strip()
+                # 兼容旧配置键 openapi_app_secret；凭证一律来自用户配置，插件不内置任何密钥
+                self._openapi_app_key = (
+                    config.get("openapi_app_key") or config.get("openapi_app_secret") or ""
+                ).strip()
                 self._openapi_user_token = (config.get("openapi_user_token") or "").strip()
-                has_openapi = bool(self._openapi_app_id and self._openapi_app_secret and self._openapi_user_token)
+                self._openapi_redirect_uri = (config.get("openapi_redirect_uri") or "").strip()
+                self._openapi_scope = (config.get("openapi_scope") or "").strip()
+                self._openapi_authorize_code = self._extract_openapi_code(config.get("openapi_authorize_code"))
+                has_openapi = bool(self._openapi_app_key and self._openapi_user_token)
                 self._auth_mode = self._normalize_auth_mode(config.get("auth_mode"), bool(self._cookie), has_openapi)
                 self._username = (config.get("username") or "").strip()
                 self._password = str(config.get("password") or "")
@@ -446,6 +557,24 @@ class HDHavenSignin(_PluginBase):
                 self._read_timeout = self._to_int(config.get("read_timeout", 30), 30)
                 self._history_count = self._to_int(config.get("history_count", 30), 30)
                 self._user_agent = (config.get("user_agent") or "").strip()
+
+                # 用户粘贴 OAuth 授权码后，用其自己的应用凭证自动换取 hdt_ Token（一次性），并回写本机配置
+                if self._openapi_authorize_code and self._openapi_app_key:
+                    exchanged_token = ""
+                    try:
+                        exchanged_token = self._exchange_openapi_code(self._openapi_authorize_code)
+                    except Exception as e:
+                        # 不输出授权码 / Token / 密钥明文
+                        logger.warning(f"{self.plugin_name}: OPENAPI 授权码换取用户 Token 失败 - {e}")
+                    if exchanged_token:
+                        self._openapi_user_token = exchanged_token
+                        self._openapi_authorize_code = ""
+                        self._auth_mode = "openapi"
+                        logger.info(f"{self.plugin_name}: 已用用户自填授权码换取 OPENAPI 用户授权 Token (hdt_)，凭证仅保存在本机")
+                        try:
+                            self.update_config(self._get_config())
+                        except Exception as e:
+                            logger.warning(f"{self.plugin_name}: 回写 OPENAPI 用户 Token 到本机配置失败 - {e}")
 
             if self._onlyonce:
                 self._onlyonce = False
@@ -652,13 +781,17 @@ class HDHavenSignin(_PluginBase):
 
     def _fetch_latest_checkin_notice(self, session: requests.Session, proxies: Optional[dict]) -> Tuple[Optional[str], Dict[str, Any]]:
         """尝试从站点消息通知接口获取最近的签到结算明细"""
-        candidate_urls = [
-            self._api_url("/api/account/overview"),
-            self._api_url("/api/account/unread"),
-            self._api_url("/api/account/notifications?page=1&limit=5"),
-            self._api_url("/api/notifications?limit=5"),
-            self._api_url("/api/account/messages?limit=5"),
-        ]
+        if self._is_openapi_active:
+            # OPENAPI 仅提供 /notifications，网页侧 overview/unread/messages 不可用
+            candidate_urls = [self._api_url("/api/openapi/v1/notifications?limit=5")]
+        else:
+            candidate_urls = [
+                self._api_url("/api/account/overview"),
+                self._api_url("/api/account/unread"),
+                self._api_url("/api/account/notifications?page=1&limit=5"),
+                self._api_url("/api/notifications?limit=5"),
+                self._api_url("/api/account/messages?limit=5"),
+            ]
         for url in candidate_urls:
             try:
                 resp = session.get(
@@ -892,7 +1025,7 @@ class HDHavenSignin(_PluginBase):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not self._is_configured():
             if self._is_openapi_active or self._auth_mode == "openapi":
-                msg = "未配置栖影 OPENAPI 凭证 (需完整填写 app_id, app_secret, user_token)"
+                msg = "未配置栖影 OPENAPI 凭证 (需填写你自己的 应用凭证 hda_ 与 用户授权 Token hdt_；应用编号 client_id 仅 OAuth 授权时使用)"
             elif self._auth_mode == "cookie":
                 msg = "未配置栖影 Cookie (hdh_session)"
             else:
@@ -1292,7 +1425,7 @@ class HDHavenSignin(_PluginBase):
                 status = "cookie_session_revoked"
                 title = "【栖影签到】Cookie 会话已被站点作废 🔴"
                 state_text = "⚠️ 状态：站点已作废 hdh_session，需改用 OPENAPI"
-                advice = "站点在返回 401 的同时通过 Set-Cookie 主动清空了 hdh_session，说明服务端已作废该会话并限制程序化 Cookie 直连，重新粘贴 Cookie 通常无效。请前往 站点 → 个人中心 → OPENAPI 申请应用，并回填 app_id/app_secret/user_token 后切换到 OPENAPI 授权模式"
+                advice = "站点在返回 401 的同时通过 Set-Cookie 主动清空了 hdh_session，说明服务端已作废该会话并限制程序化 Cookie 直连，重新粘贴 Cookie 通常无效。请前往 站点 → 个人中心 → OPENAPI 申请应用，并回填 应用编号 / 应用凭证(hda_) / 用户授权 Token(hdt_) 后切换到 OPENAPI 授权模式"
             elif is_app_required:
                 # 站点要求官方 OPENAPI 授权：清理 pending 任务并给出与当前配置相符的指引
                 self._clear_pending_task()
@@ -1302,11 +1435,11 @@ class HDHavenSignin(_PluginBase):
                     # 已配置 OPENAPI 凭证仍被拒：问题是凭证本身，不能引导用户再去申请
                     title = "【栖影签到】OPENAPI 凭证未通过 ⚠️"
                     state_text = "⚠️ 状态：已配置 OPENAPI 凭证但被站点拒绝"
-                    advice = "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效。请核对 app_id / app_secret / user_token 是否正确、应用是否已审核通过、用户授权 Token 是否过期，或前往 站点 → 个人中心 → OPENAPI 确认应用状态"
+                    advice = "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效。请核对 应用编号(client_id) / 应用凭证(hda_) / 用户授权 Token(hdt_) 是否正确、应用是否已审核通过、用户授权是否有效，或前往 站点 → 个人中心 → OPENAPI 确认应用状态"
                 else:
                     title = "【栖影签到】需OPENAPI授权 ⚠️"
                     state_text = "⚠️ 状态：站点要求改用 OPENAPI 授权接入"
-                    advice = "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token"
+                    advice = "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 应用编号 / 应用凭证(hda_) / 用户授权 Token(hdt_)"
             elif is_auth_error:
                 # 认证失效 / 浏览器拦截：清理 pending 任务并告警
                 self._clear_pending_task()
@@ -1809,8 +1942,11 @@ class HDHavenSignin(_PluginBase):
             "auth_mode": self._auth_mode,
             "cookie": self._cookie,
             "openapi_app_id": self._openapi_app_id,
-            "openapi_app_secret": self._openapi_app_secret,
+            "openapi_app_key": self._openapi_app_key,
             "openapi_user_token": self._openapi_user_token,
+            "openapi_redirect_uri": self._openapi_redirect_uri,
+            "openapi_scope": self._openapi_scope,
+            "openapi_authorize_code": self._openapi_authorize_code,
             "username": self._username,
             "password": self._password,
             "signin_mode": self._signin_mode,
@@ -1957,9 +2093,14 @@ class HDHavenSignin(_PluginBase):
                                                     }
                                                 ]
                                             },
-                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_id", "label": "OPENAPI App ID (选填)", "placeholder": "站点个人中心 → OPENAPI 申请获取"}}]},
-                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_secret", "label": "OPENAPI App Secret (选填)", "type": "password", "placeholder": "应用密钥"}}]},
-                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_user_token", "label": "OPENAPI User Token (选填)", "type": "password", "placeholder": "用户凭证 Token"}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_id", "label": "OPENAPI 应用编号 / client_id (选填)", "placeholder": "站点 个人中心 → OPENAPI → 我的应用", "hint": "OAuth 授权用，非机密；每位用户填写自己申请的应用编号", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_key", "label": "OPENAPI 应用凭证 / hda_ 应用密钥 (选填)", "type": "password", "placeholder": "审核通过后由站点签发，形如 hda_...", "hint": "仅保存在本机插件配置，插件不内置、不上传任何密钥", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_user_token", "label": "OPENAPI 用户授权 Token / hdt_ (选填)", "type": "password", "placeholder": "完成 OAuth 授权后换取，形如 hdt_...", "hint": "每位用户各自授权、各自填写，长期有效", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "comfortable", "class": "mb-2", "text": "OPENAPI 凭证必须由每位用户使用自己在站点申请的应用：插件不内置、不共享任何应用编号/应用凭证/Token。审核通过后在站点复制应用凭证(hda_)，按下方 OAuth 步骤授权换取自己的用户 Token(hdt_)。"}}]},
+                                            {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "density": "comfortable", "class": "mb-2", "text": "OAuth 换取 hdt_ 步骤：① 填好你自己的应用编号与 hda_ 应用凭证并保存；② 在浏览器打开 https://hdhaven.com/oauth/authorize?response_type=code&client_id=你的应用编号&redirect_uri=你的回调地址&scope=你的授权范围&state=任意随机串 ；③ 授权后从回调地址复制 code=... 或整条链接；④ 粘贴到下方「OAuth 授权码 / 回调链接」并保存，插件会用你的 hda_ 自动换取 hdt_。"}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "openapi_redirect_uri", "label": "OAuth 回调地址 redirect_uri (选填)", "placeholder": "须与申请应用时登记的回调一致", "hint": "用于换取 hdt_ 用户 Token，需与站点应用登记的回调地址一致", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "openapi_scope", "label": "OAuth 授权范围 scope (选填)", "placeholder": "如 checkin account，多个以空格分隔；留空用站点默认", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "openapi_authorize_code", "label": "OAuth 授权码 / 回调链接 (选填，保存后自动换取 hdt_ Token)", "placeholder": "粘贴浏览器授权后回调地址里的 code=... 或整条回调链接", "hint": "每位用户使用自己应用的授权；保存后插件用你的 hda_ 自动换取 hdt_ 并清空此栏", "persistent-hint": True}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "username", "label": "用户名 / 邮箱 (密码模式下使用)"}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "password", "label": "登录密码 (密码模式下使用)", "type": "password"}}]},
                                         ]
@@ -2188,7 +2329,7 @@ class HDHavenSignin(_PluginBase):
         elif latest_act == "app_required":
             if self._is_openapi_active:
                 app_req_title = "OPENAPI 凭证未通过 (APP_REQUIRED)"
-                app_req_text = f"最近一次签到失败：{latest.get('message', '')}。已配置 OPENAPI 凭证但被站点拒绝，请核对 app_id / app_secret / user_token、应用审核状态与授权 Token 有效期。"
+                app_req_text = f"最近一次签到失败：{latest.get('message', '')}。已配置 OPENAPI 凭证但被站点拒绝，请核对 应用编号 / 应用凭证(hda_) / 用户授权 Token(hdt_)、应用审核状态与授权是否有效。"
             else:
                 app_req_title = "站点要求改用 OPENAPI 授权 (APP_REQUIRED)"
                 app_req_text = f"站点已限制程序直连：{latest.get('message', '')}。请前往 站点 → 个人中心 → OPENAPI 申请凭证并在插件设置中配置。"
