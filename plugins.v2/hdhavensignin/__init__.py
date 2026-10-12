@@ -58,12 +58,17 @@ class UnauthorizedError(HDHavenError):
     pass
 
 
+class CookieSessionRevokedError(HDHavenError):
+    """站点主动作废 hdh_session 并限制程序化 Cookie 直连（裸 401 + Set-Cookie 清空）"""
+    pass
+
+
 class HDHavenSignin(_PluginBase):
     # 插件元数据
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -216,10 +221,38 @@ class HDHavenSignin(_PluginBase):
 
         return f"{base}{path}"
 
+    @staticmethod
+    def _is_session_cookie_revoked(res: Any) -> bool:
+        """
+        检测响应头是否通过 Set-Cookie 主动清空 hdh_session。
+
+        站点在判定程序化 Cookie 直连受限时，会返回裸 401 并下发
+        Set-Cookie: hdh_session=; Max-Age=0，主动作废本地会话。
+        该信号与普通“Cookie 已过期”有本质区别，需单独分类。
+        """
+        if res is None or not hasattr(res, "headers"):
+            return False
+        try:
+            headers = res.headers
+            if headers is None:
+                return False
+            set_cookie = headers.get("Set-Cookie")
+        except Exception:
+            return False
+        # 兼容 MagicMock / 非常规响应对象：只处理真实字符串
+        if not isinstance(set_cookie, str) or "hdh_session" not in set_cookie:
+            return False
+        # requests 会把多条 Set-Cookie 以 ", " 合并，需按属性边界拆分
+        for part in re.split(r",(?=[^;=]+=)", set_cookie):
+            match = re.search(r"hdh_session=([^;]*)", part, flags=re.IGNORECASE)
+            if match and match.group(1).strip() == "":
+                return True
+        return False
+
     def _classify_site_error(self, res: Any, data: Optional[dict] = None) -> str:
         """
         统一解析响应体状态码与拦截 code 字段。
-        返回 ("browser_required"|"session_verify_required"|"session_device_changed"|"scrape_challenge_required"|"app_required"|"unauthorized"|"ok")
+        返回 ("browser_required"|"session_verify_required"|"session_device_changed"|"scrape_challenge_required"|"app_required"|"cookie_session_revoked"|"unauthorized"|"ok")
         """
         if res is None:
             return "ok"
@@ -265,8 +298,14 @@ class HDHavenSignin(_PluginBase):
             return "app_required"
         if code_val == "BROWSER_REQUIRED" or "BROWSER_REQUIRED" in text_content:
             return "browser_required"
+        if code_val == "COOKIE_SESSION_REVOKED" or "COOKIE_SESSION_REVOKED" in text_content:
+            return "cookie_session_revoked"
 
         if status_code == 401:
+            # 裸 401 且服务端通过 Set-Cookie 主动清空 hdh_session：
+            # 说明会话已被服务端作废（并非普通 Cookie 过期），程序化 Cookie 直连已受限
+            if self._is_session_cookie_revoked(res):
+                return "cookie_session_revoked"
             return "unauthorized"
         if status_code == 403:
             return "browser_required"
@@ -746,6 +785,8 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "browser_required":
             msg = res_data.get("message") or res_data.get("error") or ""
             raise BrowserRequiredError(f"站点返回安全浏览器拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
+        elif err_type == "cookie_session_revoked":
+            raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式，重新粘贴 Cookie 通常无效")
         elif err_type == "unauthorized":
             raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
         elif res.status_code != 200:
@@ -814,6 +855,8 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "browser_required":
             msg = res_data.get("message") or res_data.get("error") or "BROWSER_REQUIRED"
             raise BrowserRequiredError(f"签到请求被站点拦截 (HTTP 403: BROWSER_REQUIRED - {msg})")
+        elif err_type == "cookie_session_revoked":
+            raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式，重新粘贴 Cookie 通常无效")
         elif err_type == "unauthorized":
             raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
 
@@ -1137,6 +1180,8 @@ class HDHavenSignin(_PluginBase):
                     raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
                 if err_type == "app_required":
                     raise AppRequiredError("站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 app_id/app_secret/user_token")
+                if err_type == "cookie_session_revoked":
+                    raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式")
                 if err_type == "browser_required":
                     raise BrowserRequiredError("站点返回安全浏览器拦截 (HTTP 401: BROWSER_REQUIRED)")
                 raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
@@ -1177,16 +1222,25 @@ class HDHavenSignin(_PluginBase):
                 or "SCRAPE_CHALLENGE_REQUIRED" in err_msg
                 or "访问频率风控" in err_msg
             )
+            is_cookie_session_revoked = (
+                isinstance(err, CookieSessionRevokedError)
+                or "COOKIE_SESSION_REVOKED" in err_msg
+                or "主动作废该 hdh_session" in err_msg
+                or "Set-Cookie 清空" in err_msg
+            )
+            # APP_REQUIRED 仅认精确信号，避免与 Cookie 作废提示中的“改用 OPENAPI 授权”措辞混淆
             is_app_required = (
-                isinstance(err, AppRequiredError)
-                or "APP_REQUIRED" in err_msg
-                or "必须通过已审核应用调用" in err_msg
-                or "改用 OPENAPI 授权" in err_msg
+                not is_cookie_session_revoked
+                and (
+                    isinstance(err, AppRequiredError)
+                    or "APP_REQUIRED" in err_msg
+                    or "必须通过已审核应用调用" in err_msg
+                )
             )
             is_auth_error = (
                 isinstance(err, (UnauthorizedError, BrowserRequiredError))
                 or (
-                    not (is_session_verify or is_session_device_changed or is_scrape_challenge or is_app_required)
+                    not (is_session_verify or is_session_device_changed or is_scrape_challenge or is_app_required or is_cookie_session_revoked)
                     and any(k in err_msg for k in ("401", "403", "登录态失效", "BROWSER_REQUIRED", "Cookie 已失效"))
                 )
             )
@@ -1219,6 +1273,14 @@ class HDHavenSignin(_PluginBase):
                     next_retry_time = self._schedule_retry_signin(retry_index + 1, delay_sec=delay_sec)
                 else:
                     self._clear_pending_task()
+            elif is_cookie_session_revoked:
+                # 服务端主动清空 hdh_session：程序化 Cookie 直连已被限制，引导改用 OPENAPI
+                self._clear_pending_task()
+                action = "cookie_session_revoked"
+                status = "cookie_session_revoked"
+                title = "【栖影签到】Cookie 会话已被站点作废 🔴"
+                state_text = "⚠️ 状态：站点已作废 hdh_session，需改用 OPENAPI"
+                advice = "站点在返回 401 的同时通过 Set-Cookie 主动清空了 hdh_session，说明服务端已作废该会话并限制程序化 Cookie 直连，重新粘贴 Cookie 通常无效。请前往 站点 → 个人中心 → OPENAPI 申请应用，并回填 app_id/app_secret/user_token 后切换到 OPENAPI 授权模式"
             elif is_app_required:
                 # 站点要求官方 OPENAPI 授权：清理 pending 任务并明确引导申请
                 self._clear_pending_task()
@@ -1267,7 +1329,7 @@ class HDHavenSignin(_PluginBase):
             }
             self._record_history(result)
 
-            if is_session_verify or is_session_device_changed or is_app_required or is_auth_error:
+            if is_session_verify or is_session_device_changed or is_app_required or is_cookie_session_revoked or is_auth_error:
                 notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
                     f"{state_text}\n"
@@ -1871,7 +1933,7 @@ class HDHavenSignin(_PluginBase):
                                                             "model": "cookie",
                                                             "label": "Cookie / hdh_session 会话",
                                                             "rows": 3,
-                                                            "hint": "站点已限制程序化 Cookie 直连，建议优先使用 OPENAPI。若使用 Cookie，请确保插件代理出口、User-Agent 与浏览器登录时完全一致，避免触发 SESSION_VERIFY_REQUIRED 或 SESSION_DEVICE_CHANGED。",
+                                                            "hint": "站点已限制程序化 Cookie 直连，服务端会在 401 时主动清空 hdh_session，强烈建议优先使用 OPENAPI。若仍使用 Cookie，请确保插件代理出口、User-Agent 与浏览器登录时完全一致，避免触发 SESSION_VERIFY_REQUIRED / SESSION_DEVICE_CHANGED。",
                                                             "persistent-hint": True
                                                         }
                                                     }
@@ -2003,6 +2065,7 @@ class HDHavenSignin(_PluginBase):
             "session_device_changed": ("设备变化待登录", "warning"),
             "rate_limit": ("频控延后重试", "warning"),
             "app_required": ("需OPENAPI授权", "warning"),
+            "cookie_session_revoked": ("Cookie已作废", "error"),
         }
         latest_act = latest.get("action", "")
         act_text, act_color = action_labels.get(latest_act, ("暂无记录", "default"))
@@ -2114,6 +2177,18 @@ class HDHavenSignin(_PluginBase):
                     "class": "mb-4 rounded-lg",
                     "title": "站点要求改用 OPENAPI 授权 (APP_REQUIRED)",
                     "text": f"站点已限制程序直连：{latest.get('message', '')}。请前往 站点 → 个人中心 → OPENAPI 申请凭证并在插件设置中配置。"
+                }
+            })
+        elif latest_act == "cookie_session_revoked":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "error",
+                    "variant": "tonal",
+                    "icon": "mdi-cookie-off",
+                    "class": "mb-4 rounded-lg",
+                    "title": "站点已主动作废 hdh_session 会话 (COOKIE_SESSION_REVOKED)",
+                    "text": f"最近一次签到失败：{latest.get('message', '')}。站点在返回 401 的同时通过 Set-Cookie 清空了 hdh_session，重新粘贴 Cookie 通常无效。请改用 OPENAPI 授权模式（站点 → 个人中心 → OPENAPI）。"
                 }
             })
 

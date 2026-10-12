@@ -40,6 +40,14 @@
 
 ## 📝 更新日志
 
+### v1.0.7 (2026-10-12)
+- **修复 v1.0.6 仍误报“请更新 hdh_session 会话 Cookie”的最后一层根因：裸 401 + 服务端主动清空会话**:
+  - 实测确认站点在判定程序化 Cookie 直连受限时，会返回 **HTTP 401 裸响应（无 `code` 字段）**，并同时下发 `Set-Cookie: hdh_session=; Max-Age=0` **主动作废服务端会话**；真实 48-hex Cookie 与随机假 Cookie 表现完全一致（同码、同清空响应头），证明该 Cookie 已不再被站点视为有效会话；
+  - 新增 `CookieSessionRevokedError` 异常与 `_is_session_cookie_revoked()` 检测：解析响应头 `Set-Cookie`（兼容 requests 多值合并与 MagicMock/None），识别 `hdh_session=` 被置空即判定为 **`cookie_session_revoked`**，不再落入普通 `unauthorized`；
+  - 主流程新增独立分支：通知文案改为“站点已主动作废 hdh_session 会话，**重新粘贴 Cookie 通常无效**，请改用 OPENAPI 授权模式”，并明确给出「站点 → 个人中心 → OPENAPI」申请 `app_id/app_secret/user_token` 的下一步指引，杜绝误导用户反复重抓 Cookie；
+  - 收紧 `APP_REQUIRED` 判定为精确信号匹配，避免“改用 OPENAPI 授权”等措辞被误判为 `APP_REQUIRED`；`cookie_session_revoked` 分支前置于 `app_required` 与 `auth_error`，确保归类唯一；
+  - 看板新增红色 `VAlert`（`mdi-cookie-off`）告警卡片与「Cookie已作废」状态标签，设置页 Cookie 说明补充“服务端会在 401 时主动清空 hdh_session，强烈建议优先使用 OPENAPI”。
+
 ### v1.0.6 (2026-10-12)
 - **修复 v1.0.5 仍误报“Cookie 已失效”的根因：漏识别 `SESSION_DEVICE_CHANGED`**:
   - 站点在登录设备 / UA / 环境指纹变化时返回 **HTTP 401 `{"code":"SESSION_DEVICE_CHANGED"}`**，v1.0.5 未识别该码，被兜底逻辑归入普通 401，从而误报“登录态失效，请更新 hdh_session”；
