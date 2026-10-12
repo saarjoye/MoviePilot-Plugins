@@ -47,10 +47,12 @@
 - 接口基址：`https://hdhaven.com/api/openapi/v1`
 - 换 Token：`POST https://hdhaven.com/api/openapi/oauth/token`（不在 `/v1` 下）
   - 请求头：`X-HDHaven-App-Key: <hda_ 应用凭证>`
-  - 表单体：`grant_type=authorization_code`、`code`、`redirect_uri`
+  - 请求体：JSON（`Content-Type: application/json`），字段 `grant_type=authorization_code`、`code`、`redirect_uri`（表单编码会被站点以 400 拒绝）
   - 返回：`access_token`（`hdt_`）、`scope`、`user_number`
 - 调用鉴权头：`Authorization: Bearer <hdt_>` + `X-HDHaven-App-Key: <hda_>`
-- 常用端点：`GET /me`、`POST /checkin`、`POST /checkin/gamble`、`GET /notifications`（签到与 `GET /me` 不计每日额度）
+- 常用端点：`GET /me`、`POST /checkin`、`POST /checkin/gamble`、`GET /notifications`（仅接受 `page`/`page_size`，1-50；签到与 `GET /me` 不计每日额度）
+- 重复签到：HTTP 200 且 `data.already_checked_in=true`（不是 409）
+- 限流：HTTP 429 且带 `Retry-After` 响应头 / `retry_after` 字段，插件按其退避重试
 
 配置步骤：
 1. 登录栖影站点 → 个人中心 → OPENAPI，提交应用申请（应用名自定，回调地址可留空或用你自己的回调），等待管理员审核通过。
@@ -65,9 +67,20 @@
    插件会用**你自己的** `hda_` 调用 token 端点，自动换取 `hdt_` 用户授权 Token 并回写本机配置，随后清空授权码输入框。
 6. 认证方式保持「OPENAPI 授权模式」，保存后执行一次签到验证。
 
-> 提示：`hda_` / `hdt_` 均属于机密，只会保存在你的 MoviePilot 本机插件配置中，插件日志与通知不会输出明文。
+> 提示：`hda_` / `hdt_` 均属于机密，只会保存在你的 MoviePilot 本机插件配置中，插件日志与通知不会输出明文。OPENAPI 模式下插件不会携带网页 Cookie。
 
 ## 📝 更新日志
+
+### v1.0.10 (2026-10-12)
+- **按站点真实 OPENAPI 3.1 契约修正调用细节，修复 OPENAPI 模式下仍误报登录态失效**:
+  - 换 Token 请求体由表单编码改为 **JSON**（`Content-Type: application/json`）：实测表单编码会被站点以 400「请求体必须为 JSON」拒绝；补充 `redirect_uri` 缺失预检，并新增 `INVALID_GRANT` / `INVALID_REDIRECT_URI` / `UNSUPPORTED_GRANT_TYPE` 错误映射；
+  - 重复签到识别修正：站点返回 **HTTP 200 + `data.already_checked_in=true`**（并非 409），插件据此正确判定今日已签到，不再当作失败；
+  - 新增 `RateLimitedError` 与 `_extract_retry_after()`：识别 429 `RATE_LIMITED` / `DAILY_QUOTA_EXCEEDED` / `SUBMISSION_LIMIT` / `ACTION_RATE_LIMITED` / `ACTION_BLOCKED` 与裸 429，优先采用 `Retry-After` 响应头（缺失时回退 `retry_after` 字段）做指数退避；
+  - 新增 `ACCOUNT_UNAVAILABLE` 独立分类与看板告警；`APP_UNAVAILABLE` / `INSUFFICIENT_SCOPE` 归入应用类提示，文案列出 7 类应用错误码并提示核对 scope / IP 白名单 / 用户范围；
+  - **OPENAPI 模式不再附带网页 Cookie**，避免站点按会话鉴权而非按应用凭证鉴权；
+  - `/notifications` 请求参数修正为 `page` / `page_size`（移除无效的 `limit`）；`/me` 解析在缺少 `id` 时回退 `user_number`，会员字段兼容 `is_member` / `membership_type`；
+  - 401 / 403 兜底文案按鉴权模式分流：OPENAPI 模式提示重新 OAuth 或核对 scope / IP / 用户范围，不再误导用户去更新 `hdh_session`；
+  - 约束：日志与通知绝不输出 Cookie / Token / 密钥明文，每位用户仍必须使用自己的应用凭证。
 
 ### v1.0.9 (2026-10-12)
 - **按站点真实 OPENAPI 契约重写授权接入，并明确“每位用户使用自己的应用凭证”**:

@@ -63,12 +63,25 @@ class CookieSessionRevokedError(HDHavenError):
     pass
 
 
+class RateLimitedError(HDHavenError):
+    """站点接口限流或额度受限 (HTTP 429)，按 Retry-After 退避重试"""
+
+    def __init__(self, message: str = "", retry_after: int = 0):
+        super().__init__(message)
+        self.retry_after = int(retry_after or 0)
+
+
+class AccountUnavailableError(HDHavenError):
+    """站点账号当前不可用 (ACCOUNT_UNAVAILABLE)"""
+    pass
+
+
 class HDHavenSignin(_PluginBase):
     # 插件元数据
     plugin_name = "栖影签到"
     plugin_desc = "栖影 (HDHaven) 站点自动签到插件。支持普通稳健签到与赌狗高收益签到、积分风控保护、深度兼容MoviePilot系统梯子网络、签到走势看板及通知推送。"
     plugin_icon = "HDHavenSignin.svg"
-    plugin_version = "1.0.9"
+    plugin_version = "1.0.10"
     _signin_lock = threading.Lock()
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -288,19 +301,23 @@ class HDHavenSignin(_PluginBase):
         app_key = (self._openapi_app_key or "").strip()
         if not app_key:
             raise AppRequiredError("未配置应用凭证 (hda_)，无法换取用户授权 Token")
+        redirect_uri = (self._openapi_redirect_uri or "").strip()
+        if not redirect_uri:
+            raise AppRequiredError("未配置 OAuth 回调地址 (redirect_uri)，无法换取用户授权 Token；请填写与申请应用时登记的回调地址")
         payload = {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": (self._openapi_redirect_uri or "").strip(),
+            "redirect_uri": redirect_uri,
         }
+        # 站点真实契约：换取 Token 的请求体必须是 JSON（表单编码会被站点以 400 请求体必须为 JSON 拒绝）
         res = requests.post(
             self._openapi_token_url(),
             headers={
                 "X-HDHaven-App-Key": app_key,
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Type": "application/json",
                 "Accept": "application/json",
             },
-            data=payload,
+            json=payload,
             proxies=self._get_proxies(),
             timeout=(self._connect_timeout, self._read_timeout),
         )
@@ -314,11 +331,14 @@ class HDHavenSignin(_PluginBase):
         if not token and isinstance(data.get("data"), dict):
             token = str((data.get("data") or {}).get("access_token") or "").strip()
         if res.status_code not in (200, 201) or not token:
+            code_val = str(data.get("code") or "").strip().upper()
             err_type = self._classify_site_error(res, data)
             if err_type == "app_required":
                 raise AppRequiredError("换取用户授权 Token 失败：应用凭证无效或未通过审核，请核对 应用凭证(hda_) 与应用状态")
-            if err_type == "unauthorized":
-                raise UnauthorizedError("换取用户授权 Token 失败：授权码无效或已过期，请重新在浏览器完成授权")
+            if err_type == "rate_limit":
+                raise RateLimitedError("换取用户授权 Token 被站点限流，请稍后重试", retry_after=self._extract_retry_after(res))
+            if code_val in ("INVALID_GRANT", "INVALID_REDIRECT_URI", "UNSUPPORTED_GRANT_TYPE") or err_type == "unauthorized":
+                raise UnauthorizedError("换取用户授权 Token 失败：授权码无效/已使用/已过期，或回调地址与授权时不一致，请重新在浏览器完成授权")
             msg = str(data.get("message") or data.get("error") or "")
             raise ValueError(f"换取用户授权 Token 失败 (HTTP {res.status_code})" + (f" - {msg}" if msg else ""))
         return token
@@ -330,10 +350,24 @@ class HDHavenSignin(_PluginBase):
         """
         if self._is_openapi_active:
             return (
-                "站点返回 APP_REQUIRED，说明当前 OPENAPI 凭证未通过审核或已失效；"
-                "请核对 应用编号(client_id)/应用凭证(hda_)/用户授权 Token(hdt_) 是否正确、应用是否已审核通过、用户授权是否有效"
+                "站点拒绝了当前 OPENAPI 调用（APP_REQUIRED / INVALID_APP_CREDENTIAL / APP_UNAVAILABLE / "
+                "TOKEN_APPLICATION_MISMATCH / APP_IP_DENIED / APP_USER_DENIED / INSUFFICIENT_SCOPE 之一）；"
+                "请核对 应用凭证(hda_) 是否有效、应用是否已审核通过、用户授权 Token(hdt_) 是否属于本应用、"
+                "申请权限是否包含 account:read 与 checkin:write、来源 IP 与用户范围是否被站点允许"
             )
         return "站点已要求程序接入改用 OPENAPI 授权，请前往 站点 → 个人中心 → OPENAPI 申请应用并回填 应用编号 / 应用凭证 / 用户授权 Token"
+
+    def _unauthorized_message(self) -> str:
+        """登录态失效文案按当前鉴权模式分流，避免 OPENAPI 模式被误导去更新 Cookie"""
+        if self._is_openapi_active:
+            return "用户授权 Token (hdt_) 无效或已被站点撤销，请重新在浏览器完成 OAuth 授权并换取新的 hdt_"
+        return "登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie"
+
+    def _browser_required_advice(self) -> str:
+        """403 兜底文案按鉴权模式分流"""
+        if self._is_openapi_active:
+            return "OPENAPI 调用被站点拒绝 (HTTP 403)，请核对应用权限(scope)、来源 IP 白名单、用户范围与账号状态"
+        return "请求被站点安全策略拦截 (403 BROWSER_REQUIRED)，请检查浏览器伪装头或改用 OPENAPI 授权模式"
 
     @staticmethod
     def _is_session_cookie_revoked(res: Any) -> bool:
@@ -362,6 +396,23 @@ class HDHavenSignin(_PluginBase):
             if match and match.group(1).strip() == "":
                 return True
         return False
+
+    @staticmethod
+    def _extract_retry_after(res: Any) -> int:
+        """解析 429 响应的 Retry-After 头或正文 retry_after 字段（秒）"""
+        val = None
+        try:
+            if res is not None and hasattr(res, "headers") and res.headers:
+                val = res.headers.get("Retry-After")
+        except Exception:
+            val = None
+        if val is None and isinstance(res, dict):
+            val = res.get("retry_after")
+        try:
+            sec = int(float(str(val).strip()))
+        except Exception:
+            return 0
+        return sec if sec > 0 else 0
 
     def _classify_site_error(self, res: Any, data: Optional[dict] = None) -> str:
         """
@@ -408,8 +459,26 @@ class HDHavenSignin(_PluginBase):
             return "session_device_changed"
         if code_val == "SCRAPE_CHALLENGE_REQUIRED" or "SCRAPE_CHALLENGE_REQUIRED" in text_content:
             return "scrape_challenge_required"
-        if code_val in ("APP_REQUIRED", "INVALID_APP_CREDENTIAL", "TOKEN_APPLICATION_MISMATCH", "APP_IP_DENIED", "APP_USER_DENIED") or "APP_REQUIRED" in text_content:
+        if code_val in (
+            "APP_REQUIRED",
+            "INVALID_APP_CREDENTIAL",
+            "APP_UNAVAILABLE",
+            "TOKEN_APPLICATION_MISMATCH",
+            "APP_IP_DENIED",
+            "APP_USER_DENIED",
+            "INSUFFICIENT_SCOPE",
+        ) or "APP_REQUIRED" in text_content:
             return "app_required"
+        if code_val == "ACCOUNT_UNAVAILABLE" or "ACCOUNT_UNAVAILABLE" in text_content:
+            return "account_unavailable"
+        if code_val in (
+            "RATE_LIMITED",
+            "DAILY_QUOTA_EXCEEDED",
+            "SUBMISSION_LIMIT",
+            "ACTION_RATE_LIMITED",
+            "ACTION_BLOCKED",
+        ):
+            return "rate_limit"
         if code_val == "INVALID_ACCESS_TOKEN" or "INVALID_ACCESS_TOKEN" in text_content:
             return "unauthorized"
         if code_val == "BROWSER_REQUIRED" or "BROWSER_REQUIRED" in text_content:
@@ -423,8 +492,13 @@ class HDHavenSignin(_PluginBase):
             if self._is_session_cookie_revoked(res):
                 return "cookie_session_revoked"
             return "unauthorized"
+        if status_code == 429:
+            return "rate_limit"
         if status_code == 403:
+            # 网页侧 403 为浏览器特征拦截；OPENAPI 的应用类 403 已在上方 code 分支精确分类
             return "browser_required"
+        if status_code >= 400:
+            return "http_error"
 
         return "ok"
 
@@ -488,7 +562,8 @@ class HDHavenSignin(_PluginBase):
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
         }
-        if self._cookie and self._cookie.strip():
+        # OPENAPI 模式下不再附带网页 Cookie，避免站点按会话鉴权而不是按应用凭证鉴权
+        if self._cookie and self._cookie.strip() and not self._is_openapi_active:
             headers["Cookie"] = self._cookie.strip()
         if self._is_openapi_active:
             # 站点真实契约：应用凭证头为 X-HDHaven-App-Key，用户授权 Token 走 Bearer
@@ -696,7 +771,7 @@ class HDHavenSignin(_PluginBase):
             return "栖影用户"
         nickname = str(user_info.get("nickname") or "").strip()
         username = str(user_info.get("username") or "").strip()
-        user_id = str(user_info.get("id") or "").strip()
+        user_id = str(user_info.get("id") or user_info.get("user_number") or "").strip()
 
         display_name = nickname or username or "栖影用户"
         if not user_id or user_id in ("--", "None", "null", "") or user_id == display_name or user_id == username:
@@ -783,7 +858,8 @@ class HDHavenSignin(_PluginBase):
         """尝试从站点消息通知接口获取最近的签到结算明细"""
         if self._is_openapi_active:
             # OPENAPI 仅提供 /notifications，网页侧 overview/unread/messages 不可用
-            candidate_urls = [self._api_url("/api/openapi/v1/notifications?limit=5")]
+            # 站点 OPENAPI 的 /notifications 只接受 page / page_size（1-50），limit 属无效参数
+            candidate_urls = [self._api_url("/api/openapi/v1/notifications?page=1&page_size=5")]
         else:
             candidate_urls = [
                 self._api_url("/api/account/overview"),
@@ -925,6 +1001,10 @@ class HDHavenSignin(_PluginBase):
             raise SessionDeviceChangedError("站点检测到登录设备或环境指纹变化，需在浏览器重新登录栖影，或在同一设备/网络环境完成验证后更新 hdh_session")
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
+        elif err_type == "rate_limit":
+            raise RateLimitedError("站点接口限流或额度受限 (HTTP 429)，需延后重试", retry_after=self._extract_retry_after(res))
+        elif err_type == "account_unavailable":
+            raise AccountUnavailableError("站点返回 ACCOUNT_UNAVAILABLE，该账号当前不可用，请登录站点确认账号状态")
         elif err_type == "app_required":
             raise AppRequiredError(self._app_required_message())
         elif err_type == "browser_required":
@@ -933,7 +1013,7 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "cookie_session_revoked":
             raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式，重新粘贴 Cookie 通常无效")
         elif err_type == "unauthorized":
-            raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+            raise UnauthorizedError(self._unauthorized_message())
         elif res.status_code != 200:
             raise ValueError(f"获取用户信息失败 - HTTP {res.status_code}")
 
@@ -949,6 +1029,10 @@ class HDHavenSignin(_PluginBase):
                     data_dict["class_name"] = cls_val.get("name") or ""
                 elif "class_name" not in data_dict:
                     data_dict["class_name"] = str(cls_val or "")
+
+                # OPENAPI 的 /me 用 user_number 标识账号，网页接口用 id，统一映射便于展示
+                if data_dict.get("id") in (None, "", "--") and data_dict.get("user_number") is not None:
+                    data_dict["id"] = data_dict.get("user_number")
 
                 raw_lvl = data_dict.get("level") or data_dict.get("class")
                 if isinstance(raw_lvl, dict):
@@ -995,6 +1079,10 @@ class HDHavenSignin(_PluginBase):
             raise SessionDeviceChangedError("站点检测到登录设备或环境指纹变化，需在浏览器重新登录栖影，或在同一设备/网络环境完成验证后更新 hdh_session")
         elif err_type == "scrape_challenge_required":
             raise ScrapeChallengeRequiredError("触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)，需延后重试")
+        elif err_type == "rate_limit":
+            raise RateLimitedError("站点接口限流或额度受限 (HTTP 429)，需延后重试", retry_after=self._extract_retry_after(res))
+        elif err_type == "account_unavailable":
+            raise AccountUnavailableError("站点返回 ACCOUNT_UNAVAILABLE，该账号当前不可用，请登录站点确认账号状态")
         elif err_type == "app_required":
             raise AppRequiredError(self._app_required_message())
         elif err_type == "browser_required":
@@ -1003,7 +1091,7 @@ class HDHavenSignin(_PluginBase):
         elif err_type == "cookie_session_revoked":
             raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式，重新粘贴 Cookie 通常无效")
         elif err_type == "unauthorized":
-            raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+            raise UnauthorizedError(self._unauthorized_message())
 
         return res.status_code, res_data
 
@@ -1077,7 +1165,7 @@ class HDHavenSignin(_PluginBase):
             profile_for_display = user_info or (self.get_data("user_info") or {})
             user_display = self._format_user_display(profile_for_display)
             level_name = self._extract_level_name(profile_for_display.get("level"))
-            is_vip = bool(profile_for_display.get("vip", False))
+            is_vip = bool(profile_for_display.get("vip") or profile_for_display.get("is_member"))
             vip_suffix = " (VIP)" if is_vip else ""
             current_points = self._to_number(profile_for_display.get("points", 0))
 
@@ -1165,9 +1253,13 @@ class HDHavenSignin(_PluginBase):
             # 3. 发起签到请求
             status_code, res_data = self._execute_checkin(session, proxies, target_mode)
 
-            # 签到成功 (HTTP 200 或 201)
-            if status_code in (200, 201):
-                data_obj = res_data.get("data") if isinstance(res_data.get("data"), dict) else res_data
+            # 站点真实契约：重复签到仍返回 HTTP 200，但 data.already_checked_in=true
+            checkin_data_obj = res_data.get("data") if isinstance(res_data.get("data"), dict) else res_data
+            already_checked_in = bool(checkin_data_obj.get("already_checked_in")) if isinstance(checkin_data_obj, dict) else False
+
+            # 签到成功 (HTTP 200 或 201，且非重复签到)
+            if status_code in (200, 201) and not already_checked_in:
+                data_obj = checkin_data_obj
                 earned = self._to_number(data_obj.get("earned") or data_obj.get("points_awarded") or (5 if target_mode == "normal" else 0))
                 new_points = data_obj.get("points") or data_obj.get("new_balance")
 
@@ -1244,9 +1336,11 @@ class HDHavenSignin(_PluginBase):
                 )
                 return result
 
-            # HTTP 409 Conflict: 今日已签到
-            elif status_code == 409:
-                streak = self._extract_streak_from_dict(profile_for_display) or 1
+            # HTTP 409 Conflict 或 OPENAPI already_checked_in=true: 今日已签到
+            elif status_code == 409 or already_checked_in:
+                if isinstance(checkin_data_obj, dict) and checkin_data_obj.get("points") is not None:
+                    current_points = self._to_number(checkin_data_obj.get("points"), current_points)
+                streak = self._extract_streak_from_dict(checkin_data_obj) or self._extract_streak_from_dict(profile_for_display) or 1
                 if streak < 1:
                     streak = 1
 
@@ -1329,7 +1423,7 @@ class HDHavenSignin(_PluginBase):
                     raise CookieSessionRevokedError("站点已主动作废该 hdh_session 会话（响应头 Set-Cookie 清空），网页接口现已限制程序化 Cookie 直连；请改用 OPENAPI 授权模式")
                 if err_type == "browser_required":
                     raise BrowserRequiredError("站点返回安全浏览器拦截 (HTTP 401: BROWSER_REQUIRED)")
-                raise UnauthorizedError("登录态失效 (HTTP 401)，请更新 hdh_session 会话 Cookie")
+                raise UnauthorizedError(self._unauthorized_message())
 
             # 403 明确标识访问受限 / 安全拦截
             elif status_code == 403:
@@ -1337,6 +1431,10 @@ class HDHavenSignin(_PluginBase):
                 if "browser" in err_text.lower():
                     raise ValueError(f"签到请求被站点拦截 (HTTP 403: {err_text})")
                 raise ValueError(f"签到请求访问受限 (HTTP 403) - {err_text}")
+
+            # 429 限流 / 额度：统一按 rate_limit 退避重试
+            elif status_code == 429:
+                raise RateLimitedError("站点接口限流或额度受限 (HTTP 429)，需延后重试", retry_after=self._extract_retry_after(res_data))
 
             # 其它 HTTP 异常状态码处理
             else:
@@ -1367,6 +1465,18 @@ class HDHavenSignin(_PluginBase):
                 or "SCRAPE_CHALLENGE_REQUIRED" in err_msg
                 or "访问频率风控" in err_msg
             )
+            is_rate_limit = (
+                isinstance(err, RateLimitedError)
+                or "RATE_LIMITED" in err_msg
+                or "DAILY_QUOTA_EXCEEDED" in err_msg
+                or "接口限流" in err_msg
+                or "HTTP 429" in err_msg
+            )
+            is_account_unavailable = (
+                isinstance(err, AccountUnavailableError)
+                or "ACCOUNT_UNAVAILABLE" in err_msg
+                or "账号当前不可用" in err_msg
+            )
             is_cookie_session_revoked = (
                 isinstance(err, CookieSessionRevokedError)
                 or "COOKIE_SESSION_REVOKED" in err_msg
@@ -1385,7 +1495,15 @@ class HDHavenSignin(_PluginBase):
             is_auth_error = (
                 isinstance(err, (UnauthorizedError, BrowserRequiredError))
                 or (
-                    not (is_session_verify or is_session_device_changed or is_scrape_challenge or is_app_required or is_cookie_session_revoked)
+                    not (
+                        is_session_verify
+                        or is_session_device_changed
+                        or is_scrape_challenge
+                        or is_rate_limit
+                        or is_account_unavailable
+                        or is_app_required
+                        or is_cookie_session_revoked
+                    )
                     and any(k in err_msg for k in ("401", "403", "登录态失效", "BROWSER_REQUIRED", "Cookie 已失效"))
                 )
             )
@@ -1418,6 +1536,28 @@ class HDHavenSignin(_PluginBase):
                     next_retry_time = self._schedule_retry_signin(retry_index + 1, delay_sec=delay_sec)
                 else:
                     self._clear_pending_task()
+            elif is_rate_limit:
+                # OPENAPI 429 限流/额度：优先按站点 Retry-After 退避，缺失时走 60/180/300 指数退避
+                action = "rate_limit"
+                status = "rate_limit"
+                title = "【栖影签到】接口限流 ⚠️"
+                state_text = "⚠️ 状态：触发站点接口限流或额度限制，已自动延后重试"
+                advice = "站点要求按 Retry-After 稍后再试，插件已自动延后重试，请勿频繁手动重试"
+                retry_after = getattr(err, "retry_after", 0) or 0
+                backoff_delays = [60, 180, 300]
+                delay_sec = retry_after if retry_after > 0 else backoff_delays[min(retry_index, len(backoff_delays) - 1)]
+                if retry_index < self._retry_count:
+                    next_retry_time = self._schedule_retry_signin(retry_index + 1, delay_sec=delay_sec)
+                else:
+                    self._clear_pending_task()
+            elif is_account_unavailable:
+                # 账号被站点判定不可用：清理 pending 并明确不是凭证过期
+                self._clear_pending_task()
+                action = "account_unavailable"
+                status = "account_unavailable"
+                title = "【栖影签到】账号当前不可用 🔴"
+                state_text = "⚠️ 状态：站点返回账号不可用 (ACCOUNT_UNAVAILABLE)"
+                advice = "站点返回 ACCOUNT_UNAVAILABLE，表示该账号当前不可用（可能被限制或状态异常）。请登录站点确认账号状态，这不是 Cookie 或应用凭证过期。"
             elif is_cookie_session_revoked:
                 # 服务端主动清空 hdh_session：程序化 Cookie 直连已被限制，引导改用 OPENAPI
                 self._clear_pending_task()
@@ -1448,7 +1588,9 @@ class HDHavenSignin(_PluginBase):
                 title = "【栖影签到】登录态失效 🔴"
                 state_text = "⚠️ 状态：登录态已失效 (需更新配置)"
                 if "browser" in err_msg.lower() or "403" in err_msg:
-                    advice = "请求被站点安全策略拦截 (403 BROWSER_REQUIRED)，请检查浏览器伪装头或改用 OPENAPI 授权模式"
+                    advice = self._browser_required_advice()
+                elif self._is_openapi_active:
+                    advice = "用户授权 Token (hdt_) 无效或已被撤销。请在浏览器重新完成 OAuth 授权、换取新的 hdt_ 并回填插件；这与 Cookie 无关，请勿再更新 hdh_session。"
                 else:
                     advice = "若确认未更换设备或网络出口，再更新 hdh_session；也可先在浏览器访问 /api/security/session 查看是否要求人机验证，避免把设备/出口变化误判为 Cookie 过期"
             else:
@@ -1480,7 +1622,7 @@ class HDHavenSignin(_PluginBase):
             }
             self._record_history(result)
 
-            if is_session_verify or is_session_device_changed or is_app_required or is_cookie_session_revoked or is_auth_error:
+            if is_session_verify or is_session_device_changed or is_app_required or is_cookie_session_revoked or is_account_unavailable or is_auth_error:
                 notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
                     f"{state_text}\n"
@@ -1492,7 +1634,7 @@ class HDHavenSignin(_PluginBase):
                     f"━━━━━━━━━━━━━━━\n"
                     f"🕒 执行时间：{timestamp}"
                 )
-            elif is_scrape_challenge:
+            elif is_scrape_challenge or is_rate_limit:
                 notify_body = (
                     f"━━━━━━━━━━━━━━━\n"
                     f"{state_text}\n"
@@ -2097,9 +2239,9 @@ class HDHavenSignin(_PluginBase):
                                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_app_key", "label": "OPENAPI 应用凭证 / hda_ 应用密钥 (选填)", "type": "password", "placeholder": "审核通过后由站点签发，形如 hda_...", "hint": "仅保存在本机插件配置，插件不内置、不上传任何密钥", "persistent-hint": True}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openapi_user_token", "label": "OPENAPI 用户授权 Token / hdt_ (选填)", "type": "password", "placeholder": "完成 OAuth 授权后换取，形如 hdt_...", "hint": "每位用户各自授权、各自填写，长期有效", "persistent-hint": True}}]},
                                             {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "comfortable", "class": "mb-2", "text": "OPENAPI 凭证必须由每位用户使用自己在站点申请的应用：插件不内置、不共享任何应用编号/应用凭证/Token。审核通过后在站点复制应用凭证(hda_)，按下方 OAuth 步骤授权换取自己的用户 Token(hdt_)。"}}]},
-                                            {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "density": "comfortable", "class": "mb-2", "text": "OAuth 换取 hdt_ 步骤：① 填好你自己的应用编号与 hda_ 应用凭证并保存；② 在浏览器打开 https://hdhaven.com/oauth/authorize?response_type=code&client_id=你的应用编号&redirect_uri=你的回调地址&scope=你的授权范围&state=任意随机串 ；③ 授权后从回调地址复制 code=... 或整条链接；④ 粘贴到下方「OAuth 授权码 / 回调链接」并保存，插件会用你的 hda_ 自动换取 hdt_。"}}]},
+                                            {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "density": "comfortable", "class": "mb-2", "text": "OAuth 换取 hdt_ 步骤：① 填好你自己的应用编号与 hda_ 应用凭证并保存；② 在浏览器打开 https://hdhaven.com/oauth/authorize?response_type=code&client_id=你的应用编号&redirect_uri=你的回调地址&scope=account%3Aread%20checkin%3Awrite&state=任意随机串 ；③ 授权后从回调地址复制 code=... 或整条链接；④ 粘贴到下方「OAuth 授权码 / 回调链接」并保存，插件会用你的 hda_ 自动换取 hdt_。"}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "openapi_redirect_uri", "label": "OAuth 回调地址 redirect_uri (选填)", "placeholder": "须与申请应用时登记的回调一致", "hint": "用于换取 hdt_ 用户 Token，需与站点应用登记的回调地址一致", "persistent-hint": True}}]},
-                                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "openapi_scope", "label": "OAuth 授权范围 scope (选填)", "placeholder": "如 checkin account，多个以空格分隔；留空用站点默认", "persistent-hint": True}}]},
+                                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "openapi_scope", "label": "OAuth 授权范围 scope (选填)", "placeholder": "建议 account:read checkin:write；多个以空格分隔，留空用站点已批准权限", "persistent-hint": True}}]},
                                             {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "openapi_authorize_code", "label": "OAuth 授权码 / 回调链接 (选填，保存后自动换取 hdt_ Token)", "placeholder": "粘贴浏览器授权后回调地址里的 code=... 或整条回调链接", "hint": "每位用户使用自己应用的授权；保存后插件用你的 hda_ 自动换取 hdt_ 并清空此栏", "persistent-hint": True}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "username", "label": "用户名 / 邮箱 (密码模式下使用)"}}]},
                                             {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "password", "label": "登录密码 (密码模式下使用)", "type": "password"}}]},
@@ -2192,7 +2334,7 @@ class HDHavenSignin(_PluginBase):
         username = self._format_user_display(user_info)
         user_id = str(user_info.get("id", "--")).strip()
         level = self._extract_level_name(user_info.get("level", "初来乍到"))
-        is_vip = bool(user_info.get("vip", False))
+        is_vip = bool(user_info.get("vip") or user_info.get("is_member"))
         avatar_char = (user_info.get("nickname") or user_info.get("username") or "栖")[0].upper()
 
         current_points = user_info.get("points", latest.get("points", "--"))
@@ -2225,6 +2367,7 @@ class HDHavenSignin(_PluginBase):
             "rate_limit": ("频控延后重试", "warning"),
             "app_required": ("需OPENAPI授权", "warning"),
             "cookie_session_revoked": ("Cookie已作废", "error"),
+            "account_unavailable": ("账号不可用", "error"),
         }
         latest_act = latest.get("action", "")
         act_text, act_color = action_labels.get(latest_act, ("暂无记录", "default"))
@@ -2279,6 +2422,12 @@ class HDHavenSignin(_PluginBase):
 
         page_cards = []
         if latest_act == "auth_error":
+            if self._is_openapi_active:
+                auth_err_title = "OPENAPI 用户授权已失效 (HTTP 401/403)"
+                auth_err_text = f"最近一次签到失败：{latest.get('message', '授权失效')}。请重新在浏览器完成 OAuth 授权、换取新的 hdt_ Token 并回填插件；这与 Cookie 无关。"
+            else:
+                auth_err_title = "栖影站点登录态已失效 (HTTP 401/403)"
+                auth_err_text = f"最近一次签到失败：{latest.get('message', '登录态失效')}。请前往插件设置中更新 hdh_session 会话 Cookie 并保存。"
             page_cards.append({
                 "component": "VAlert",
                 "props": {
@@ -2286,8 +2435,8 @@ class HDHavenSignin(_PluginBase):
                     "variant": "tonal",
                     "icon": "mdi-alert-circle-outline",
                     "class": "mb-4 rounded-lg",
-                    "title": "栖影站点登录态已失效 (HTTP 401/403)",
-                    "text": f"最近一次签到失败：{latest.get('message', '登录态失效')}。请前往插件设置中更新 hdh_session 会话 Cookie 并保存。"
+                    "title": auth_err_title,
+                    "text": auth_err_text
                 }
             })
         elif latest_act == "session_verify_required":
@@ -2322,8 +2471,8 @@ class HDHavenSignin(_PluginBase):
                     "variant": "tonal",
                     "icon": "mdi-speedometer-slow",
                     "class": "mb-4 rounded-lg",
-                    "title": "触发站点访问频率风控 (SCRAPE_CHALLENGE_REQUIRED)",
-                    "text": f"最近一次签到触发站点频率风控：{latest.get('message', '')}。插件已自动延后指数退避重试，无需重新配置。"
+                    "title": "触发站点接口限流或访问频率风控",
+                    "text": f"最近一次签到被限流：{latest.get('message', '')}。插件已按站点 Retry-After 或指数退避自动延后重试，无需重新配置。"
                 }
             })
         elif latest_act == "app_required":
@@ -2342,6 +2491,18 @@ class HDHavenSignin(_PluginBase):
                     "class": "mb-4 rounded-lg",
                     "title": app_req_title,
                     "text": app_req_text
+                }
+            })
+        elif latest_act == "account_unavailable":
+            page_cards.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "error",
+                    "variant": "tonal",
+                    "icon": "mdi-account-off-outline",
+                    "class": "mb-4 rounded-lg",
+                    "title": "站点返回账号当前不可用 (ACCOUNT_UNAVAILABLE)",
+                    "text": f"最近一次签到失败：{latest.get('message', '')}。该账号当前被站点判定不可用，请登录站点确认账号状态；这不是 Cookie 或应用凭证过期。"
                 }
             })
         elif latest_act == "cookie_session_revoked":
