@@ -2,7 +2,9 @@ import copy
 import os
 import json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
@@ -235,6 +237,10 @@ RECOGNITION_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 RECOGNITION_STRATEGY_VERSION = 2
 MAX_RECOGNITION_ATTEMPTS = 12
 ENRICH_ATTEMPTS_PER_RUN = 150
+# 手动/后台刷新的富化上限更小，避免页面刷新耗时过长被反向代理判为 504。
+BACKGROUND_ENRICH_ATTEMPTS = 60
+NETFLIX_REGION_WORKERS = 6
+TMDB_REQUEST_WORKERS = 6
 SOURCE_HEALTH_LABELS = {
     "ok": "正常",
     "empty": "无数据",
@@ -610,7 +616,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.47"
+    plugin_version = "0.6.48"
     plugin_release_date = "2026-11-09"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -1279,6 +1285,7 @@ class UpcomingReleases(_PluginBase):
             "filters": {**filters, "region": filters.get("production_region", "all")},
             "source_capabilities": self._build_source_capability_state(),
             "source_health": source_health,
+            "refresh_state": self._refresh_status(),
             "recommended_rules": copy.deepcopy(RECOMMENDED_RULES),
             "default_time_range": self._config_default_time_range(),
             "default_days": self._config_default_days(),
@@ -2591,11 +2598,28 @@ class UpcomingReleases(_PluginBase):
         self.save_data("page_feedback", None)
         return {"success": True, "message": "ok"}
     def page_refresh(self) -> Dict[str, Any]:
-        items = self._get_items(force_refresh=True)
-        self._set_page_feedback("success", f"已同步最新待播数据，共 {len(items)} 条。")
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-        return {"success": True, "count": len(items)}
+        """手动刷新：改为后台执行并立即返回，避免同步抓取超过反向代理超时（504）。"""
+        self._ensure_runtime_state()
+        state = self._refresh_status()
+        if state["running"]:
+            return {
+                "success": True,
+                "background": True,
+                "count": len(self._cache.get("items") or []),
+                "message": "刷新正在进行中，请稍候。",
+                "refresh_state": state,
+            }
+        thread = threading.Thread(
+            target=self._run_background_refresh, name="upcoming-releases-refresh", daemon=True
+        )
+        thread.start()
+        return {
+            "success": True,
+            "background": True,
+            "count": len(self._cache.get("items") or []),
+            "message": "已开始后台刷新，抓取完成后页面会自动更新。",
+            "refresh_state": self._refresh_status(),
+        }
     def refresh_cache_daily(self) -> Dict[str, Any]:
         if not self.get_state():
             return {"success": False, "count": 0}
@@ -2715,6 +2739,89 @@ class UpcomingReleases(_PluginBase):
             self._source_health = self._load_source_health()
         if not hasattr(self, "_last_http_error"):
             self._last_http_error = ""
+        if not isinstance(getattr(self, "_refresh_lock", None), type(threading.Lock())):
+            self._refresh_lock = threading.Lock()
+        if not isinstance(getattr(self, "_refresh_state", None), dict):
+            self._refresh_state = self._load_refresh_state()
+
+    def _load_refresh_state(self) -> Dict[str, Any]:
+        stored = self.get_data("refresh_state")
+        return dict(stored) if isinstance(stored, dict) else {}
+
+    def _save_refresh_state(self, **updates):
+        state = dict(self._refresh_state or {})
+        state.update(updates)
+        state["running"] = bool(state.get("running"))
+        self._refresh_state = state
+        try:
+            self.save_data("refresh_state", copy.deepcopy(state))
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] 刷新状态写入失败: {err}")
+
+    def _refresh_status(self) -> Dict[str, Any]:
+        self._ensure_runtime_state()
+        state = dict(self._refresh_state or {})
+        return {
+            "running": bool(state.get("running")),
+            "phase": self._clean_text(state.get("phase")) or "idle",
+            "phase_label": {
+                "fetching": "抓取渠道数据",
+                "enriching": "补全元数据",
+                "idle": "空闲",
+                "done": "已完成",
+                "failed": "失败",
+            }.get(self._clean_text(state.get("phase")) or "idle", "空闲"),
+            "started_at": safe_int(state.get("started_at"), 0),
+            "finished_at": safe_int(state.get("finished_at"), 0),
+            "count": safe_int(state.get("count"), 0),
+            "error": self._clean_text(state.get("error")),
+        }
+
+    def _run_background_refresh(self):
+        self._ensure_runtime_state()
+        if not self._refresh_lock.acquire(blocking=False):
+            logger.info("[UpcomingReleases] background refresh already running; skip duplicate start")
+            return
+        try:
+            self._save_refresh_state(
+                running=True, phase="fetching", started_at=int(time.time()),
+                finished_at=0, count=0, error="",
+            )
+            try:
+                items = self._get_items(force_refresh=True, enrich=False)
+                self._save_refresh_state(phase="enriching", count=len(items))
+                if getattr(self, "_recognize_dirty", False):
+                    try:
+                        self._persist_recognize_cache()
+                    except Exception as err:
+                        logger.warning(f"[UpcomingReleases] 识别缓存写入失败: {err}")
+                try:
+                    self._enrich_production_countries(items, max_attempts=BACKGROUND_ENRICH_ATTEMPTS)
+                except Exception as err:
+                    logger.warning(f"[UpcomingReleases] 后台元数据补全失败: {type(err).__name__}")
+                if getattr(self, "_recognize_dirty", False):
+                    try:
+                        self._persist_recognize_cache()
+                    except Exception as err:
+                        logger.warning(f"[UpcomingReleases] 识别缓存写入失败: {err}")
+                try:
+                    self._cache["items"] = self._sanitize_items(self._cache.get("items") or items)
+                    self._persist_cache()
+                except Exception as err:
+                    logger.warning(f"[UpcomingReleases] 缓存写入失败: {err}")
+                self._set_page_feedback("success", f"已同步最新待播数据，共 {len(items)} 条。")
+                self._save_refresh_state(
+                    running=False, phase="done", finished_at=int(time.time()),
+                    count=len(items), error="",
+                )
+            except Exception as err:
+                logger.error(f"[UpcomingReleases] 后台刷新失败: {err}")
+                self._save_refresh_state(
+                    running=False, phase="failed", finished_at=int(time.time()),
+                    error=f"{type(err).__name__}: {err}",
+                )
+        finally:
+            self._refresh_lock.release()
 
     def _load_source_health(self) -> Dict[str, Dict[str, Any]]:
         stored = self.get_data("source_health")
@@ -2868,7 +2975,7 @@ class UpcomingReleases(_PluginBase):
             f"cached_missing={counters['missing_cached']}"
         )
         return counters
-    def _get_items(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    def _get_items(self, force_refresh: bool = False, enrich: bool = True) -> List[Dict[str, Any]]:
         self._ensure_runtime_state()
         if not self.get_state():
             return []
@@ -2969,7 +3076,7 @@ class UpcomingReleases(_PluginBase):
                 "items": items,
                 "netflix_regions_signature": self._netflix_regions_signature(),
             }
-            if force_refresh:
+            if force_refresh and enrich:
                 self._enrich_production_countries(items)
             try:
                 self._persist_cache()
@@ -3522,6 +3629,50 @@ class UpcomingReleases(_PluginBase):
             )
         logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
         return items
+    def _fetch_netflix_region_entries(self, region: str, proxy_url: str) -> Tuple[List[Dict[str, Any]], bool]:
+        """抓取单个 Netflix 地区的全部页，返回原始条目（线程内调用，不写共享状态）。"""
+        region_code = region.upper()
+        logger.info(f"[UpcomingReleases] Netflix region {region_code} fetch started")
+        returned_count = 0
+        collected: List[Dict[str, Any]] = []
+        seen_region_ids = set()
+        page = 1
+        total_pages = 1
+        succeeded = False
+        while page <= total_pages:
+            response = {}
+            for attempt in range(3):
+                response = self._request_netflix_page(region, NETFLIX_DEFAULT_LANGUAGE, page, proxy_url)
+                if response:
+                    break
+                if attempt < 2:
+                    time.sleep(1)
+            if not response:
+                logger.warning(f"[UpcomingReleases] Netflix region {region_code} page {page} failed")
+                if page == 1:
+                    break
+                page += 1
+                continue
+            succeeded = True
+            total_pages = max(page, safe_int(response.get("totalPages"), page))
+            entries = response.get("data") or []
+            returned_count += len(entries)
+            logger.info(
+                f"[UpcomingReleases] Netflix region {region_code} page {page} returned {len(entries)} items"
+            )
+            for entry in entries:
+                raw_id = str(entry.get("videoID") or entry.get("id") or "").strip()
+                if not raw_id or raw_id in seen_region_ids:
+                    continue
+                seen_region_ids.add(raw_id)
+                collected.append(entry)
+            page += 1
+        logger.info(
+            f"[UpcomingReleases] Netflix region {region_code} returned={returned_count} "
+            f"unique={len(seen_region_ids)}"
+        )
+        return collected, succeeded
+
     def _fetch_netflix(self) -> List[Dict[str, Any]]:
         today = datetime.now().date()
         merged_items: Dict[str, Dict[str, Any]] = {}
@@ -3530,87 +3681,78 @@ class UpcomingReleases(_PluginBase):
         if proxy_url:
             logger.info("[UpcomingReleases] Netflix requests will use MoviePilot proxy configuration")
         regions = self._normalize_netflix_regions(self._config.get("netflix_regions"))
-        for region in regions:
-            region_code = region.upper()
-            logger.info(f"[UpcomingReleases] Netflix region {region_code} fetch started")
-            returned_count = 0
-            overlap_count = 0
-            seen_region_ids = set()
-            page = 1
-            total_pages = 1
-            while page <= total_pages:
-                response = {}
-                for attempt in range(3):
-                    response = self._request_netflix_page(region, NETFLIX_DEFAULT_LANGUAGE, page, proxy_url)
-                    if response:
-                        break
-                    if attempt < 2:
-                        time.sleep(1)
-                if not response:
-                    logger.warning(f"[UpcomingReleases] Netflix region {region_code} page {page} failed")
-                    if page == 1:
-                        break
-                    page += 1
-                    continue
-                self._netflix_fetch_succeeded = True
-                total_pages = max(page, safe_int(response.get("totalPages"), page))
-                entries = response.get("data") or []
-                returned_count += len(entries)
-                logger.info(
-                    f"[UpcomingReleases] Netflix region {region_code} page {page} returned {len(entries)} items"
-                )
-                for entry in entries:
-                    raw_id = str(entry.get("videoID") or entry.get("id") or "").strip()
-                    if not raw_id or raw_id in seen_region_ids:
-                        continue
-                    title = self._clean_text(entry.get("title1"))
-                    subtitle = self._clean_text(entry.get("title2"))
-                    start_time_ms = safe_int(entry.get("startTime"), 0)
-                    if not title or not start_time_ms:
-                        continue
-                    release_dt = datetime.utcfromtimestamp(start_time_ms / 1000).date()
-                    if release_dt < today:
-                        continue
-                    seen_region_ids.add(raw_id)
-                    existing = merged_items.get(raw_id)
-                    if existing:
-                        existing["availability_regions"] = sorted(
-                            self._normalize_region_values(
-                                (existing.get("availability_regions") or []) + [region_code]
-                            )
+        # 12 个地区串行约 30s，容易触发反向代理 504；改为有上限的并发抓取。
+        region_results: List[Tuple[str, List[Dict[str, Any]], bool]] = []
+        workers = max(1, min(NETFLIX_REGION_WORKERS, len(regions)))
+        if workers <= 1:
+            for region in regions:
+                entries, ok = self._fetch_netflix_region_entries(region, proxy_url)
+                region_results.append((region, entries, ok))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._fetch_netflix_region_entries, region, proxy_url): region
+                    for region in regions
+                }
+                for future in as_completed(futures):
+                    region = futures[future]
+                    try:
+                        entries, ok = future.result()
+                    except Exception as err:
+                        logger.error(
+                            f"[UpcomingReleases] Netflix region {region.upper()} fetch error: {type(err).__name__}"
                         )
-                        overlap_count += 1
-                        continue
-                    type_key = self._resolve_netflix_type_key(entry, title, subtitle)
-                    story = subtitle if subtitle and subtitle.lower() != title.lower() else ""
-                    year, year_source = self._extract_source_year(entry)
-                    item = self._build_item(
-                        platform="netflix",
-                        raw_id=raw_id,
-                        title=title,
-                        type_key=type_key,
-                        release_date=release_dt.strftime("%Y-%m-%d"),
-                        release_text=story or "Netflix 即将上线",
-                        poster=self._clean_text(entry.get("image")),
-                        detail_link=f"https://www.netflix.com/watch/{raw_id}",
-                        story=story,
-                        year=year,
-                        year_source=year_source,
-                        alternate_titles=self._extract_source_alternate_titles(entry, title),
+                        entries, ok = [], False
+                    region_results.append((region, entries, ok))
+            order = {region: index for index, region in enumerate(regions)}
+            region_results.sort(key=lambda item: order.get(item[0], 0))
+        for region, entries, region_ok in region_results:
+            region_code = region.upper()
+            if region_ok:
+                self._netflix_fetch_succeeded = True
+            for entry in entries:
+                raw_id = str(entry.get("videoID") or entry.get("id") or "").strip()
+                title = self._clean_text(entry.get("title1"))
+                subtitle = self._clean_text(entry.get("title2"))
+                start_time_ms = safe_int(entry.get("startTime"), 0)
+                if not raw_id or not title or not start_time_ms:
+                    continue
+                release_dt = datetime.utcfromtimestamp(start_time_ms / 1000).date()
+                if release_dt < today:
+                    continue
+                existing = merged_items.get(raw_id)
+                if existing:
+                    existing["availability_regions"] = sorted(
+                        self._normalize_region_values(
+                            (existing.get("availability_regions") or []) + [region_code]
+                        )
                     )
-                    item.pop("region_codes", None)
-                    item["availability_regions"] = [region_code]
-                    item["availability_source"] = "netflix_catalog"
-                    item["production_country_codes"] = []
-                    item["genre_names"] = self._resolve_netflix_genre_names(entry, type_key)
-                    item["platforms"] = ["netflix"]
-                    item["platform_labels"] = [PLATFORM_LABELS["netflix"]]
-                    merged_items[raw_id] = item
-                page += 1
-            logger.info(
-                f"[UpcomingReleases] Netflix region {region_code} returned={returned_count} "
-                f"unique={len(seen_region_ids)} overlap={overlap_count}"
-            )
+                    continue
+                type_key = self._resolve_netflix_type_key(entry, title, subtitle)
+                story = subtitle if subtitle and subtitle.lower() != title.lower() else ""
+                year, year_source = self._extract_source_year(entry)
+                item = self._build_item(
+                    platform="netflix",
+                    raw_id=raw_id,
+                    title=title,
+                    type_key=type_key,
+                    release_date=release_dt.strftime("%Y-%m-%d"),
+                    release_text=story or "Netflix 即将上线",
+                    poster=self._clean_text(entry.get("image")),
+                    detail_link=f"https://www.netflix.com/watch/{raw_id}",
+                    story=story,
+                    year=year,
+                    year_source=year_source,
+                    alternate_titles=self._extract_source_alternate_titles(entry, title),
+                )
+                item.pop("region_codes", None)
+                item["availability_regions"] = [region_code]
+                item["availability_source"] = "netflix_catalog"
+                item["production_country_codes"] = []
+                item["genre_names"] = self._resolve_netflix_genre_names(entry, type_key)
+                item["platforms"] = ["netflix"]
+                item["platform_labels"] = [PLATFORM_LABELS["netflix"]]
+                merged_items[raw_id] = item
         items = list(merged_items.values())
         region_count_distribution: Dict[int, int] = {}
         for item in items:
@@ -4977,9 +5119,10 @@ class UpcomingReleases(_PluginBase):
                 items.append(item)
 
         regions = self._normalize_tmdb_regions((self._config or {}).get("tmdb_regions"))
+        specs: List[Tuple[str, Dict[str, Any], str, str]] = []
         for region in regions:
             for page in range(1, TMDB_RESULT_PAGES + 1):
-                payload = self._tmdb_request(
+                specs.append((
                     "/discover/movie",
                     {
                         "with_origin_country": region,
@@ -4990,11 +5133,11 @@ class UpcomingReleases(_PluginBase):
                         "region": region,
                         "page": page,
                     },
-                    api_key=api_key,
-                )
-                add_entries((payload or {}).get("results"), "movie", region)
+                    "movie",
+                    region,
+                ))
         for country in TMDB_TV_ORIGIN_COUNTRIES:
-            payload = self._tmdb_request(
+            specs.append((
                 "/discover/tv",
                 {
                     "with_origin_country": country,
@@ -5003,9 +5146,9 @@ class UpcomingReleases(_PluginBase):
                     "sort_by": "popularity.desc",
                     "page": 1,
                 },
-                api_key=api_key,
-            )
-            add_entries((payload or {}).get("results"), "tv", country)
+                "tv",
+                country,
+            ))
         for country in TMDB_ANIME_ORIGIN_COUNTRIES:
             for media_kind in ("tv", "movie"):
                 params = {
@@ -5019,8 +5162,30 @@ class UpcomingReleases(_PluginBase):
                                    "primary_release_date.lte": date_to, "region": country})
                 else:
                     params.update({"first_air_date.gte": date_from, "first_air_date.lte": date_to})
-                payload = self._tmdb_request(f"/discover/{media_kind}", params, api_key=api_key)
-                add_entries((payload or {}).get("results"), media_kind, country)
+                specs.append((f"/discover/{media_kind}", params, media_kind, country))
+        # 16 个子源串行约 10s 以上，改为有上限并发，缩短手动刷新时间。
+        payloads: List[Any] = [{} for _ in specs]
+        workers = max(1, min(TMDB_REQUEST_WORKERS, len(specs)))
+        if workers <= 1:
+            for index, (path, params, _kind, _origin) in enumerate(specs):
+                payloads[index] = self._tmdb_request(path, params, api_key=api_key)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._tmdb_request, path, params, api_key): index
+                    for index, (path, params, _kind, _origin) in enumerate(specs)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        payloads[index] = future.result() or {}
+                    except Exception as err:
+                        logger.warning(
+                            f"[UpcomingReleases] TMDB 子源请求失败: {type(err).__name__}"
+                        )
+                        payloads[index] = {}
+        for (path, _params, kind, origin), payload in zip(specs, payloads):
+            add_entries((payload or {}).get("results"), kind, origin)
         logger.info(f"[UpcomingReleases] TMDB 抓取到 {len(items)} 条")
         return items
 

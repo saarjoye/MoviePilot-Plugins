@@ -107,6 +107,7 @@ function useUpcomingBrowser(api, options = {}) {
   const filters = reactive(createDefaultFilters());
   const loading = ref$1(false);
   const loadingMore = ref$1(false);
+  const refreshing = ref$1(false);
   const busyMediaId = ref$1('');
   const notice = reactive({ type: 'info', text: '' });
   const limit = options.limit || 24;
@@ -167,14 +168,40 @@ function useUpcomingBrowser(api, options = {}) {
   }
 
   async function refresh() {
-    loading.value = true;
+    if (refreshing.value) {
+      return
+    }
+    refreshing.value = true;
+    setNotice('info', '已开始后台刷新，抓取完成后会自动更新…');
     try {
       const result = await api.get(`${PLUGIN_API_BASE}/page_refresh`);
-      setNotice('success', `已同步最新待播数据，共 ${result?.count || 0} 条。`);
-      await load(false);
+      if (!result?.background) {
+        setNotice('success', `已同步最新待播数据，共 ${result?.count || 0} 条。`);
+        await load(false);
+        return
+      }
+      const startedAt = Number(result?.refresh_state?.started_at || 0);
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const poll = await api.get(buildApiUrl(`${PLUGIN_API_BASE}/config_state`, { limit, offset: 0 }));
+        const refreshState = poll?.refresh_state || {};
+        if (!refreshState.running && Number(refreshState.finished_at || 0) >= startedAt) {
+          const failed = refreshState.phase === 'failed';
+          setNotice(
+            failed ? 'error' : 'success',
+            failed
+              ? `刷新失败：${refreshState.error || '未知原因'}`
+              : `已同步最新待播数据，共 ${refreshState.count || 0} 条。`,
+          );
+          await load(false);
+          return
+        }
+      }
+      setNotice('warning', '刷新仍在后台进行，请稍后再点一次「刷新数据」查看结果。');
     } catch (error) {
       setNotice('error', normalizeError(error));
-      loading.value = false;
+    } finally {
+      refreshing.value = false;
     }
   }
 
@@ -235,6 +262,7 @@ function useUpcomingBrowser(api, options = {}) {
     filters,
     loading,
     loadingMore,
+    refreshing,
     busyMediaId,
     notice,
     load,
@@ -360,6 +388,7 @@ const {
   filters,
   loading,
   loadingMore,
+  refreshing,
   busyMediaId,
   notice,
   load,
@@ -457,9 +486,9 @@ return (_ctx, _cache) => {
         _createElementVNode$1("button", {
           type: "button",
           class: "ghost-button",
-          disabled: _unref(loading),
+          disabled: _unref(loading) || _unref(refreshing),
           onClick: _cache[1] || (_cache[1] = (...args) => (_unref(refresh) && _unref(refresh)(...args)))
-        }, "刷新数据", 8, _hoisted_7),
+        }, _toDisplayString(_unref(refreshing) ? '刷新中…' : '刷新数据'), 9, _hoisted_7),
         (__props.showSwitch)
           ? (_openBlock$1(), _createElementBlock$1("button", {
               key: 0,
