@@ -1,192 +1,206 @@
 import copy
 import os
-import json
-import re
-import time
-from datetime import datetime, timedelta
-from html import unescape
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import HTTPError, URLError
+import json
+import re
+import time
+from datetime import datetime, timedelta
+from html import unescape
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
-
-from apscheduler.triggers.cron import CronTrigger
-from fastapi import Depends
-
+from apscheduler.triggers.cron import CronTrigger
+from fastapi import Depends
 from app.core.config import settings
 from app.chain.subscribe import SubscribeChain
 from app.db import ScopedSession, get_scoped_session
 from app.db.models.subscribe import Subscribe
 from app.db.models.subscribehistory import SubscribeHistory
 from app.db.subscribe_oper import SubscribeOper
-from app.db.user_oper import UserOper, get_current_active_user
-from app.core.event import Event, eventmanager
-from app.core.metainfo import MetaInfo
-from app.log import logger
-from app.plugins import _PluginBase
-from app.schemas import (
-    DiscoverMediaSource,
-    DiscoverSourceEventData,
-    MediaInfo,
-    MediaRecognizeConvertEventData,
-    RecommendMediaSource,
-    RecommendSourceEventData,
-)
-from app.schemas.types import ChainEventType, MediaType, NotificationType
-
-
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/135.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-}
-
-PLATFORM_LABELS = {
-    "all": "全部平台",
-    "iqiyi": "爱奇艺",
-    "tencent": "腾讯视频",
-    "youku": "优酷",
+from app.db.user_oper import UserOper, get_current_active_user
+from app.core.event import Event, eventmanager
+from app.core.metainfo import MetaInfo
+from app.log import logger
+from app.plugins import _PluginBase
+from app.schemas import (
+    DiscoverMediaSource,
+    DiscoverSourceEventData,
+    MediaInfo,
+    MediaRecognizeConvertEventData,
+    RecommendMediaSource,
+    RecommendSourceEventData,
+)
+from app.schemas.types import ChainEventType, MediaType, NotificationType
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/135.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+PLATFORM_LABELS = {
+    "all": "全部平台",
+    "iqiyi": "爱奇艺",
+    "tencent": "腾讯视频",
+    "youku": "优酷",
     "mgtv": "芒果TV",
     "netflix": "Netflix",
-}
-
-TYPE_LABELS = {
-    "all": "全部类型",
-    "movie": "电影",
-    "tv": "电视剧",
-    "anime": "动漫",
-    "variety": "综艺",
-    "short": "短剧",
-    "documentary": "纪录片",
-    "kids": "少儿",
+    "tmdb": "TMDB",
+    "bangumi": "Bangumi",
+}
+TYPE_LABELS = {
+    "all": "全部类型",
+    "movie": "电影",
+    "tv": "电视剧",
+    "anime": "动漫",
+    "variety": "综艺",
+    "short": "短剧",
+    "documentary": "纪录片",
+    "kids": "少儿",
     "humanity": "人文",
     "other": "其它",
-}
-
-TIME_LABELS = {
-    "all": "全部时间",
-    "today": "今日上线",
-    "tomorrow": "明日上线",
-    "3days": "3天内",
-    "7days": "7天内",
-    "30days": "30天内",
-    "pending": "敬请期待",
-}
-
-PLATFORM_ALIAS_MAP = {
-    "all": "all",
-    "全部": "all",
-    "全部平台": "all",
-    "iqiyi": "iqiyi",
-    "爱奇艺": "iqiyi",
-    "tencent": "tencent",
-    "腾讯": "tencent",
-    "腾讯视频": "tencent",
-    "youku": "youku",
-    "优酷": "youku",
-    "mgtv": "mgtv",
-    "芒果tv": "mgtv",
+}
+TIME_LABELS = {
+    "all": "全部时间",
+    "today": "今日上线",
+    "tomorrow": "明日上线",
+    "3days": "3天内",
+    "7days": "7天内",
+    "30days": "30天内",
+    "pending": "敬请期待",
+}
+# 自动订阅规则可用的时间窗：比页面筛选多“跟随默认”和“自定义天数”。
+RULE_TIME_LABELS = {
+    "default": "跟随默认",
+    "today": "今日上线",
+    "tomorrow": "明日上线",
+    "3days": "3天内",
+    "7days": "7天内",
+    "30days": "30天内",
+    "custom": "自定义天数",
+    "pending": "敬请期待",
+    "all": "全部时间",
+}
+DEFAULT_RULE_TIME_RANGE = "7days"
+DEFAULT_RULE_DAYS = 7
+MIN_CUSTOM_DAYS = 1
+MAX_CUSTOM_DAYS = 90
+PLATFORM_ALIAS_MAP = {
+    "all": "all",
+    "全部": "all",
+    "全部平台": "all",
+    "iqiyi": "iqiyi",
+    "爱奇艺": "iqiyi",
+    "tencent": "tencent",
+    "腾讯": "tencent",
+    "腾讯视频": "tencent",
+    "youku": "youku",
+    "优酷": "youku",
+    "mgtv": "mgtv",
+    "芒果tv": "mgtv",
     "芒果": "mgtv",
     "netflix": "netflix",
     "奈飞": "netflix",
     "网飞": "netflix",
-}
-
-TYPE_ALIAS_MAP = {
-    "all": "all",
-    "全部": "all",
-    "全部类型": "all",
-    "movie": "movie",
-    "电影": "movie",
-    "tv": "tv",
-    "电视剧": "tv",
-    "剧集": "tv",
-    "anime": "anime",
-    "动漫": "anime",
-    "动画": "anime",
-    "variety": "variety",
-    "综艺": "variety",
-    "documentary": "documentary",
-    "纪录片": "documentary",
-    "short": "short",
-    "短剧": "short",
-    "kids": "kids",
-    "少儿": "kids",
+    "tmdb": "tmdb",
+    "themoviedb": "tmdb",
+    "bangumi": "bangumi",
+    "bgm": "bangumi",
+    "番组计划": "bangumi",
+}
+TYPE_ALIAS_MAP = {
+    "all": "all",
+    "全部": "all",
+    "全部类型": "all",
+    "movie": "movie",
+    "电影": "movie",
+    "tv": "tv",
+    "电视剧": "tv",
+    "剧集": "tv",
+    "anime": "anime",
+    "动漫": "anime",
+    "动画": "anime",
+    "variety": "variety",
+    "综艺": "variety",
+    "documentary": "documentary",
+    "纪录片": "documentary",
+    "short": "short",
+    "短剧": "short",
+    "kids": "kids",
+    "少儿": "kids",
     "humanity": "humanity",
     "人文": "humanity",
     "other": "other",
     "其它": "other",
-}
-
-RECOMMEND_GROUPS = {
-    "movie": {"movie"},
-    "tv": {"tv", "variety", "short", "documentary", "kids", "humanity"},
-    "anime": {"anime"},
+}
+RECOMMEND_GROUPS = {
+    "movie": {"movie"},
+    "tv": {"tv", "variety", "short", "documentary", "kids", "humanity"},
+    "anime": {"anime"},
     "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity", "other"},
-}
-
-AUTO_SUBSCRIBE_TYPE_GROUPS = {
+}
+AUTO_SUBSCRIBE_TYPE_GROUPS = {
     "all": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity", "other"},
-    "movie": {"movie"},
+    "movie": {"movie"},
     "tv": {"tv"},
-    "anime": {"anime"},
+    "anime": {"anime"},
     "variety": {"variety"},
     "other": {"other"},
-}
-
-GENRE_ALIAS_MAP = {
-    "喜剧": {"喜剧", "comedy"},
-    "剧情": {"剧情", "drama"},
-    "爱情": {"爱情", "romance", "romantic"},
-    "伦理": {"伦理"},
-    "家庭": {"家庭", "family"},
-    "悬疑": {"悬疑", "mystery"},
-    "犯罪": {"犯罪", "crime"},
-    "动作": {"动作", "action"},
-    "动画": {"动画", "animation"},
-    "科幻": {"科幻", "science fiction", "sci-fi", "scifi"},
-    "奇幻": {"奇幻", "fantasy"},
-    "古装": {"古装", "costume"},
-    "历史": {"历史", "history"},
-    "战争": {"战争", "war"},
-    "惊悚": {"惊悚", "thriller"},
-    "恐怖": {"恐怖", "horror"},
-    "真人秀": {"真人秀", "reality", "reality-tv"},
-    "脱口秀": {"脱口秀", "talk show", "talk"},
-    "音乐": {"音乐", "music"},
-    "冒险": {"冒险", "adventure"},
-    "武侠": {"武侠", "martial arts"},
-    "少儿": {"少儿", "儿童", "kids", "children"},
-}
-
-IQIYI_TYPE_MAP = {
-    "1": "movie",
-    "2": "tv",
-    "3": "documentary",
-    "4": "anime",
-    "6": "variety",
-    "35": "short",
-    "37": "anime",
-}
-
-YOUKU_SECTION_MAP = {
-    "剧集": "tv",
-    "电影": "movie",
-    "综艺": "variety",
-    "动漫": "anime",
-    "纪录片": "documentary",
-    "人文": "humanity",
-    "少儿": "kids",
-}
-
-TENCENT_CHANNELS = {
-    "tv": {"channel_id": "100113", "upcoming_value": "1", "type_key": "tv"},
-    "movie": {"channel_id": "100173", "upcoming_value": "999", "type_key": "movie"},
-}
-
+}
+GENRE_ALIAS_MAP = {
+    "喜剧": {"喜剧", "comedy"},
+    "剧情": {"剧情", "drama"},
+    "爱情": {"爱情", "romance", "romantic"},
+    "伦理": {"伦理"},
+    "家庭": {"家庭", "family"},
+    "悬疑": {"悬疑", "mystery"},
+    "犯罪": {"犯罪", "crime"},
+    "动作": {"动作", "action"},
+    "动画": {"动画", "animation"},
+    "科幻": {"科幻", "science fiction", "sci-fi", "scifi"},
+    "奇幻": {"奇幻", "fantasy"},
+    "古装": {"古装", "costume"},
+    "历史": {"历史", "history"},
+    "战争": {"战争", "war"},
+    "惊悚": {"惊悚", "thriller"},
+    "恐怖": {"恐怖", "horror"},
+    "真人秀": {"真人秀", "reality", "reality-tv"},
+    "脱口秀": {"脱口秀", "talk show", "talk"},
+    "音乐": {"音乐", "music"},
+    "冒险": {"冒险", "adventure"},
+    "武侠": {"武侠", "martial arts"},
+    "少儿": {"少儿", "儿童", "kids", "children"},
+}
+IQIYI_TYPE_MAP = {
+    "1": "movie",
+    "2": "tv",
+    "3": "documentary",
+    "4": "anime",
+    "6": "variety",
+    "35": "short",
+    "37": "anime",
+}
+YOUKU_SECTION_MAP = {
+    "剧集": "tv",
+    "电影": "movie",
+    "综艺": "variety",
+    "动漫": "anime",
+    "纪录片": "documentary",
+    "人文": "humanity",
+    "少儿": "kids",
+}
+TENCENT_CHANNELS = {
+    "tv": {"channel_id": "100113", "upcoming_value": "1", "type_key": "tv"},
+    "movie": {"channel_id": "100173", "upcoming_value": "999", "type_key": "movie"},
+}
+# 腾讯综艺/动漫/纪录片频道：实测只给当年在播/热播列表（无未来档期），默认关闭。
+TENCENT_EXTRA_CHANNELS = {
+    "variety": {"channel_id": "100109", "type_key": "variety"},
+    "anime": {"channel_id": "100119", "type_key": "anime"},
+    "documentary": {"channel_id": "100105", "type_key": "documentary"},
+}
+MGT_V_EXTRA_PB_IDS = ["10", "3", "12"]
 NETFLIX_RELEASES_URL = "https://about.netflix.com/api/data/releases"
 NETFLIX_RELEASES_REFERER = "https://about.netflix.com/en/new-to-watch"
 NETFLIX_DEFAULT_REGION = "us"
@@ -215,27 +229,110 @@ NETFLIX_GENRE_NAME_MAP = {
     100173: "动画",
     81246426: "奇幻",
 }
-
-
 CACHE_SCHEMA_VERSION = 15
 DEFAULT_DAILY_REFRESH_TIME = "06:00"
 RECOGNITION_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 RECOGNITION_STRATEGY_VERSION = 2
 MAX_RECOGNITION_ATTEMPTS = 12
-
+ENRICH_ATTEMPTS_PER_RUN = 150
+SOURCE_HEALTH_LABELS = {
+    "ok": "正常",
+    "empty": "无数据",
+    "failed": "失败",
+    "stale": "失败·用缓存",
+    "no_key": "未配置 Key",
+    "disabled": "已关闭",
+    "unknown": "未检测",
+}
 RECOMMENDED_PRODUCTION_REGIONS = [
     "CN", "HK", "TW", "KR", "JP", "US", "GB", "FR", "DE", "IT", "ES", "CA", "AU", "IN", "TH",
 ]
-
 SOURCE_TYPE_CAPABILITIES = {
     "iqiyi": {"movie", "tv", "anime", "variety", "short", "documentary"},
     "tencent": {"movie", "tv"},
     "youku": {"movie", "tv", "anime", "variety", "documentary", "humanity", "kids"},
     "mgtv": {"movie", "tv", "anime", "variety", "short", "documentary", "kids", "humanity"},
     "netflix": {"movie", "tv", "anime", "variety", "documentary", "kids", "other"},
+    "tmdb": {"movie", "tv", "anime", "documentary", "kids"},
+    "bangumi": {"anime"},
 }
-
+# TMDB 一级数据源参数：地区 → 抓取用途，以及动漫产地。
+TMDB_UPCOMING_REGIONS = ["US", "JP", "KR", "GB", "CN"]
+TMDB_TV_ORIGIN_COUNTRIES = ["US", "GB", "JP", "KR", "CN"]
+TMDB_ANIME_ORIGIN_COUNTRIES = ["CN", "JP", "US"]
+TMDB_ANIME_GENRE_ID = 16
+TMDB_SOURCE_DAYS = 90
+TMDB_RESULT_PAGES = 1
+BANGUMI_CALENDAR_URL = "https://api.bgm.tv/calendar"
+# TMDB genre_id → 插件题材名（未收录的 id 直接忽略）
+TMDB_GENRE_NAME_MAP = {
+    28: "动作", 12: "冒险", 16: "动画", 35: "喜剧", 80: "犯罪", 99: "纪录片",
+    18: "剧情", 10751: "家庭", 14: "奇幻", 36: "古装", 27: "恐怖", 10402: "音乐",
+    9648: "悬疑", 10749: "爱情", 878: "科幻", 10770: "剧情", 53: "惊悚", 10752: "战争", 37: "武侠",
+    10759: "动作", 10762: "少儿", 10763: "剧情", 10764: "真人秀", 10765: "科幻",
+    10766: "剧情", 10767: "脱口秀", 10768: "战争",
+}
+TMDB_DOCUMENTARY_GENRE_IDS = {99}
+TMDB_KIDS_GENRE_IDS = {10762}
+TMDB_VARIETY_GENRE_IDS = {10764, 10767}
 RECOMMENDED_RULES = [
+    {
+        "name": "华语电影", "enabled": True, "time_range": "default", "days": None,
+        "types": ["movie"], "platforms": ["iqiyi", "tencent", "youku", "mgtv", "tmdb"],
+        "regions": ["CN", "HK", "TW"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "外语电影", "enabled": True, "time_range": "default", "days": None,
+        "types": ["movie"], "platforms": ["netflix", "tencent", "youku", "tmdb"],
+        "regions": ["US", "GB", "JP", "KR"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "国产剧", "enabled": True, "time_range": "default", "days": None,
+        "types": ["tv"], "platforms": ["iqiyi", "tencent", "youku", "mgtv", "tmdb"],
+        "regions": ["CN"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "日韩剧", "enabled": True, "time_range": "default", "days": None,
+        "types": ["tv"], "platforms": ["netflix", "youku", "tmdb"],
+        "regions": ["JP", "KR"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "美剧", "enabled": True, "time_range": "default", "days": None,
+        "types": ["tv"], "platforms": ["netflix", "tmdb"],
+        "regions": ["US", "GB"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "国漫", "enabled": True, "time_range": "default", "days": None,
+        "types": ["anime"], "platforms": ["iqiyi", "youku", "mgtv", "tmdb"],
+        "regions": ["CN"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "日漫", "enabled": True, "time_range": "default", "days": None,
+        "types": ["anime"], "platforms": ["netflix", "youku", "tmdb", "bangumi"],
+        "regions": ["JP"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "美漫", "enabled": True, "time_range": "default", "days": None,
+        "types": ["anime"], "platforms": ["netflix", "tmdb"],
+        "regions": ["US"], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+    {
+        "name": "综艺", "enabled": True, "time_range": "default", "days": None,
+        "types": ["variety"], "platforms": ["youku", "mgtv", "netflix"],
+        "regions": [], "genres": [], "include_pending": True,
+        "region_match_mode": "production",
+    },
+]
+# 0.6.43 及更早版本的默认规则（4 条 3 天窗口），仅用于精确匹配迁移。
+PREVIOUS_DEFAULT_RULES = [
     {
         "name": "电视剧-3天内", "enabled": True, "time_range": "3days", "days": 3,
         "types": ["tv"], "platforms": ["iqiyi", "tencent", "youku", "mgtv", "netflix"],
@@ -257,7 +354,6 @@ RECOMMENDED_RULES = [
         "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
     },
 ]
-
 LEGACY_AUTO_SUBSCRIBE_RULES = [
     {
         "name": "国产及华语电视剧-明日上映", "enabled": True, "time_range": "3days", "days": 3,
@@ -270,9 +366,8 @@ LEGACY_AUTO_SUBSCRIBE_RULES = [
         "regions": ["US", "KR"], "region_match_mode": "production",
     },
 ]
-
 LEGACY_AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
-    [
+    [
         {
             "name": "国产及华语电视剧-明日上映",
             "enabled": True,
@@ -293,53 +388,43 @@ LEGACY_AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(
             "regions": ["US", "KR"],
             "region_match_mode": "production",
         },
-    ],
-    ensure_ascii=False,
-    indent=2,
-)
+    ],
+    ensure_ascii=False,
+    indent=2,
+)
 AUTO_SUBSCRIBE_RULES_SAMPLE = json.dumps(RECOMMENDED_RULES, ensure_ascii=False, indent=2)
-
 REGION_ALIAS_MAP = {
-    "CN": {"CN"},
-    "中国": {"CN"},
-    "中国大陆": {"CN"},
-    "国产": {"CN"},
-    "华语": {"CN", "HK", "TW"},
-    "HK": {"HK"},
-    "香港": {"HK"},
-    "TW": {"TW"},
-    "台湾": {"TW"},
-    "KR": {"KR"},
-    "韩国": {"KR"},
-    "JP": {"JP"},
-    "日本": {"JP"},
-    "US": {"US"},
-    "美国": {"US"},
-    "GB": {"GB"},
+    "CN": {"CN"},
+    "中国": {"CN"},
+    "中国大陆": {"CN"},
+    "国产": {"CN"},
+    "华语": {"CN", "HK", "TW"},
+    "HK": {"HK"},
+    "香港": {"HK"},
+    "TW": {"TW"},
+    "台湾": {"TW"},
+    "KR": {"KR"},
+    "韩国": {"KR"},
+    "JP": {"JP"},
+    "日本": {"JP"},
+    "US": {"US"},
+    "美国": {"US"},
+    "GB": {"GB"},
     "英国": {"GB"},
-
     "中国香港": {"HK"},
-
     "中国台湾": {"TW"},
-}
-
-LANGUAGE_REGION_MAP = {
+}
+LANGUAGE_REGION_MAP = {
     "fr": "FR",
-    "ko": "KR",
-    "ja": "JP",
+    "ko": "KR",
+    "ja": "JP",
     "de": "DE",
-
     "it": "IT",
-
     "es": "ES",
-
     "th": "TH",
-
     "tr": "TR",
-
     "ru": "RU",
-}
-
+}
 ISO_3166_ALPHA2_CODES = {
     "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
     "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV", "BW", "BY", "BZ",
@@ -354,30 +439,53 @@ ISO_3166_ALPHA2_CODES = {
     "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ",
     "VA", "VC", "VE", "VG", "VI", "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
 }
-
 DEFAULT_NETFLIX_REGIONS = ["us", "jp", "kr", "gb", "ca", "au", "fr", "de", "it", "es", "in", "br"]
 MAX_NETFLIX_REGIONS = 12
 PRESET_PAGE_REGION_CODES = ["CN", "HK", "TW", "KR", "JP", "US", "GB"]
-
 REGION_CODE_LABELS = {
-
-    "AE": "阿联酋", "AR": "阿根廷", "AU": "澳大利亚", "BE": "比利时", "BR": "巴西",
-    "CA": "加拿大", "CH": "瑞士", "CL": "智利", "CO": "哥伦比亚", "CZ": "捷克",
-    "DE": "德国", "DK": "丹麦", "EG": "埃及", "ES": "西班牙", "FI": "芬兰", "FR": "法国",
-    "GR": "希腊", "ID": "印度尼西亚", "IE": "爱尔兰", "IL": "以色列", "IN": "印度",
-    "IS": "冰岛", "IT": "意大利", "MX": "墨西哥", "MY": "马来西亚", "NL": "荷兰",
-    "NO": "挪威", "NZ": "新西兰", "PH": "菲律宾", "PL": "波兰", "PT": "葡萄牙",
-    "RO": "罗马尼亚", "RU": "俄罗斯", "SA": "沙特阿拉伯", "SE": "瑞典", "SG": "新加坡",
-    "TH": "泰国", "TR": "土耳其", "UA": "乌克兰", "VN": "越南", "ZA": "南非",
-    "CN": "中国大陆",
-    "HK": "中国香港",
-    "TW": "中国台湾",
-    "KR": "韩国",
-    "JP": "日本",
-    "US": "美国",
-    "GB": "英国",
+    "AD": "安道尔", "AE": "阿联酋", "AF": "阿富汗", "AG": "安提瓜和巴布达", "AI": "安圭拉", "AL": "阿尔巴尼亚",
+    "AM": "亚美尼亚", "AO": "安哥拉", "AQ": "南极洲", "AR": "阿根廷", "AS": "美属萨摩亚", "AT": "奥地利",
+    "AU": "澳大利亚", "AW": "阿鲁巴", "AX": "奥兰群岛", "AZ": "阿塞拜疆", "BA": "波斯尼亚和黑塞哥维那", "BB": "巴巴多斯",
+    "BD": "孟加拉国", "BE": "比利时", "BF": "布基纳法索", "BG": "保加利亚", "BH": "巴林", "BI": "布隆迪",
+    "BJ": "贝宁", "BL": "圣巴泰勒米", "BM": "百慕大", "BN": "文莱", "BO": "玻利维亚", "BQ": "荷属加勒比区",
+    "BR": "巴西", "BS": "巴哈马", "BT": "不丹", "BV": "布韦岛", "BW": "博茨瓦纳", "BY": "白俄罗斯",
+    "BZ": "伯利兹", "CA": "加拿大", "CC": "科科斯（基林）群岛", "CD": "刚果（金）", "CF": "中非共和国", "CG": "刚果（布）",
+    "CH": "瑞士", "CI": "科特迪瓦", "CK": "库克群岛", "CL": "智利", "CM": "喀麦隆", "CN": "中国大陆",
+    "CO": "哥伦比亚", "CR": "哥斯达黎加", "CU": "古巴", "CV": "佛得角", "CW": "库拉索", "CX": "圣诞岛",
+    "CY": "塞浦路斯", "CZ": "捷克", "DE": "德国", "DJ": "吉布提", "DK": "丹麦", "DM": "多米尼克",
+    "DO": "多米尼加共和国", "DZ": "阿尔及利亚", "EC": "厄瓜多尔", "EE": "爱沙尼亚", "EG": "埃及", "EH": "西撒哈拉",
+    "ER": "厄立特里亚", "ES": "西班牙", "ET": "埃塞俄比亚", "FI": "芬兰", "FJ": "斐济", "FK": "福克兰群岛",
+    "FM": "密克罗尼西亚", "FO": "法罗群岛", "FR": "法国", "GA": "加蓬", "GB": "英国", "GD": "格林纳达",
+    "GE": "格鲁吉亚", "GF": "法属圭亚那", "GG": "根西岛", "GH": "加纳", "GI": "直布罗陀", "GL": "格陵兰",
+    "GM": "冈比亚", "GN": "几内亚", "GP": "瓜德罗普", "GQ": "赤道几内亚", "GR": "希腊", "GS": "南乔治亚和南桑威奇群岛",
+    "GT": "危地马拉", "GU": "关岛", "GW": "几内亚比绍", "GY": "圭亚那", "HK": "中国香港", "HM": "赫德岛和麦克唐纳群岛",
+    "HN": "洪都拉斯", "HR": "克罗地亚", "HT": "海地", "HU": "匈牙利", "ID": "印度尼西亚", "IE": "爱尔兰",
+    "IL": "以色列", "IM": "马恩岛", "IN": "印度", "IO": "英属印度洋领地", "IQ": "伊拉克", "IR": "伊朗",
+    "IS": "冰岛", "IT": "意大利", "JE": "泽西岛", "JM": "牙买加", "JO": "约旦", "JP": "日本",
+    "KE": "肯尼亚", "KG": "吉尔吉斯斯坦", "KH": "柬埔寨", "KI": "基里巴斯", "KM": "科摩罗", "KN": "圣基茨和尼维斯",
+    "KP": "朝鲜", "KR": "韩国", "KW": "科威特", "KY": "开曼群岛", "KZ": "哈萨克斯坦", "LA": "老挝",
+    "LB": "黎巴嫩", "LC": "圣卢西亚", "LI": "列支敦士登", "LK": "斯里兰卡", "LR": "利比里亚", "LS": "莱索托",
+    "LT": "立陶宛", "LU": "卢森堡", "LV": "拉脱维亚", "LY": "利比亚", "MA": "摩洛哥", "MC": "摩纳哥",
+    "MD": "摩尔多瓦", "ME": "黑山", "MF": "法属圣马丁", "MG": "马达加斯加", "MH": "马绍尔群岛", "MK": "北马其顿",
+    "ML": "马里", "MM": "缅甸", "MN": "蒙古", "MO": "中国澳门特别行政区", "MP": "北马里亚纳群岛", "MQ": "马提尼克",
+    "MR": "毛里塔尼亚", "MS": "蒙特塞拉特", "MT": "马耳他", "MU": "毛里求斯", "MV": "马尔代夫", "MW": "马拉维",
+    "MX": "墨西哥", "MY": "马来西亚", "MZ": "莫桑比克", "NA": "纳米比亚", "NC": "新喀里多尼亚", "NE": "尼日尔",
+    "NF": "诺福克岛", "NG": "尼日利亚", "NI": "尼加拉瓜", "NL": "荷兰", "NO": "挪威", "NP": "尼泊尔",
+    "NR": "瑙鲁", "NU": "纽埃", "NZ": "新西兰", "OM": "阿曼", "PA": "巴拿马", "PE": "秘鲁",
+    "PF": "法属波利尼西亚", "PG": "巴布亚新几内亚", "PH": "菲律宾", "PK": "巴基斯坦", "PL": "波兰", "PM": "圣皮埃尔和密克隆群岛",
+    "PN": "皮特凯恩群岛", "PR": "波多黎各", "PS": "巴勒斯坦领土", "PT": "葡萄牙", "PW": "帕劳", "PY": "巴拉圭",
+    "QA": "卡塔尔", "RE": "留尼汪", "RO": "罗马尼亚", "RS": "塞尔维亚", "RU": "俄罗斯", "RW": "卢旺达",
+    "SA": "沙特阿拉伯", "SB": "所罗门群岛", "SC": "塞舌尔", "SD": "苏丹", "SE": "瑞典", "SG": "新加坡",
+    "SH": "圣赫勒拿", "SI": "斯洛文尼亚", "SJ": "斯瓦尔巴和扬马延", "SK": "斯洛伐克", "SL": "塞拉利昂", "SM": "圣马力诺",
+    "SN": "塞内加尔", "SO": "索马里", "SR": "苏里南", "SS": "南苏丹", "ST": "圣多美和普林西比", "SV": "萨尔瓦多",
+    "SX": "荷属圣马丁", "SY": "叙利亚", "SZ": "斯威士兰", "TC": "特克斯和凯科斯群岛", "TD": "乍得", "TF": "法属南部领地",
+    "TG": "多哥", "TH": "泰国", "TJ": "塔吉克斯坦", "TK": "托克劳", "TL": "东帝汶", "TM": "土库曼斯坦",
+    "TN": "突尼斯", "TO": "汤加", "TR": "土耳其", "TT": "特立尼达和多巴哥", "TV": "图瓦卢", "TW": "中国台湾",
+    "TZ": "坦桑尼亚", "UA": "乌克兰", "UG": "乌干达", "UM": "美国本土外小岛屿", "US": "美国", "UY": "乌拉圭",
+    "UZ": "乌兹别克斯坦", "VA": "梵蒂冈", "VC": "圣文森特和格林纳丁斯", "VE": "委内瑞拉", "VG": "英属维尔京群岛", "VI": "美属维尔京群岛",
+    "VN": "越南", "VU": "瓦努阿图", "WF": "瓦利斯和富图纳", "WS": "萨摩亚", "YE": "也门", "YT": "马约特",
+    "ZA": "南非", "ZM": "赞比亚", "ZW": "津巴布韦",
 }
-
 REGION_ENGLISH_NAME_CODES = {
     "UNITED ARAB EMIRATES": "AE", "ARGENTINA": "AR", "AUSTRALIA": "AU", "BELGIUM": "BE",
     "BRAZIL": "BR", "CANADA": "CA", "CHILE": "CL", "CHINA": "CN", "COLOMBIA": "CO",
@@ -387,7 +495,6 @@ REGION_ENGLISH_NAME_CODES = {
     "SWEDEN": "SE", "THAILAND": "TH", "TURKEY": "TR", "TAIWAN": "TW", "UNITED STATES": "US",
     "UNITED STATES OF AMERICA": "US",
 }
-
 PAGE_TYPE_LABELS = {
     "all": "全部类型",
     "movie": "电影",
@@ -395,11 +502,13 @@ PAGE_TYPE_LABELS = {
     "anime": "动漫",
     "variety": "综艺",
     "short": "短剧",
+    "documentary": "纪录片",
+    "kids": "少儿",
+    "humanity": "人文",
     "other": "其它",
 }
-
-PAGE_REGION_LABELS = {
-    "all": "全部地区",
+PAGE_REGION_LABELS = {
+    "all": "全部地区",
     "CN": "中国大陆",
     "HK": "中国香港",
     "TW": "中国台湾",
@@ -407,154 +516,144 @@ PAGE_REGION_LABELS = {
     "JP": "日本",
     "US": "美国",
     "GB": "英国",
-}
-
-PAGE_GENRE_LABELS = {
-    "all": "全部题材",
-    "喜剧": "喜剧",
-    "剧情": "剧情",
-    "爱情": "爱情",
-    "伦理": "伦理",
-    "家庭": "家庭",
-    "悬疑": "悬疑",
-    "犯罪": "犯罪",
-    "动作": "动作",
-    "动画": "动画",
-    "科幻": "科幻",
-    "奇幻": "奇幻",
-    "古装": "古装",
-    "真人秀": "真人秀",
-    "脱口秀": "脱口秀",
-    "音乐": "音乐",
-    "冒险": "冒险",
-    "武侠": "武侠",
-    "少儿": "少儿",
-}
-
-PAGE_FILTER_DEFAULTS = {
-    "platform": "all",
-    "mtype": "all",
-    "time_range": "30days",
+}
+PAGE_GENRE_LABELS = {
+    "all": "全部题材",
+    "喜剧": "喜剧",
+    "剧情": "剧情",
+    "爱情": "爱情",
+    "伦理": "伦理",
+    "家庭": "家庭",
+    "悬疑": "悬疑",
+    "犯罪": "犯罪",
+    "动作": "动作",
+    "动画": "动画",
+    "科幻": "科幻",
+    "奇幻": "奇幻",
+    "古装": "古装",
+    "真人秀": "真人秀",
+    "脱口秀": "脱口秀",
+    "音乐": "音乐",
+    "冒险": "冒险",
+    "武侠": "武侠",
+    "少儿": "少儿",
+}
+PAGE_FILTER_DEFAULTS = {
+    "platform": "all",
+    "mtype": "all",
+    "time_range": "30days",
     "production_region": "all",
     "availability_region": "all",
-    "genre": "all",
-}
-
-
-
-def normalize_url(url: str) -> str:
-    if not url:
-        return ""
-    url = unescape(url.strip())
-    if url.startswith("//"):
-        return f"https:{url}"
-    if url.startswith("http://"):
-        return f"https://{url[7:]}"
-    return url
-
-
-def safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def parse_reserve_count(text: str) -> int:
-    if not text:
-        return 0
-    text = str(text).strip().replace(",", "")
-    matched = re.search(r"(\d+(?:\.\d+)?)\s*万", text)
-    if matched:
-        return int(float(matched.group(1)) * 10000)
-    matched = re.search(r"(\d+(?:\.\d+)?)", text)
-    if matched:
-        return int(float(matched.group(1)))
-    return 0
-
-
-def build_title_year(title: str, year: Optional[str]) -> str:
-    if title and year:
-        return f"{title} ({year})"
-    return title or ""
-
-
-def js_object_to_json(js_text: str) -> str:
-    return re.sub(r":undefined(?=[,}])", ":null", js_text)
-
-
-def extract_balanced_object(text: str, marker: str) -> Optional[str]:
-    marker_index = text.find(marker)
-    if marker_index == -1:
-        return None
-    start = text.find("{", marker_index)
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:index + 1]
-    return None
-
-
-class UpcomingReleases(_PluginBase):
-    plugin_name = "待播影视日历"
+    "genre": "all",
+}
+def normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    url = unescape(url.strip())
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://"):
+        return f"https://{url[7:]}"
+    return url
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+def parse_reserve_count(text: str) -> int:
+    if not text:
+        return 0
+    text = str(text).strip().replace(",", "")
+    matched = re.search(r"(\d+(?:\.\d+)?)\s*万", text)
+    if matched:
+        return int(float(matched.group(1)) * 10000)
+    matched = re.search(r"(\d+(?:\.\d+)?)", text)
+    if matched:
+        return int(float(matched.group(1)))
+    return 0
+def build_title_year(title: str, year: Optional[str]) -> str:
+    if title and year:
+        return f"{title} ({year})"
+    return title or ""
+def js_object_to_json(js_text: str) -> str:
+    return re.sub(r":undefined(?=[,}])", ":null", js_text)
+def extract_balanced_object(text: str, marker: str) -> Optional[str]:
+    marker_index = text.find(marker)
+    if marker_index == -1:
+        return None
+    start = text.find("{", marker_index)
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+class UpcomingReleases(_PluginBase):
+    plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
-    plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.43"
-    plugin_release_date = "2026-10-12"
-    plugin_author = "wYw"
-    author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
-    plugin_config_prefix = "upcomingreleases_"
-    plugin_order = 26
-    auth_level = 1
-
-    _cache: Dict[str, Any] = {"timestamp": 0, "items": []}
-    _security_domains_ready = False
-
-    _default_config = {
-        "enabled": True,
-        "enable_iqiyi": True,
-        "enable_tencent": True,
-        "enable_youku": True,
+    plugin_icon = "TrendingShow.jpg"
+    plugin_version = "0.6.47"
+    plugin_release_date = "2026-11-09"
+    plugin_author = "wYw"
+    author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
+    plugin_config_prefix = "upcomingreleases_"
+    plugin_order = 26
+    auth_level = 1
+    _cache: Dict[str, Any] = {"timestamp": 0, "items": []}
+    _security_domains_ready = False
+    _default_config = {
+        "enabled": True,
+        "enable_iqiyi": True,
+        "enable_tencent": True,
+        "tencent_extra_channels": False,
+        "enable_youku": True,
         "enable_mgtv": True,
+        "mgtv_extra_modules": True,
         "enable_netflix": True,
         "netflix_regions": ",".join(DEFAULT_NETFLIX_REGIONS),
+        "enable_tmdb": True,
+        "tmdb_api_key": "",
+        "tmdb_language": "zh-CN",
+        "tmdb_regions": ",".join(TMDB_UPCOMING_REGIONS),
+        "enable_bangumi": False,
+        "auto_subscribe_max_per_run": 20,
         "cache_ttl_minutes": 180,
         "daily_refresh_time": DEFAULT_DAILY_REFRESH_TIME,
         "push_enabled": True,
-        "push_cron": "0 9,18 * * *",
-        "push_days": 7,
-        "push_limit": 8,
-        "auto_subscribe_enabled": False,
-        "auto_subscribe_notify": True,
-        "auto_subscribe_rules": AUTO_SUBSCRIBE_RULES_SAMPLE,
-    }
-
-    def init_plugin(self, config: dict = None):
-        self._config = copy.deepcopy(self._default_config)
-        if config:
-            self._config.update(config)
-        self._config["enabled"] = bool(self._config.get("enabled", True))
-        self._config["push_enabled"] = bool(self._config.get("push_enabled", True))
-        self._config["auto_subscribe_enabled"] = bool(self._config.get("auto_subscribe_enabled", False))
+        "push_cron": "0 9,18 * * *",
+        "push_days": 7,
+        "push_limit": 8,
+        "default_time_range": DEFAULT_RULE_TIME_RANGE,
+        "default_days": DEFAULT_RULE_DAYS,
+        "auto_subscribe_enabled": False,
+        "auto_subscribe_notify": True,
+        "auto_subscribe_rules": AUTO_SUBSCRIBE_RULES_SAMPLE,
+    }
+    def init_plugin(self, config: dict = None):
+        self._config = copy.deepcopy(self._default_config)
+        if config:
+            self._config.update(config)
+        self._config["enabled"] = bool(self._config.get("enabled", True))
+        self._config["push_enabled"] = bool(self._config.get("push_enabled", True))
+        self._config["auto_subscribe_enabled"] = bool(self._config.get("auto_subscribe_enabled", False))
         self._config["auto_subscribe_notify"] = bool(self._config.get("auto_subscribe_notify", True))
         self._config["cache_ttl_minutes"] = max(5, safe_int(self._config.get("cache_ttl_minutes"), 180))
         self._config["daily_refresh_time"] = self._normalize_daily_refresh_time(
@@ -562,30 +661,41 @@ class UpcomingReleases(_PluginBase):
         )
         self._config["push_days"] = max(1, safe_int(self._config.get("push_days"), 7))
         self._config["push_limit"] = max(1, safe_int(self._config.get("push_limit"), 8))
-
+        self._config["default_time_range"] = self._normalize_default_time_range(
+            self._config.get("default_time_range")
+        )
+        self._config["default_days"] = self._normalize_custom_days(
+            self._config.get("default_days"), DEFAULT_RULE_DAYS
+        )
         self._config["netflix_regions"] = ",".join(
             self._normalize_netflix_regions(self._config.get("netflix_regions"))
         )
-        if not str(self._config.get("push_cron") or "").strip():
-            self._config["push_cron"] = self._default_config["push_cron"]
-        rules = self._config.get("auto_subscribe_rules")
-        if isinstance(rules, list):
-            self._config["auto_subscribe_rules"] = json.dumps(rules, ensure_ascii=False, indent=2)
+        self._config["enable_tmdb"] = bool(self._config.get("enable_tmdb", True))
+        self._config["enable_bangumi"] = bool(self._config.get("enable_bangumi", False))
+        self._config["auto_subscribe_max_per_run"] = max(
+            1, safe_int(self._config.get("auto_subscribe_max_per_run"), 20)
+        )
+        self._config["tmdb_api_key"] = self._clean_text(self._config.get("tmdb_api_key"))
+        self._config["tmdb_language"] = self._normalize_tmdb_language(self._config.get("tmdb_language"))
+        self._config["tmdb_regions"] = ",".join(self._normalize_tmdb_regions(self._config.get("tmdb_regions")))
+        if not str(self._config.get("push_cron") or "").strip():
+            self._config["push_cron"] = self._default_config["push_cron"]
+        rules = self._config.get("auto_subscribe_rules")
+        if isinstance(rules, list):
+            self._config["auto_subscribe_rules"] = json.dumps(rules, ensure_ascii=False, indent=2)
         elif not isinstance(rules, str) or not rules.strip():
             self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
         self._migrate_legacy_auto_subscribe_rules()
         self._ensure_security_domains()
         self._restore_cache()
-
     def _migrate_legacy_auto_subscribe_rules(self) -> bool:
         raw_rules = self._config.get("auto_subscribe_rules")
         try:
             rules = raw_rules if isinstance(raw_rules, list) else json.loads(str(raw_rules or ""))
         except (TypeError, json.JSONDecodeError):
             return False
-        if rules != LEGACY_AUTO_SUBSCRIBE_RULES:
+        if rules not in (LEGACY_AUTO_SUBSCRIBE_RULES, PREVIOUS_DEFAULT_RULES):
             return False
-
         self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
         update_config = getattr(self, "update_config", None)
         if callable(update_config):
@@ -593,86 +703,81 @@ class UpcomingReleases(_PluginBase):
                 update_config(copy.deepcopy(self._config))
             except Exception as err:
                 logger.warning(f"[UpcomingReleases] legacy rule migration persist failed: {type(err).__name__}")
-        logger.info("[UpcomingReleases] migrated exact legacy auto-subscribe rules to source-aware defaults")
+        logger.info("[UpcomingReleases] migrated exact legacy auto-subscribe rules to type-aware defaults")
         return True
-
-    def get_state(self) -> bool:
-        return bool(self._config.get("enabled"))
-
-    @staticmethod
-    def get_render_mode() -> Tuple[str, Optional[str]]:
-        return "vue", "ui"
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        self._ensure_security_domains()
-        return [
-            {
-                "path": "/upcoming_discover",
-                "endpoint": self.upcoming_discover,
-                "methods": ["GET"],
-                "summary": "待播影视探索源",
-                "description": "获取平台聚合的即将上映影视列表。",
-            },
-            {
-                "path": "/upcoming_recommend",
-                "endpoint": self.upcoming_recommend,
-                "methods": ["GET"],
-                "summary": "待播影视推荐源",
-                "description": "获取推荐页使用的即将上映影视列表。",
-            },
-            {
-                "path": "/config_state",
-                "endpoint": self.config_state,
-                "methods": ["GET"],
-                "summary": "配置页待播状态",
-                "description": "获取配置弹窗所需的筛选选项、统计信息与待播影视卡片。",
-                "auth": "bear",
-            },
-            {
-                "path": "/page_filter",
-                "endpoint": self.page_set_filter,
-                "methods": ["GET"],
-                "summary": "更新插件页筛选",
-                "description": "更新插件详情页的筛选条件。",
-                "auth": "bear",
-            },
-            {
-                "path": "/page_reset_filters",
-                "endpoint": self.page_reset_filters,
-                "methods": ["GET"],
-                "summary": "重置插件页筛选",
-                "description": "恢复插件详情页默认筛选。",
-                "auth": "bear",
-            },
-            {
-                "path": "/page_refresh",
-                "endpoint": self.page_refresh,
-                "methods": ["GET"],
-                "summary": "刷新待播缓存",
-                "description": "立即同步各平台待播数据。",
-                "auth": "bear",
-            },
-            {
-                "path": "/page_subscribe",
-                "endpoint": self.page_subscribe,
-                "methods": ["GET"],
-                "summary": "插件页直接订阅",
-                "description": "在插件详情页直接订阅待播影视。",
-                "auth": "bear",
-            },
-            {
-                "path": "/run_auto_subscribe_once",
-                "endpoint": self.run_auto_subscribe_once,
-                "methods": ["GET"],
-                "summary": "立即执行自动订阅规则",
-                "description": "手动执行一次当前自动订阅规则，便于测试规则是否生效。",
-                "auth": "bear",
-            }
-        ]
-
+    def get_state(self) -> bool:
+        return bool(self._config.get("enabled"))
+    @staticmethod
+    def get_render_mode() -> Tuple[str, Optional[str]]:
+        return "vue", "ui"
+    def get_api(self) -> List[Dict[str, Any]]:
+        self._ensure_security_domains()
+        return [
+            {
+                "path": "/upcoming_discover",
+                "endpoint": self.upcoming_discover,
+                "methods": ["GET"],
+                "summary": "待播影视探索源",
+                "description": "获取平台聚合的即将上映影视列表。",
+            },
+            {
+                "path": "/upcoming_recommend",
+                "endpoint": self.upcoming_recommend,
+                "methods": ["GET"],
+                "summary": "待播影视推荐源",
+                "description": "获取推荐页使用的即将上映影视列表。",
+            },
+            {
+                "path": "/config_state",
+                "endpoint": self.config_state,
+                "methods": ["GET"],
+                "summary": "配置页待播状态",
+                "description": "获取配置弹窗所需的筛选选项、统计信息与待播影视卡片。",
+                "auth": "bear",
+            },
+            {
+                "path": "/page_filter",
+                "endpoint": self.page_set_filter,
+                "methods": ["GET"],
+                "summary": "更新插件页筛选",
+                "description": "更新插件详情页的筛选条件。",
+                "auth": "bear",
+            },
+            {
+                "path": "/page_reset_filters",
+                "endpoint": self.page_reset_filters,
+                "methods": ["GET"],
+                "summary": "重置插件页筛选",
+                "description": "恢复插件详情页默认筛选。",
+                "auth": "bear",
+            },
+            {
+                "path": "/page_refresh",
+                "endpoint": self.page_refresh,
+                "methods": ["GET"],
+                "summary": "刷新待播缓存",
+                "description": "立即同步各平台待播数据。",
+                "auth": "bear",
+            },
+            {
+                "path": "/page_subscribe",
+                "endpoint": self.page_subscribe,
+                "methods": ["GET"],
+                "summary": "插件页直接订阅",
+                "description": "在插件详情页直接订阅待播影视。",
+                "auth": "bear",
+            },
+            {
+                "path": "/run_auto_subscribe_once",
+                "endpoint": self.run_auto_subscribe_once,
+                "methods": ["GET"],
+                "summary": "立即执行自动订阅规则",
+                "description": "手动执行一次当前自动订阅规则，便于测试规则是否生效。",
+                "auth": "bear",
+            }
+        ]
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         return None, copy.deepcopy(self._default_config)
-
     def _normalize_daily_refresh_time(self, value: Any) -> str:
         text_value = self._clean_text(value or DEFAULT_DAILY_REFRESH_TIME)
         matched = re.fullmatch(r"(\d{1,2}):(\d{2})", text_value)
@@ -682,13 +787,26 @@ class UpcomingReleases(_PluginBase):
         if hour > 23 or minute > 59:
             return DEFAULT_DAILY_REFRESH_TIME
         return f"{hour:02d}:{minute:02d}"
+    def _normalize_default_time_range(self, value: Any) -> str:
+        text_value = self._clean_text(value or "").lower()
+        if text_value in {"custom", "pending", "all", "today", "tomorrow", "3days", "7days", "30days"}:
+            return text_value
+        for key, label in RULE_TIME_LABELS.items():
+            if key == "default":
+                continue
+            if self._clean_text(value) == label:
+                return key
+        return DEFAULT_RULE_TIME_RANGE
+
+    def _normalize_custom_days(self, value: Any, fallback: int = DEFAULT_RULE_DAYS) -> int:
+        days = safe_int(value, fallback)
+        return max(MIN_CUSTOM_DAYS, min(MAX_CUSTOM_DAYS, days or fallback))
 
     def _daily_refresh_cron(self) -> str:
         hour, minute = self._normalize_daily_refresh_time(
             self._config.get("daily_refresh_time")
         ).split(":")
         return f"{int(minute)} {int(hour)} * * *"
-
     def get_service(self) -> List[Dict[str, Any]]:
         if not self.get_state():
             return []
@@ -718,58 +836,54 @@ class UpcomingReleases(_PluginBase):
             {"id": "upcoming_sync", "name": "待播影视同步", "trigger": trigger, "func": self.sync_and_push}
         )
         return services
-
-    def get_page(self) -> List[dict]:
-        # Vue 渲染模式下详情页由远程 Page 组件负责，这里只需安全返回占位数据。
-        return []
-
-        items = self._get_items(force_refresh=False)
-        filters = self._get_page_filters()
-        filtered_items = self._filter_page_items(items, filters)
-        display_items = filtered_items[:12]
-        feedback = self._get_page_feedback()
-        page_api_base = f"plugin/{self.__class__.__name__}"
-
-        platform_counts = []
-        type_counts = []
-        for key, label in PLATFORM_LABELS.items():
-            if key == "all":
-                continue
-            count = len([item for item in items if item.get("platform") == key])
-            platform_counts.append(
-                {
-                    "component": "VChip",
-                    "props": {"class": "mr-2 mb-2", "color": "primary", "variant": "outlined"},
-                    "text": f"{label} {count}",
-                }
-            )
-        for key, label in TYPE_LABELS.items():
-            if key == "all":
-                continue
-            count = len([item for item in items if item.get("type_key") == key])
-            if count:
-                type_counts.append(
-                    {
-                        "component": "VChip",
-                        "props": {"class": "mr-2 mb-2", "color": "success", "variant": "outlined"},
-                        "text": f"{label} {count}",
-                    }
-                )
-
-        page_content = []
-        if feedback:
-            page_content.append(
-                {
-                    "component": "VAlert",
-                    "props": {"type": feedback.get("type", "info"), "variant": "tonal", "class": "mb-3"},
-                    "text": feedback.get("text") or "操作已完成",
-                }
-            )
-        page_content.extend(
-            [
-                self._build_page_filter_row("平台", "platform", PLATFORM_LABELS, filters.get("platform"), page_api_base, "primary"),
-                self._build_page_filter_row("类型", "mtype", PAGE_TYPE_LABELS, filters.get("mtype"), page_api_base, "success"),
-                self._build_page_filter_row("时间", "time_range", TIME_LABELS, filters.get("time_range"), page_api_base, "warning"),
+    def get_page(self) -> List[dict]:
+        # Vue 渲染模式下详情页由远程 Page 组件负责，这里只需安全返回占位数据。
+        return []
+        items = self._get_items(force_refresh=False)
+        filters = self._get_page_filters()
+        filtered_items = self._filter_page_items(items, filters)
+        display_items = filtered_items[:12]
+        feedback = self._get_page_feedback()
+        page_api_base = f"plugin/{self.__class__.__name__}"
+        platform_counts = []
+        type_counts = []
+        for key, label in PLATFORM_LABELS.items():
+            if key == "all":
+                continue
+            count = len([item for item in items if item.get("platform") == key])
+            platform_counts.append(
+                {
+                    "component": "VChip",
+                    "props": {"class": "mr-2 mb-2", "color": "primary", "variant": "outlined"},
+                    "text": f"{label} {count}",
+                }
+            )
+        for key, label in TYPE_LABELS.items():
+            if key == "all":
+                continue
+            count = len([item for item in items if item.get("type_key") == key])
+            if count:
+                type_counts.append(
+                    {
+                        "component": "VChip",
+                        "props": {"class": "mr-2 mb-2", "color": "success", "variant": "outlined"},
+                        "text": f"{label} {count}",
+                    }
+                )
+        page_content = []
+        if feedback:
+            page_content.append(
+                {
+                    "component": "VAlert",
+                    "props": {"type": feedback.get("type", "info"), "variant": "tonal", "class": "mb-3"},
+                    "text": feedback.get("text") or "操作已完成",
+                }
+            )
+        page_content.extend(
+            [
+                self._build_page_filter_row("平台", "platform", PLATFORM_LABELS, filters.get("platform"), page_api_base, "primary"),
+                self._build_page_filter_row("类型", "mtype", PAGE_TYPE_LABELS, filters.get("mtype"), page_api_base, "success"),
+                self._build_page_filter_row("时间", "time_range", TIME_LABELS, filters.get("time_range"), page_api_base, "warning"),
                 self._build_page_filter_row(
                     "制作国家", "production_region", PAGE_REGION_LABELS,
                     filters.get("production_region"), page_api_base, "info"
@@ -778,186 +892,182 @@ class UpcomingReleases(_PluginBase):
                     "Netflix 可用地区", "availability_region", PAGE_REGION_LABELS,
                     filters.get("availability_region"), page_api_base, "info"
                 ),
-                self._build_page_filter_row("题材", "genre", PAGE_GENRE_LABELS, filters.get("genre"), page_api_base, "secondary"),
-                {
-                    "component": "VRow",
-                    "props": {"class": "mb-2"},
-                    "content": [
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 12, "md": 8},
-                            "content": [
-                                {
-                                    "component": "div",
-                                    "props": {"class": "text-body-2 mb-2"},
-                                    "text": f"当前筛选命中 {len(filtered_items)} 条，展示前 {min(len(display_items), 12)} 条，统一按开播时间升序排列。",
-                                }
-                            ],
-                        },
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 12, "md": 4},
-                            "content": [
-                                {
-                                    "component": "div",
-                                    "props": {"class": "d-flex justify-end flex-wrap"},
-                                    "content": [
-                                        {
-                                            "component": "VBtn",
-                                            "props": {"class": "mr-2 mb-2", "color": "primary", "variant": "tonal", "size": "small"},
-                                            "text": "立即同步",
-                                            "events": {"click": {"api": f"{page_api_base}/page_refresh", "method": "GET", "params": {}}},
-                                        },
-                                        {
-                                            "component": "VBtn",
-                                            "props": {"class": "mb-2", "color": "default", "variant": "outlined", "size": "small"},
-                                            "text": "重置筛选",
-                                            "events": {"click": {"api": f"{page_api_base}/page_reset_filters", "method": "GET", "params": {}}},
-                                        },
-                                    ],
-                                }
-                            ],
-                        },
-                    ],
-                },
-            ]
-        )
-
-        if display_items:
-            page_content.append(
-                {
-                    "component": "VRow",
-                    "content": [self._build_page_media_card(item, page_api_base) for item in display_items],
-                }
-            )
-        else:
-            page_content.append(
-                {
-                    "component": "VAlert",
-                    "props": {"type": "info", "variant": "tonal"},
-                    "text": "当前筛选条件下暂无可展示的待播影视，请切换平台、类型、地区或题材后再试。",
-                }
-            )
-
-        last_refresh = "未同步"
-        if self._cache.get("timestamp"):
-            last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
-
-        page = [
-            {
-                "component": "VRow",
-                "content": [
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "md": 6},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"class": "mb-4"},
-                                "content": [
-                                    {"component": "VCardTitle", "text": "插件概览"},
-                                    {"component": "VDivider"},
-                                    {
-                                        "component": "VCardText",
-                                        "content": [
-                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"缓存条目：{len(items)}"},
-                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"最近刷新：{last_refresh}"},
-                                            {"component": "div", "props": {"class": "text-body-2"}, "text": f"定时推送：{'已启用' if self._config.get('push_enabled') else '未启用'} / Cron={self._config.get('push_cron')}"},
-                                        ],
-                                    },
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "md": 6},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"class": "mb-4"},
-                                "content": [
-                                    {"component": "VCardTitle", "text": "已知限制"},
-                                    {"component": "VDivider"},
-                                    {
-                                        "component": "VCardText",
-                                        "content": [
-                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": "探索页可新增“即将上映”筛选源。"},
-                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": "推荐页可新增“即将上映”推荐源卡片。"},
-                                            {"component": "div", "props": {"class": "text-body-2"}, "text": "推荐页顶部分类标签写死在前端核心代码中，纯插件无法额外插入新的顶部分类。"},
-                                        ],
-                                    },
-                                ],
-                            }
-                        ],
-                    },
-                ],
-            },
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4"},
-                "content": [
-                    {"component": "VCardTitle", "text": "平台统计"},
-                    {"component": "VDivider"},
-                    {"component": "VCardText", "content": platform_counts or [{"component": "div", "text": "暂无平台统计"}]},
-                ],
-            },
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4"},
-                "content": [
-                    {"component": "VCardTitle", "text": "类型统计"},
-                    {"component": "VDivider"},
-                    {"component": "VCardText", "content": type_counts or [{"component": "div", "text": "暂无类型统计"}]},
-                ],
-            },
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4"},
-                "content": [
-                    {"component": "VCardTitle", "text": "近期预览"},
-                    {"component": "VDivider"},
-                    {"component": "VCardText", "content": page_content},
-                ],
-            },
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4"},
-                "content": [
-                    {"component": "VCardTitle", "text": "插件信息"},
-                    {"component": "VDivider"},
-                    {
-                        "component": "VCardText",
-                        "content": [
+                self._build_page_filter_row("题材", "genre", PAGE_GENRE_LABELS, filters.get("genre"), page_api_base, "secondary"),
+                {
+                    "component": "VRow",
+                    "props": {"class": "mb-2"},
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 8},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-body-2 mb-2"},
+                                    "text": f"当前筛选命中 {len(filtered_items)} 条，展示前 {min(len(display_items), 12)} 条，统一按开播时间升序排列。",
+                                }
+                            ],
+                        },
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "md": 4},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "d-flex justify-end flex-wrap"},
+                                    "content": [
+                                        {
+                                            "component": "VBtn",
+                                            "props": {"class": "mr-2 mb-2", "color": "primary", "variant": "tonal", "size": "small"},
+                                            "text": "立即同步",
+                                            "events": {"click": {"api": f"{page_api_base}/page_refresh", "method": "GET", "params": {}}},
+                                        },
+                                        {
+                                            "component": "VBtn",
+                                            "props": {"class": "mb-2", "color": "default", "variant": "outlined", "size": "small"},
+                                            "text": "重置筛选",
+                                            "events": {"click": {"api": f"{page_api_base}/page_reset_filters", "method": "GET", "params": {}}},
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ]
+        )
+        if display_items:
+            page_content.append(
+                {
+                    "component": "VRow",
+                    "content": [self._build_page_media_card(item, page_api_base) for item in display_items],
+                }
+            )
+        else:
+            page_content.append(
+                {
+                    "component": "VAlert",
+                    "props": {"type": "info", "variant": "tonal"},
+                    "text": "当前筛选条件下暂无可展示的待播影视，请切换平台、类型、地区或题材后再试。",
+                }
+            )
+        last_refresh = "未同步"
+        if self._cache.get("timestamp"):
+            last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
+        page = [
+            {
+                "component": "VRow",
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 6},
+                        "content": [
+                            {
+                                "component": "VCard",
+                                "props": {"class": "mb-4"},
+                                "content": [
+                                    {"component": "VCardTitle", "text": "插件概览"},
+                                    {"component": "VDivider"},
+                                    {
+                                        "component": "VCardText",
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"缓存条目：{len(items)}"},
+                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"最近刷新：{last_refresh}"},
+                                            {"component": "div", "props": {"class": "text-body-2"}, "text": f"定时推送：{'已启用' if self._config.get('push_enabled') else '未启用'} / Cron={self._config.get('push_cron')}"},
+                                        ],
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 6},
+                        "content": [
+                            {
+                                "component": "VCard",
+                                "props": {"class": "mb-4"},
+                                "content": [
+                                    {"component": "VCardTitle", "text": "已知限制"},
+                                    {"component": "VDivider"},
+                                    {
+                                        "component": "VCardText",
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": "探索页可新增“即将上映”筛选源。"},
+                                            {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": "推荐页可新增“即将上映”推荐源卡片。"},
+                                            {"component": "div", "props": {"class": "text-body-2"}, "text": "推荐页顶部分类标签写死在前端核心代码中，纯插件无法额外插入新的顶部分类。"},
+                                        ],
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "平台统计"},
+                    {"component": "VDivider"},
+                    {"component": "VCardText", "content": platform_counts or [{"component": "div", "text": "暂无平台统计"}]},
+                ],
+            },
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "类型统计"},
+                    {"component": "VDivider"},
+                    {"component": "VCardText", "content": type_counts or [{"component": "div", "text": "暂无类型统计"}]},
+                ],
+            },
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "近期预览"},
+                    {"component": "VDivider"},
+                    {"component": "VCardText", "content": page_content},
+                ],
+            },
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "插件信息"},
+                    {"component": "VDivider"},
+                    {
+                        "component": "VCardText",
+                        "content": [
                             {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"当前版本：{self.plugin_version}"},
                             {"component": "div", "props": {"class": "text-body-2"}, "text": f"发布时间：{self.plugin_release_date}"},
-                        ],
-                    },
-                ],
-            },
-        ]
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-        return page
-
-    @eventmanager.register(ChainEventType.DiscoverSource)
-    def discover_source(self, event: Event):
-        if not self.get_state():
-            return
-        event_data: DiscoverSourceEventData = event.event_data
-        api_path = f"plugin/{self.__class__.__name__}/upcoming_discover?apikey={settings.API_TOKEN}"
+                        ],
+                    },
+                ],
+            },
+        ]
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
+        return page
+    @eventmanager.register(ChainEventType.DiscoverSource)
+    def discover_source(self, event: Event):
+        if not self.get_state():
+            return
+        event_data: DiscoverSourceEventData = event.event_data
+        api_path = f"plugin/{self.__class__.__name__}/upcoming_discover?apikey={settings.API_TOKEN}"
         if any(
             getattr(source, "mediaid_prefix", None) == "upcomingreleases"
             or str(getattr(source, "media_source", "") or "") == "upcomingreleases"
             for source in event_data.extra_sources
-        ):
-            return
-        event_data.extra_sources.append(
-            DiscoverMediaSource(
-                name="即将上映",
-                media_source="upcomingreleases",
-                mediaid_prefix="upcomingreleases",
-                api_path=api_path,
+        ):
+            return
+        event_data.extra_sources.append(
+            DiscoverMediaSource(
+                name="即将上映",
+                media_source="upcomingreleases",
+                mediaid_prefix="upcomingreleases",
+                api_path=api_path,
                 filter_params={
                     "platform": "all",
                     "mtype": "all",
@@ -966,45 +1076,42 @@ class UpcomingReleases(_PluginBase):
                     "availability_region": "all",
                     "genre": "all",
                 },
-                filter_ui=self._build_filter_ui(),
-            )
-        )
-
-    @eventmanager.register(ChainEventType.RecommendSource)
-    def recommend_source(self, event: Event):
-        if not self.get_state():
-            return
-        event_data: RecommendSourceEventData = event.event_data
-        base = f"plugin/{self.__class__.__name__}/upcoming_recommend?apikey={settings.API_TOKEN}"
-        sources = [
-            RecommendMediaSource(name="即将上映·电影", api_path=f"{base}&group=movie", type="电影"),
-            RecommendMediaSource(name="即将上映·剧集", api_path=f"{base}&group=tv", type="电视剧"),
-            RecommendMediaSource(name="即将上映·动漫", api_path=f"{base}&group=anime", type="动漫"),
-            RecommendMediaSource(name="即将上映·全平台", api_path=f"{base}&group=all", type="榜单"),
-        ]
-        existing_paths = {getattr(source, "api_path", None) for source in event_data.extra_sources}
-        for source in sources:
-            if source.api_path not in existing_paths:
-                event_data.extra_sources.append(source)
-
-    @eventmanager.register(ChainEventType.MediaRecognizeConvert)
-    def media_recognize_convert(self, event: Event):
-        if not self.get_state():
-            return
-        event_data: MediaRecognizeConvertEventData = event.event_data
-        if str(getattr(event_data, "media_source", "") or "") != "upcomingreleases":
-            return
-        media_id = str(getattr(event_data, "media_id", "") or "").strip()
-        if not media_id:
-            return
-        item = self._find_item_by_mediaid(media_id)
-        if not item:
-            return
-        target_media_source = str(getattr(event_data, "target_media_source", "") or "")
-        media_dict = self._resolve_media_dict(item, target_media_source)
-        if media_dict:
-            event_data.media_dict = media_dict
-
+                filter_ui=self._build_filter_ui(),
+            )
+        )
+    @eventmanager.register(ChainEventType.RecommendSource)
+    def recommend_source(self, event: Event):
+        if not self.get_state():
+            return
+        event_data: RecommendSourceEventData = event.event_data
+        base = f"plugin/{self.__class__.__name__}/upcoming_recommend?apikey={settings.API_TOKEN}"
+        sources = [
+            RecommendMediaSource(name="即将上映·电影", api_path=f"{base}&group=movie", type="电影"),
+            RecommendMediaSource(name="即将上映·剧集", api_path=f"{base}&group=tv", type="电视剧"),
+            RecommendMediaSource(name="即将上映·动漫", api_path=f"{base}&group=anime", type="动漫"),
+            RecommendMediaSource(name="即将上映·全平台", api_path=f"{base}&group=all", type="榜单"),
+        ]
+        existing_paths = {getattr(source, "api_path", None) for source in event_data.extra_sources}
+        for source in sources:
+            if source.api_path not in existing_paths:
+                event_data.extra_sources.append(source)
+    @eventmanager.register(ChainEventType.MediaRecognizeConvert)
+    def media_recognize_convert(self, event: Event):
+        if not self.get_state():
+            return
+        event_data: MediaRecognizeConvertEventData = event.event_data
+        if str(getattr(event_data, "media_source", "") or "") != "upcomingreleases":
+            return
+        media_id = str(getattr(event_data, "media_id", "") or "").strip()
+        if not media_id:
+            return
+        item = self._find_item_by_mediaid(media_id)
+        if not item:
+            return
+        target_media_source = str(getattr(event_data, "target_media_source", "") or "")
+        media_dict = self._resolve_media_dict(item, target_media_source)
+        if media_dict:
+            event_data.media_dict = media_dict
     def upcoming_discover(
         self,
         platform: Optional[str] = None,
@@ -1014,44 +1121,42 @@ class UpcomingReleases(_PluginBase):
         production_region: Optional[str] = None,
         availability_region: Optional[str] = None,
         genre: Optional[str] = None,
-        page: int = 1,
-        count: int = 30,
-    ) -> List[Dict[str, Any]]:
-        items = self._filter_items(
-            self._get_items(force_refresh=False),
-            platform=platform,
-            mtype=mtype,
-            time_range=time_range,
+        page: int = 1,
+        count: int = 30,
+    ) -> List[Dict[str, Any]]:
+        items = self._filter_items(
+            self._get_items(force_refresh=False),
+            platform=platform,
+            mtype=mtype,
+            time_range=time_range,
             production_region=production_region if production_region is not None else region,
             availability_region=availability_region,
-            genre=genre,
-        )
-        page = max(1, safe_int(page, 1))
-        count = max(1, min(100, safe_int(count, 30)))
-        start = (page - 1) * count
-        end = start + count
-        payload = [self._to_media_info(item).model_dump() for item in items[start:end]]
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-        return payload
-
-    def upcoming_recommend(
-        self,
-        group: str = "all",
-        platform: str = "all",
-        count: int = 20,
-    ) -> List[Dict[str, Any]]:
-        count = max(1, min(60, safe_int(count, 20)))
-        items = self._filter_items(self._get_items(force_refresh=False), platform=platform, time_range="all")
-        if group not in RECOMMEND_GROUPS:
-            group = "all"
-        allowed_types = RECOMMEND_GROUPS[group]
-        picked = [item for item in items if item.get("type_key") in allowed_types]
-        payload = [self._to_media_info(item).model_dump() for item in picked[:count]]
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-        return payload
-
+            genre=genre,
+        )
+        page = max(1, safe_int(page, 1))
+        count = max(1, min(100, safe_int(count, 30)))
+        start = (page - 1) * count
+        end = start + count
+        payload = [self._to_media_info(item).model_dump() for item in items[start:end]]
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
+        return payload
+    def upcoming_recommend(
+        self,
+        group: str = "all",
+        platform: str = "all",
+        count: int = 20,
+    ) -> List[Dict[str, Any]]:
+        count = max(1, min(60, safe_int(count, 20)))
+        items = self._filter_items(self._get_items(force_refresh=False), platform=platform, time_range="all")
+        if group not in RECOMMEND_GROUPS:
+            group = "all"
+        allowed_types = RECOMMEND_GROUPS[group]
+        picked = [item for item in items if item.get("type_key") in allowed_types]
+        payload = [self._to_media_info(item).model_dump() for item in picked[:count]]
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
+        return payload
     def config_state(
         self,
         platform: Optional[str] = None,
@@ -1063,10 +1168,10 @@ class UpcomingReleases(_PluginBase):
         genre: Optional[str] = None,
         limit: int = 24,
         offset: int = 0,
-        force_refresh: bool = False,
-        current_user=Depends(get_current_active_user),
-    ) -> Dict[str, Any]:
-        username = self._resolve_subscribe_username(getattr(current_user, "name", None))
+        force_refresh: bool = False,
+        current_user=Depends(get_current_active_user),
+    ) -> Dict[str, Any]:
+        username = self._resolve_subscribe_username(getattr(current_user, "name", None))
         supplied_filters = {
             "platform": platform,
             "mtype": mtype,
@@ -1078,7 +1183,7 @@ class UpcomingReleases(_PluginBase):
         }
         stored_filters = self._get_page_filters()
         filters = self._normalize_browser_filters(
-            {
+            {
                 "platform": platform if platform is not None else stored_filters.get("platform"),
                 "mtype": mtype if mtype is not None else stored_filters.get("mtype"),
                 "time_range": time_range if time_range is not None else stored_filters.get("time_range"),
@@ -1111,45 +1216,42 @@ class UpcomingReleases(_PluginBase):
             state = self._build_browser_state(
                 items, filters, limit=limit, offset=offset, username=username
             )
-            if getattr(self, "_recognize_dirty", False):
-                self._persist_recognize_cache()
-            return {"success": True, **state}
-        except Exception as err:
-            logger.error(f"[UpcomingReleases] 配置页状态生成失败: {err}")
-            cached_items = []
-            if isinstance(getattr(self, "_cache", None), dict):
-                cached_items = self._sanitize_items(self._cache.get("items") or [])
+            if getattr(self, "_recognize_dirty", False):
+                self._persist_recognize_cache()
+            return {"success": True, **state}
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 配置页状态生成失败: {err}")
+            cached_items = []
+            if isinstance(getattr(self, "_cache", None), dict):
+                cached_items = self._sanitize_items(self._cache.get("items") or [])
             state = self._build_browser_state(
                 cached_items, filters, limit=limit, offset=offset, username=username
             )
-            state["message"] = f"待播数据加载失败：{err}"
-            return {"success": False, **state}
-
+            state["message"] = f"待播数据加载失败：{err}"
+            return {"success": False, **state}
     def _normalize_browser_filters(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
         current = filters or {}
         if "production_region" not in current and "region" in current:
             current = {**current, "production_region": current.get("region")}
         return {
-            field: self._normalize_page_filter_value(field, current.get(field, default))
-            for field, default in PAGE_FILTER_DEFAULTS.items()
-        }
-
+            field: self._normalize_page_filter_value(field, current.get(field, default))
+            for field, default in PAGE_FILTER_DEFAULTS.items()
+        }
     def _build_browser_state(
-        self,
-        items: List[Dict[str, Any]],
-        filters: Dict[str, str],
+        self,
+        items: List[Dict[str, Any]],
+        filters: Dict[str, str],
         limit: int = 24,
         offset: int = 0,
-        username: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        items = self._sanitize_items(items)
+        username: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        items = self._sanitize_items(items)
         limit = max(1, min(60, safe_int(limit, 24)))
         offset = max(0, safe_int(offset, 0))
-        merged_items = self._merge_browser_items(items)
-        filtered_items = self._filter_page_items(items, filters)
-        merged_filtered_items = self._merge_browser_items(filtered_items)
+        merged_items = self._merge_browser_items(items)
+        filtered_items = self._filter_page_items(items, filters)
+        merged_filtered_items = self._merge_browser_items(filtered_items)
         display_items = merged_filtered_items[offset:offset + limit]
-
         production_region_labels = self._build_dynamic_region_labels(
             items, filters.get("production_region")
         )
@@ -1168,48 +1270,60 @@ class UpcomingReleases(_PluginBase):
             if self._is_failed_recognition_record(self._get_cached_recognition_record(item))
         )
         logger.info(f"[UpcomingReleases] recognition failures: {recognition_failures}")
-        last_refresh = "未同步"
+        last_refresh = "未同步"
         if self._cache.get("timestamp"):
             last_refresh = datetime.fromtimestamp(self._cache.get("timestamp")).strftime("%Y-%m-%d %H:%M:%S")
         source_counts = self._build_source_stats(items)
+        source_health = self._build_source_health_state()
         return {
             "filters": {**filters, "region": filters.get("production_region", "all")},
             "source_capabilities": self._build_source_capability_state(),
+            "source_health": source_health,
             "recommended_rules": copy.deepcopy(RECOMMENDED_RULES),
+            "default_time_range": self._config_default_time_range(),
+            "default_days": self._config_default_days(),
+            "proxy_status": self._build_proxy_status(),
+            "tmdb_status": {
+                "enabled": bool((self._config or {}).get("enable_tmdb", True)),
+                "key_configured": bool(self._read_tmdb_api_key()),
+                "language": (self._config or {}).get("tmdb_language") or "zh-CN",
+                "regions": self._normalize_tmdb_regions((self._config or {}).get("tmdb_regions")),
+            },
             "options": {
-                "platforms": self._build_browser_option_items(PLATFORM_LABELS),
-                "types": self._build_browser_option_items(PAGE_TYPE_LABELS),
-                "times": self._build_browser_option_items(TIME_LABELS),
+                "platforms": self._build_browser_option_items(PLATFORM_LABELS),
+                "types": self._build_browser_option_items(PAGE_TYPE_LABELS),
+                "times": self._build_browser_option_items(TIME_LABELS),
+                "rule_times": self._build_browser_option_items(RULE_TIME_LABELS),
                 "regions": self._build_browser_option_items(production_region_labels),
                 "production_regions": self._build_browser_option_items(production_region_labels),
                 "availability_regions": self._build_browser_option_items(availability_region_labels),
-                "genres": self._build_browser_option_items(PAGE_GENRE_LABELS),
-                "rule_types": self._build_browser_option_items(PAGE_TYPE_LABELS, include_all=False),
-                "rule_platforms": self._build_browser_option_items(PLATFORM_LABELS, include_all=False),
+                "genres": self._build_browser_option_items(PAGE_GENRE_LABELS),
+                "rule_types": self._build_browser_option_items(PAGE_TYPE_LABELS, include_all=False),
+                "rule_platforms": self._build_browser_option_items(PLATFORM_LABELS, include_all=False),
                 "rule_regions": self._build_browser_option_items(rule_region_labels, include_all=False),
-                "rule_genres": self._build_browser_option_items(PAGE_GENRE_LABELS, include_all=False),
-            },
-            "stats": {
-                "total": len(merged_items),
-                "matched": len(merged_filtered_items),
+                "rule_genres": self._build_browser_option_items(PAGE_GENRE_LABELS, include_all=False),
+            },
+            "stats": {
+                "total": len(merged_items),
+                "matched": len(merged_filtered_items),
                 "showing": min(len(merged_filtered_items), offset + len(display_items)),
-                "last_refresh": last_refresh,
-                "platform_counts": [
-                    {
-                        "value": key,
-                        "label": label,
-                        "count": len([item for item in items if item.get("platform") == key]),
-                    }
-                    for key, label in PLATFORM_LABELS.items()
-                    if key != "all"
-                ],
+                "last_refresh": last_refresh,
+                "platform_counts": [
+                    {
+                        "value": key,
+                        "label": label,
+                        "count": len([item for item in items if item.get("platform") == key]),
+                    }
+                    for key, label in PLATFORM_LABELS.items()
+                    if key != "all"
+                ],
                 "type_counts": [
-                    {
-                        "value": key,
-                        "label": label,
-                        "count": len([item for item in items if item.get("type_key") == key]),
-                    }
-                    for key, label in TYPE_LABELS.items()
+                    {
+                        "value": key,
+                        "label": label,
+                        "count": len([item for item in items if item.get("type_key") == key]),
+                    }
+                    for key, label in TYPE_LABELS.items()
                     if key != "all"
                 ],
                 "source_counts": source_counts,
@@ -1224,7 +1338,6 @@ class UpcomingReleases(_PluginBase):
             },
             "items": [self._serialize_browser_item(item, username=username) for item in display_items],
         }
-
     def _build_source_capability_state(self) -> List[Dict[str, Any]]:
         recommended_by_platform: Dict[str, set] = {key: set() for key in SOURCE_TYPE_CAPABILITIES}
         for rule in RECOMMENDED_RULES:
@@ -1248,7 +1361,6 @@ class UpcomingReleases(_PluginBase):
             for platform in PLATFORM_LABELS
             if platform != "all"
         ]
-
     def _build_source_stats(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sanitized_items = self._sanitize_items(items)
         result = []
@@ -1256,23 +1368,33 @@ class UpcomingReleases(_PluginBase):
             if platform == "all":
                 continue
             platform_items = [item for item in sanitized_items if item.get("platform") == platform]
+            total = len(platform_items)
+            dated = sum(bool(item.get("release_date")) for item in platform_items)
+            with_year = sum(bool(item.get("year")) for item in platform_items)
+            with_country = sum(bool(self._get_production_country_codes(item)) for item in platform_items)
+            with_genre = sum(bool(item.get("genre_names")) for item in platform_items)
             result.append(
                 {
                     "value": platform,
                     "label": label,
-                    "total": len(platform_items),
-                    "dated": sum(bool(item.get("release_date")) for item in platform_items),
+                    "total": total,
+                    "dated": dated,
+                    "pending": total - dated,
                     "within_3days": sum(
                         bool(item.get("release_date")) and self._match_time_filter(item, "3days")
                         for item in platform_items
                     ),
+                    "with_year": with_year,
+                    "with_country": with_country,
+                    "with_genre": with_genre,
+                    "dated_percent": round(100 * dated / total) if total else 0,
+                    "country_percent": round(100 * with_country / total) if total else 0,
+                    "genre_percent": round(100 * with_genre / total) if total else 0,
                     "direct_country": sum(
                         bool(item.get("region_codes")) and item.get("platform") != "netflix"
                         for item in platform_items
                     ),
-                    "production_country": sum(
-                        bool(self._get_production_country_codes(item)) for item in platform_items
-                    ),
+                    "production_country": with_country,
                     "type_counts": [
                         {
                             "value": type_key,
@@ -1287,39 +1409,38 @@ class UpcomingReleases(_PluginBase):
                 }
             )
         return result
-
     def _build_browser_option_items(self, mapping: Dict[str, str], include_all: bool = True) -> List[Dict[str, str]]:
-        return [
-            {"value": key, "label": value}
-            for key, value in mapping.items()
-            if include_all or key != "all"
-        ]
-
-    def _sanitize_items(self, items: List[Any]) -> List[Dict[str, Any]]:
-        return [item for item in (items or []) if isinstance(item, dict)]
-
-
-    def page_subscribe(self, media_id: str, current_user=Depends(get_current_active_user)) -> Dict[str, Any]:
-        item = self._find_item_by_mediaid(media_id)
-        if not item:
-            self._set_page_feedback("error", "未找到要订阅的待播内容。")
-            return {"success": False, "message": "not found"}
-
-        username = self._resolve_subscribe_username(getattr(current_user, "name", None))
+        return [
+            {"value": key, "label": value}
+            for key, value in mapping.items()
+            if include_all or key != "all"
+        ]
+    def _sanitize_items(self, items: List[Any]) -> List[Dict[str, Any]]:
+        return [item for item in (items or []) if isinstance(item, dict)]
+    def page_subscribe(self, media_id: str, current_user=Depends(get_current_active_user)) -> Dict[str, Any]:
+        item = self._find_item_by_mediaid(media_id)
+        if not item:
+            self._set_page_feedback("error", "未找到要订阅的待播内容。")
+            return {"success": False, "message": "not found"}
+        username = self._resolve_subscribe_username(getattr(current_user, "name", None))
         recognition = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
-        subscription_status = self._get_item_subscription_status(
-            item,
-            username=username,
+        if not recognition.get("tmdb_id") and not recognition.get("bangumi_id"):
+            source_record = self._build_source_recognition(item)
+            if source_record:
+                self._store_recognition_record(item, source_record)
+                recognition = source_record
+        subscription_status = self._get_item_subscription_status(
+            item,
+            username=username,
             populate_recognition=False,
-            recognition=recognition,
-        )
-        if subscription_status == "active":
-            self._set_page_feedback("info", f"{item.get('title')} 已在订阅列表中。")
+            recognition=recognition,
+        )
+        if subscription_status == "active":
+            self._set_page_feedback("info", f"{item.get('title')} 已在订阅列表中。")
             return {"success": True, "message": "exists", "subscription_status": "active"}
-        if subscription_status == "history":
-            self._set_page_feedback("info", f"{item.get('title')} 已在订阅历史中，资源已处理完成。")
+        if subscription_status == "history":
+            self._set_page_feedback("info", f"{item.get('title')} 已在订阅历史中，资源已处理完成。")
             return {"success": True, "message": "completed", "subscription_status": "history"}
-
         if self._is_failed_recognition_record(recognition):
             updated = safe_int(recognition.get("updated"), 0)
             retry_due = (
@@ -1335,12 +1456,10 @@ class UpcomingReleases(_PluginBase):
                 )
                 self._set_page_feedback("warning", message)
                 return {"success": False, "message": message, "subscription_status": "none"}
-
         if not recognition or self._is_failed_recognition_record(recognition):
             recognition = self._get_subscription_recognition(item)
             if getattr(self, "_recognize_dirty", False):
                 self._persist_recognize_cache()
-
         media_source, resolved_media_id = self._resolve_subscribe_identity(recognition)
         if self._is_failed_recognition_record(recognition) or not media_source or not resolved_media_id:
             message = "媒体识别未获得可用媒体编号，暂时无法创建订阅，请等待后台重新识别或从搜索页手动订阅。"
@@ -1350,7 +1469,6 @@ class UpcomingReleases(_PluginBase):
             )
             self._set_page_feedback("warning", message)
             return {"success": False, "message": message, "subscription_status": "none"}
-
         subscribe_chain = SubscribeChain()
         resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
@@ -1365,7 +1483,7 @@ class UpcomingReleases(_PluginBase):
             username=username,
         )
         logger.info(f"[UpcomingReleases] page subscribe result: title={item.get('title')} sid={sid} message={message or ''}")
-        release_text = self._format_release_display(item)
+        release_text = self._format_release_display(item)
         if sid and not self._is_exists_message(message):
             verified, actual_season, verify_message = self._verify_added_subscribe(
                 item, sid, resolved_season, recognition=recognition
@@ -1383,7 +1501,7 @@ class UpcomingReleases(_PluginBase):
                 )
                 self._set_page_feedback("error", warning)
                 return {"success": False, "message": warning, "sid": sid}
-            self._set_page_feedback("success", f"已添加订阅：{item.get('title')}（{release_text}）")
+            self._set_page_feedback("success", f"已添加订阅：{item.get('title')}（{release_text}）")
             return {
                 "success": True,
                 "message": message or "added",
@@ -1391,19 +1509,16 @@ class UpcomingReleases(_PluginBase):
                 "actual_season": actual_season,
                 "subscription_status": "active",
             }
-
-        if self._is_exists_message(message):
-            claimed = self._claim_subscribe_owner(item=item, username=username)
-            if claimed:
-                self._set_page_feedback("success", f"已同步订阅状态：{item.get('title')}（{release_text}）")
+        if self._is_exists_message(message):
+            claimed = self._claim_subscribe_owner(item=item, username=username)
+            if claimed:
+                self._set_page_feedback("success", f"已同步订阅状态：{item.get('title')}（{release_text}）")
                 return {"success": True, "message": "claimed", "subscription_status": "active"}
-            warning_message = "发现可能存在识别冲突，未找到可直接对应的订阅记录，请先在搜索页核对后再订阅。"
-            self._set_page_feedback("warning", warning_message)
-            return {"success": False, "message": warning_message}
-
-        self._set_page_feedback("error", f"{item.get('title')} 订阅失败：{message or '未知原因'}")
-        return {"success": False, "message": message or "failed"}
-
+            warning_message = "发现可能存在识别冲突，未找到可直接对应的订阅记录，请先在搜索页核对后再订阅。"
+            self._set_page_feedback("warning", warning_message)
+            return {"success": False, "message": warning_message}
+        self._set_page_feedback("error", f"{item.get('title')} 订阅失败：{message or '未知原因'}")
+        return {"success": False, "message": message or "failed"}
     def _resolve_subscribe_identity(
         self,
         recognition: Optional[Dict[str, Any]] = None,
@@ -1412,57 +1527,50 @@ class UpcomingReleases(_PluginBase):
         tmdb_id = safe_int(recognition.get("tmdb_id"), 0)
         if tmdb_id:
             return "themoviedb", str(tmdb_id)
-
         douban_id = self._clean_text(recognition.get("douban_id"))
         if douban_id:
             return "douban", douban_id
-
         bangumi_id = safe_int(recognition.get("bangumi_id"), 0)
         if bangumi_id:
             return "bangumi", str(bangumi_id)
-
         return None, None
-
-    def _resolve_subscribe_username(self, username: Optional[str] = None) -> Optional[str]:
-        normalized = self._clean_text(username)
-        if normalized:
-            return normalized
-        configured = self._clean_text(self._config.get("subscribe_username"))
-        if configured:
-            return configured
-        return None
-
-    def _get_default_subscribe_username(self) -> Optional[str]:
-        configured = self._resolve_subscribe_username(None)
-        if configured:
-            return configured
-        try:
-            users = UserOper().list() or []
-        except Exception as err:
-            logger.warning(f"[UpcomingReleases] 获取默认订阅用户失败: {err}")
-            return None
-        for user in users:
-            name = self._clean_text(getattr(user, "name", None))
-            if name and getattr(user, "is_active", False) and getattr(user, "is_superuser", False):
-                return name
-        for user in users:
-            name = self._clean_text(getattr(user, "name", None))
-            if name and getattr(user, "is_active", False):
-                return name
-        return None
-
-    def _get_subscribe_by_identity(self, media_source: Optional[str], media_id: Optional[str]):
-        source_value = self._clean_text(media_source)
-        id_value = self._clean_text(media_id)
-        if not source_value or not id_value:
-            return None
-        try:
-            records = SubscribeOper().list_by_media_identity(source_value, id_value) or []
-        except Exception as err:
-            logger.warning(f"[UpcomingReleases] 订阅媒体身份查询失败: {err}")
-            return None
-        return records[0] if records else None
-
+    def _resolve_subscribe_username(self, username: Optional[str] = None) -> Optional[str]:
+        normalized = self._clean_text(username)
+        if normalized:
+            return normalized
+        configured = self._clean_text(self._config.get("subscribe_username"))
+        if configured:
+            return configured
+        return None
+    def _get_default_subscribe_username(self) -> Optional[str]:
+        configured = self._resolve_subscribe_username(None)
+        if configured:
+            return configured
+        try:
+            users = UserOper().list() or []
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] 获取默认订阅用户失败: {err}")
+            return None
+        for user in users:
+            name = self._clean_text(getattr(user, "name", None))
+            if name and getattr(user, "is_active", False) and getattr(user, "is_superuser", False):
+                return name
+        for user in users:
+            name = self._clean_text(getattr(user, "name", None))
+            if name and getattr(user, "is_active", False):
+                return name
+        return None
+    def _get_subscribe_by_identity(self, media_source: Optional[str], media_id: Optional[str]):
+        source_value = self._clean_text(media_source)
+        id_value = self._clean_text(media_id)
+        if not source_value or not id_value:
+            return None
+        try:
+            records = SubscribeOper().list_by_media_identity(source_value, id_value) or []
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] 订阅媒体身份查询失败: {err}")
+            return None
+        return records[0] if records else None
     def _get_subscribe_by_sid(self, sid: Any):
         sid_value = safe_int(sid, 0)
         if not sid_value:
@@ -1479,7 +1587,6 @@ class UpcomingReleases(_PluginBase):
         except Exception as err:
             logger.warning(f"[UpcomingReleases] subscribe sid model lookup failed: sid={sid_value} - {err}")
             return None
-
     def _subscribe_season_matches(self, expected_season: Optional[int], record_season: Any) -> bool:
         expected = safe_int(expected_season, 0)
         actual = safe_int(record_season, 0)
@@ -1488,7 +1595,6 @@ class UpcomingReleases(_PluginBase):
         if expected == 1:
             return actual in {0, 1}
         return True
-
     def _verify_added_subscribe(
         self,
         item: Dict[str, Any],
@@ -1502,7 +1608,6 @@ class UpcomingReleases(_PluginBase):
         actual_season = safe_int(getattr(record, "season", None), 0) or None
         if not self._subscribe_season_matches(target_season, actual_season):
             return False, actual_season, "季号不一致"
-
         expected_source, expected_id = self._resolve_subscribe_identity(recognition)
         if expected_source and expected_id:
             actual_source = self._clean_text(getattr(record, "media_source", None))
@@ -1510,7 +1615,6 @@ class UpcomingReleases(_PluginBase):
             if actual_source != expected_source or actual_id != expected_id:
                 return False, actual_season, "主订阅媒体身份不一致"
         return True, actual_season, ""
-
     def _format_subscribe_result_detail(
         self,
         item: Dict[str, Any],
@@ -1532,24 +1636,21 @@ class UpcomingReleases(_PluginBase):
         if actual > 0:
             parts.append(f"actual=S{actual:02d}")
         return " ".join(parts)
-
     def _subscribe_record_matches_username(self, subscribe, username: Optional[str] = None) -> bool:
-        normalized_username = self._resolve_subscribe_username(username)
-        if not normalized_username:
-            return True
-        current_username = self._resolve_subscribe_username(getattr(subscribe, "username", None))
-        return not current_username or current_username == normalized_username
-
-    def _normalize_compare_text(self, text: Optional[str]) -> str:
-        return re.sub(r"\s+", "", self._clean_text(text)).lower()
-
-    def _find_existing_subscribe(
-        self,
-        item: Dict[str, Any],
-        username: Optional[str] = None,
-        populate_recognition: bool = False,
-        recognition: Optional[Dict[str, Any]] = None,
-    ):
+        normalized_username = self._resolve_subscribe_username(username)
+        if not normalized_username:
+            return True
+        current_username = self._resolve_subscribe_username(getattr(subscribe, "username", None))
+        return not current_username or current_username == normalized_username
+    def _normalize_compare_text(self, text: Optional[str]) -> str:
+        return re.sub(r"\s+", "", self._clean_text(text)).lower()
+    def _find_existing_subscribe(
+        self,
+        item: Dict[str, Any],
+        username: Optional[str] = None,
+        populate_recognition: bool = False,
+        recognition: Optional[Dict[str, Any]] = None,
+    ):
         recognition = recognition or self._get_cached_recognition(
             item,
             populate=populate_recognition,
@@ -1563,12 +1664,11 @@ class UpcomingReleases(_PluginBase):
             and self._subscribe_record_matches_username(record, username=username)
             and self._subscribe_season_matches(resolved_season, getattr(record, "season", None))
         ):
-            return record
-
-        expected_title = self._normalize_compare_text(item.get("title"))
-        if not expected_title:
-            return None
-        expected_year = self._clean_text(item.get("year"))
+            return record
+        expected_title = self._normalize_compare_text(item.get("title"))
+        if not expected_title:
+            return None
+        expected_year = self._clean_text(item.get("year"))
         recognition = recognition or self._get_cached_recognition(
             item,
             populate=populate_recognition,
@@ -1578,7 +1678,6 @@ class UpcomingReleases(_PluginBase):
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
         subscribe_oper = SubscribeOper()
         identity_source, identity_id = self._resolve_subscribe_identity(recognition)
-
         if identity_source and identity_id:
             for type_key in type_candidates:
                 expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
@@ -1598,33 +1697,30 @@ class UpcomingReleases(_PluginBase):
                     and self._subscribe_season_matches(expected_season, getattr(record, "season", None))
                 ):
                     return record
-
-        try:
-            subscribes = subscribe_oper.list() or []
-        except Exception as err:
-            logger.warning(f"[UpcomingReleases] direct subscribe lookup failed: {err}")
-            return None
-
+        try:
+            subscribes = subscribe_oper.list() or []
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] direct subscribe lookup failed: {err}")
+            return None
         for type_key in type_candidates:
             expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
             for subscribe in subscribes:
                 if not self._subscribe_record_matches_username(subscribe, username=username):
                     continue
-                if self._clean_text(getattr(subscribe, "type", None)) != expected_type:
-                    continue
-                if self._normalize_compare_text(getattr(subscribe, "name", None)) != expected_title:
-                    continue
-                subscribe_year = self._clean_text(getattr(subscribe, "year", None))
-                if expected_year and subscribe_year and subscribe_year != expected_year:
-                    continue
-                subscribe_season = getattr(subscribe, "season", None)
+                if self._clean_text(getattr(subscribe, "type", None)) != expected_type:
+                    continue
+                if self._normalize_compare_text(getattr(subscribe, "name", None)) != expected_title:
+                    continue
+                subscribe_year = self._clean_text(getattr(subscribe, "year", None))
+                if expected_year and subscribe_year and subscribe_year != expected_year:
+                    continue
+                subscribe_season = getattr(subscribe, "season", None)
                 if not self._subscribe_season_matches(expected_season, subscribe_season):
-                    continue
-                return subscribe
-        return None
-
-    def _get_page_filters(self) -> Dict[str, str]:
-        filters = copy.deepcopy(PAGE_FILTER_DEFAULTS)
+                    continue
+                return subscribe
+        return None
+    def _get_page_filters(self) -> Dict[str, str]:
+        filters = copy.deepcopy(PAGE_FILTER_DEFAULTS)
         stored = self.get_data("page_filters")
         if isinstance(stored, dict):
             for field in filters:
@@ -1632,20 +1728,19 @@ class UpcomingReleases(_PluginBase):
                 if field == "production_region" and "production_region" not in stored:
                     value = stored.get("region", value)
                 filters[field] = self._normalize_page_filter_value(field, value)
-        return filters
-
-    def _normalize_page_filter_value(self, field: str, value: Any) -> str:
-        option_map = {
-            "platform": PLATFORM_LABELS,
-            "mtype": PAGE_TYPE_LABELS,
-            "time_range": TIME_LABELS,
+        return filters
+    def _normalize_page_filter_value(self, field: str, value: Any) -> str:
+        option_map = {
+            "platform": PLATFORM_LABELS,
+            "mtype": PAGE_TYPE_LABELS,
+            "time_range": TIME_LABELS,
             "production_region": PAGE_REGION_LABELS,
             "availability_region": PAGE_REGION_LABELS,
-            "genre": PAGE_GENRE_LABELS,
-        }
-        raw_value = self._clean_text(value or "all")
-        if field in {"platform", "mtype", "time_range"}:
-            raw_value = raw_value.lower()
+            "genre": PAGE_GENRE_LABELS,
+        }
+        raw_value = self._clean_text(value or "all")
+        if field in {"platform", "mtype", "time_range"}:
+            raw_value = raw_value.lower()
         elif field in {"region", "production_region", "availability_region"} and raw_value != "all":
             if raw_value == "华语":
                 return "华语"
@@ -1655,37 +1750,34 @@ class UpcomingReleases(_PluginBase):
             elif raw_value.upper() in ISO_3166_ALPHA2_CODES:
                 raw_value = raw_value.upper()
         elif field == "genre" and raw_value != "all":
-            normalized = sorted(self._normalize_genre_values([raw_value]))
-            raw_value = normalized[0] if normalized else "all"
-        if raw_value in option_map.get(field, {}):
-            return raw_value
+            normalized = sorted(self._normalize_genre_values([raw_value]))
+            raw_value = normalized[0] if normalized else "all"
+        if raw_value in option_map.get(field, {}):
+            return raw_value
         if field in {"region", "production_region", "availability_region"} and (
             raw_value == "华语" or re.fullmatch(r"[A-Z]{2}", raw_value)
         ):
             return raw_value
         return PAGE_FILTER_DEFAULTS.get(field, "all")
-
-    def _get_page_feedback(self) -> Dict[str, str]:
-        feedback = self.get_data("page_feedback")
-        if isinstance(feedback, dict) and feedback.get("text"):
-            return feedback
-        return {}
-
-    def _set_page_feedback(self, level: str, text: str):
-        self.save_data(
-            "page_feedback",
-            {"type": level if level in {"success", "info", "warning", "error"} else "info", "text": text},
-        )
-
-    def _filter_page_items(self, items: List[Dict[str, Any]], filters: Dict[str, str]) -> List[Dict[str, Any]]:
-        filtered = []
-        for item in items:
-            if filters.get("platform") != "all" and item.get("platform") != filters.get("platform"):
-                continue
-            if filters.get("mtype") != "all" and not self._match_rule_types(item, [filters.get("mtype")]):
-                continue
-            if not self._match_time_filter(item, filters.get("time_range") or "all"):
-                continue
+    def _get_page_feedback(self) -> Dict[str, str]:
+        feedback = self.get_data("page_feedback")
+        if isinstance(feedback, dict) and feedback.get("text"):
+            return feedback
+        return {}
+    def _set_page_feedback(self, level: str, text: str):
+        self.save_data(
+            "page_feedback",
+            {"type": level if level in {"success", "info", "warning", "error"} else "info", "text": text},
+        )
+    def _filter_page_items(self, items: List[Dict[str, Any]], filters: Dict[str, str]) -> List[Dict[str, Any]]:
+        filtered = []
+        for item in items:
+            if filters.get("platform") != "all" and item.get("platform") != filters.get("platform"):
+                continue
+            if filters.get("mtype") != "all" and not self._match_rule_types(item, [filters.get("mtype")]):
+                continue
+            if not self._match_time_filter(item, filters.get("time_range") or "all"):
+                continue
             production_region = filters.get("production_region", filters.get("region"))
             if production_region not in {None, "", "all"} and not self._match_page_regions(
                 item, [production_region]
@@ -1697,94 +1789,90 @@ class UpcomingReleases(_PluginBase):
                 continue
             if filters.get("genre") not in {None, "", "all"} and not self._match_page_genres(item, [filters.get("genre")]):
                 continue
-            filtered.append(item)
-        return filtered
-
-    def _build_page_filter_row(
-        self,
-        label: str,
-        field: str,
-        options: Dict[str, str],
-        current_value: str,
-        page_api_base: str,
-        color: str,
-    ) -> Dict[str, Any]:
-        chips = []
-        for value, text_value in options.items():
-            is_active = current_value == value
-            chips.append(
-                {
-                    "component": "VChip",
-                    "props": {
-                        "class": "mr-2 mb-2",
-                        "color": color if is_active else "default",
-                        "variant": "flat" if is_active else "outlined",
-                        "size": "small",
-                    },
-                    "text": text_value,
-                    "events": {
-                        "click": {
-                            "api": f"{page_api_base}/page_filter",
-                            "method": "GET",
-                            "params": {"field": field, "value": value},
-                        }
-                    },
-                }
-            )
-        return {
-            "component": "div",
-            "props": {"class": "mb-2"},
-            "content": [
-                {"component": "div", "props": {"class": "text-subtitle-2 mb-2"}, "text": label},
-                {"component": "div", "props": {"class": "d-flex flex-wrap"}, "content": chips},
-            ],
-        }
-
-    def _build_page_media_card(self, item: Dict[str, Any], page_api_base: str) -> Dict[str, Any]:
-        subscription_status = self._get_item_subscription_status(item, populate_recognition=True)
-        subscribed = subscription_status != "none"
-        region_text = self._get_item_region_text(item)
-        genre_text = self._get_item_genre_text(item)
-        story_text = self._clean_text(item.get("story"))
-        if len(story_text) > 72:
-            story_text = f"{story_text[:72].rstrip()}..."
-
-        status_chip_map = {
-            "active": {"color": "success", "text": "\u5df2\u8ba2\u9605"},
-            "history": {"color": "info", "text": "\u5df2\u5b8c\u6210"},
-        }
-        status_button_map = {
-            "active": {"color": "success", "variant": "tonal", "prependIcon": "mdi-check-circle", "text": "\u5df2\u8ba2\u9605"},
-            "history": {"color": "info", "variant": "tonal", "prependIcon": "mdi-archive-check", "text": "\u5df2\u5b8c\u6210"},
-            "none": {"color": "primary", "variant": "flat", "prependIcon": "mdi-bell-plus", "text": "\u7acb\u5373\u8ba2\u9605"},
-        }
-        button_meta = status_button_map.get(subscription_status, status_button_map["none"])
-
-        chips = [
-            {
-                "component": "VChip",
-                "props": {"class": "mr-2 mb-2", "color": "primary", "size": "small", "variant": "tonal"},
-                "text": item.get("platform_label"),
-            },
-            {
-                "component": "VChip",
-                "props": {"class": "mr-2 mb-2", "color": "success", "size": "small", "variant": "tonal"},
-                "text": item.get("type_label"),
-            },
-        ]
-        if subscription_status in status_chip_map:
-            chips.append(
-                {
-                    "component": "VChip",
-                    "props": {
-                        "class": "mr-2 mb-2",
-                        "color": status_chip_map[subscription_status]["color"],
-                        "size": "small",
-                        "variant": "flat",
-                    },
-                    "text": status_chip_map[subscription_status]["text"],
-                }
-            )
+            filtered.append(item)
+        return filtered
+    def _build_page_filter_row(
+        self,
+        label: str,
+        field: str,
+        options: Dict[str, str],
+        current_value: str,
+        page_api_base: str,
+        color: str,
+    ) -> Dict[str, Any]:
+        chips = []
+        for value, text_value in options.items():
+            is_active = current_value == value
+            chips.append(
+                {
+                    "component": "VChip",
+                    "props": {
+                        "class": "mr-2 mb-2",
+                        "color": color if is_active else "default",
+                        "variant": "flat" if is_active else "outlined",
+                        "size": "small",
+                    },
+                    "text": text_value,
+                    "events": {
+                        "click": {
+                            "api": f"{page_api_base}/page_filter",
+                            "method": "GET",
+                            "params": {"field": field, "value": value},
+                        }
+                    },
+                }
+            )
+        return {
+            "component": "div",
+            "props": {"class": "mb-2"},
+            "content": [
+                {"component": "div", "props": {"class": "text-subtitle-2 mb-2"}, "text": label},
+                {"component": "div", "props": {"class": "d-flex flex-wrap"}, "content": chips},
+            ],
+        }
+    def _build_page_media_card(self, item: Dict[str, Any], page_api_base: str) -> Dict[str, Any]:
+        subscription_status = self._get_item_subscription_status(item, populate_recognition=True)
+        subscribed = subscription_status != "none"
+        region_text = self._get_item_region_text(item)
+        genre_text = self._get_item_genre_text(item)
+        story_text = self._clean_text(item.get("story"))
+        if len(story_text) > 72:
+            story_text = f"{story_text[:72].rstrip()}..."
+        status_chip_map = {
+            "active": {"color": "success", "text": "\u5df2\u8ba2\u9605"},
+            "history": {"color": "info", "text": "\u5df2\u5b8c\u6210"},
+        }
+        status_button_map = {
+            "active": {"color": "success", "variant": "tonal", "prependIcon": "mdi-check-circle", "text": "\u5df2\u8ba2\u9605"},
+            "history": {"color": "info", "variant": "tonal", "prependIcon": "mdi-archive-check", "text": "\u5df2\u5b8c\u6210"},
+            "none": {"color": "primary", "variant": "flat", "prependIcon": "mdi-bell-plus", "text": "\u7acb\u5373\u8ba2\u9605"},
+        }
+        button_meta = status_button_map.get(subscription_status, status_button_map["none"])
+        chips = [
+            {
+                "component": "VChip",
+                "props": {"class": "mr-2 mb-2", "color": "primary", "size": "small", "variant": "tonal"},
+                "text": item.get("platform_label"),
+            },
+            {
+                "component": "VChip",
+                "props": {"class": "mr-2 mb-2", "color": "success", "size": "small", "variant": "tonal"},
+                "text": item.get("type_label"),
+            },
+        ]
+        if subscription_status in status_chip_map:
+            chips.append(
+                {
+                    "component": "VChip",
+                    "props": {
+                        "class": "mr-2 mb-2",
+                        "color": status_chip_map[subscription_status]["color"],
+                        "size": "small",
+                        "variant": "flat",
+                    },
+                    "text": status_chip_map[subscription_status]["text"],
+                }
+            )
         target_season = safe_int(item.get("target_season"), 0)
         if target_season > 0:
             chips.append(
@@ -1795,130 +1883,123 @@ class UpcomingReleases(_PluginBase):
                 }
             )
         if item.get("time_key") in TIME_LABELS and item.get("time_key") != "all":
-            chips.append(
-                {
-                    "component": "VChip",
-                    "props": {"class": "mr-2 mb-2", "color": "warning", "size": "small", "variant": "tonal"},
-                    "text": TIME_LABELS.get(item.get("time_key"), item.get("time_key")),
-                }
-            )
-        reserve_count = safe_int(item.get("reserve_count"), 0)
-        if reserve_count > 0:
-            chips.append(
-                {
-                    "component": "VChip",
-                    "props": {"class": "mb-2", "color": "info", "size": "small", "variant": "outlined"},
-                    "text": f"\u9884\u7ea6 {reserve_count:,}",
-                }
-            )
-
-        card_content = [
-            {"component": "VImg", "props": {"src": item.get("poster"), "height": 260, "cover": True}}
-            if item.get("poster")
-            else {
-                "component": "div",
-                "props": {
-                    "class": "d-flex align-center justify-center text-subtitle-1 bg-grey-lighten-3 text-medium-emphasis",
-                    "style": "height: 260px; padding: 12px; text-align: center;",
-                },
-                "text": item.get("title"),
-            },
-            {
-                "component": "VCardItem",
-                "content": [
-                    {
-                        "component": "VCardTitle",
-                        "text": item.get("title"),
-                    },
-                    {
-                        "component": "VCardSubtitle",
-                        "text": f"{self._format_release_display(item)} | {region_text}",
-                    },
-                ],
-            },
-            {
-                "component": "VCardText",
-                "content": [
-                    {"component": "div", "props": {"class": "d-flex flex-wrap mb-2"}, "content": chips},
-                    {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"\u9898\u6750\uff1a{genre_text}"},
-                    {"component": "div", "props": {"class": "text-body-2"}, "text": story_text or "\u6682\u65e0\u7b80\u4ecb"},
-                ],
-            },
-            {
-                "component": "VCardActions",
-                "content": [
-                    {
-                        "component": "VBtn",
-                        "props": {
-                            "color": button_meta["color"],
-                            "variant": button_meta["variant"],
-                            "prependIcon": button_meta["prependIcon"],
-                            "size": "small",
-                            "disabled": subscribed,
-                        },
-                        "text": button_meta["text"],
-                        "events": (
-                            {
-                                "click": {
-                                    "api": f"{page_api_base}/subscribe",
-                                    "method": "GET",
-                                    "params": {"media_id": item.get("media_id")},
-                                }
-                            }
-                            if not subscribed
-                            else None
-                        ),
-                    },
-                    {
-                        "component": "VBtn",
-                        "props": {"variant": "text", "href": item.get("detail_link") or None, "target": "_blank", "size": "small"},
-                        "text": "\u67e5\u770b\u8be6\u60c5",
-                    },
-                ],
-            },
-        ]
-        return {"component": "VCol", "props": {"cols": 12, "md": 6, "lg": 4}, "content": [{"component": "VCard", "content": card_content}]}
-
-    def _is_exists_message(self, message: Any) -> bool:
-        text_value = self._clean_text(message).lower()
-        return "已存在" in text_value or "exists" in text_value
-
-    def _claim_subscribe_owner(self, item: Dict[str, Any], username: Optional[str]) -> bool:
-        target_username = self._resolve_subscribe_username(username)
-        subscribe = self._find_existing_subscribe(item, username=username, populate_recognition=True)
-        if not subscribe:
-            return False
-        current_username = self._resolve_subscribe_username(getattr(subscribe, "username", None))
-        if current_username and target_username and current_username != target_username:
-            return False
-
-        payload = {}
-        if target_username and not current_username:
-            payload["username"] = target_username
-
-        if payload:
-            try:
-                SubscribeOper().update(subscribe.id, payload)
-            except Exception as err:
-                logger.warning(f"[UpcomingReleases] subscribe claim failed: {err}")
-                return False
-        return True
-
+            chips.append(
+                {
+                    "component": "VChip",
+                    "props": {"class": "mr-2 mb-2", "color": "warning", "size": "small", "variant": "tonal"},
+                    "text": TIME_LABELS.get(item.get("time_key"), item.get("time_key")),
+                }
+            )
+        reserve_count = safe_int(item.get("reserve_count"), 0)
+        if reserve_count > 0:
+            chips.append(
+                {
+                    "component": "VChip",
+                    "props": {"class": "mb-2", "color": "info", "size": "small", "variant": "outlined"},
+                    "text": f"\u9884\u7ea6 {reserve_count:,}",
+                }
+            )
+        card_content = [
+            {"component": "VImg", "props": {"src": item.get("poster"), "height": 260, "cover": True}}
+            if item.get("poster")
+            else {
+                "component": "div",
+                "props": {
+                    "class": "d-flex align-center justify-center text-subtitle-1 bg-grey-lighten-3 text-medium-emphasis",
+                    "style": "height: 260px; padding: 12px; text-align: center;",
+                },
+                "text": item.get("title"),
+            },
+            {
+                "component": "VCardItem",
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "text": item.get("title"),
+                    },
+                    {
+                        "component": "VCardSubtitle",
+                        "text": f"{self._format_release_display(item)} | {region_text}",
+                    },
+                ],
+            },
+            {
+                "component": "VCardText",
+                "content": [
+                    {"component": "div", "props": {"class": "d-flex flex-wrap mb-2"}, "content": chips},
+                    {"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"\u9898\u6750\uff1a{genre_text}"},
+                    {"component": "div", "props": {"class": "text-body-2"}, "text": story_text or "\u6682\u65e0\u7b80\u4ecb"},
+                ],
+            },
+            {
+                "component": "VCardActions",
+                "content": [
+                    {
+                        "component": "VBtn",
+                        "props": {
+                            "color": button_meta["color"],
+                            "variant": button_meta["variant"],
+                            "prependIcon": button_meta["prependIcon"],
+                            "size": "small",
+                            "disabled": subscribed,
+                        },
+                        "text": button_meta["text"],
+                        "events": (
+                            {
+                                "click": {
+                                    "api": f"{page_api_base}/subscribe",
+                                    "method": "GET",
+                                    "params": {"media_id": item.get("media_id")},
+                                }
+                            }
+                            if not subscribed
+                            else None
+                        ),
+                    },
+                    {
+                        "component": "VBtn",
+                        "props": {"variant": "text", "href": item.get("detail_link") or None, "target": "_blank", "size": "small"},
+                        "text": "\u67e5\u770b\u8be6\u60c5",
+                    },
+                ],
+            },
+        ]
+        return {"component": "VCol", "props": {"cols": 12, "md": 6, "lg": 4}, "content": [{"component": "VCard", "content": card_content}]}
+    def _is_exists_message(self, message: Any) -> bool:
+        text_value = self._clean_text(message).lower()
+        return "已存在" in text_value or "exists" in text_value
+    def _claim_subscribe_owner(self, item: Dict[str, Any], username: Optional[str]) -> bool:
+        target_username = self._resolve_subscribe_username(username)
+        subscribe = self._find_existing_subscribe(item, username=username, populate_recognition=True)
+        if not subscribe:
+            return False
+        current_username = self._resolve_subscribe_username(getattr(subscribe, "username", None))
+        if current_username and target_username and current_username != target_username:
+            return False
+        payload = {}
+        if target_username and not current_username:
+            payload["username"] = target_username
+        if payload:
+            try:
+                SubscribeOper().update(subscribe.id, payload)
+            except Exception as err:
+                logger.warning(f"[UpcomingReleases] subscribe claim failed: {err}")
+                return False
+        return True
     def _get_item_type_candidates(
         self,
         item: Dict[str, Any],
         recognition: Optional[Dict[str, Any]] = None,
-    ) -> List[str]:
-        values = []
-        for value in [
-            (recognition or {}).get("type_key"),
-            item.get("type_key"),
-        ]:
+    ) -> List[str]:
+        values = []
+        for value in [
+            (recognition or {}).get("type_key"),
+            item.get("type_key"),
+        ]:
             normalized = self._clean_text(value).lower()
             if normalized and normalized in TYPE_LABELS and normalized not in values and normalized != "all":
                 values.append(normalized)
         return values or ["tv"]
-
     def _extract_item_target_season(
         self,
         item: Dict[str, Any],
@@ -1953,7 +2034,6 @@ class UpcomingReleases(_PluginBase):
             if suffix_season:
                 return suffix_season, "title"
         return 1, "default"
-
     def _extract_explicit_season_text(self, value: Any) -> Optional[int]:
         text = self._clean_text(value)
         if not text:
@@ -1971,11 +2051,9 @@ class UpcomingReleases(_PluginBase):
             if 0 < season <= 100:
                 return season
         return None
-
     def _region_label(self, code: Any) -> str:
         normalized = self._clean_text(code).upper()
         return REGION_CODE_LABELS.get(normalized, normalized)
-
     def _build_dynamic_region_labels(
         self,
         items: Optional[List[Dict[str, Any]]] = None,
@@ -1996,7 +2074,6 @@ class UpcomingReleases(_PluginBase):
             "all": "全部制作国家",
             **{code: self._region_label(code) for code in ordered_codes if re.fullmatch(r"[A-Z]{2}", code)},
         }
-
     def _build_dynamic_availability_region_labels(
         self,
         items: Optional[List[Dict[str, Any]]] = None,
@@ -2014,7 +2091,6 @@ class UpcomingReleases(_PluginBase):
             "all": "全部可用地区",
             **{code: self._region_label(code) for code in ordered_codes if re.fullmatch(r"[A-Z]{2}", code)},
         }
-
     def _get_production_country_codes(self, item: Dict[str, Any]) -> set:
         codes = set(self._normalize_region_values(item.get("production_country_codes") or []))
         if item.get("platform") != "netflix":
@@ -2023,13 +2099,11 @@ class UpcomingReleases(_PluginBase):
         if isinstance(record, dict):
             codes.update(self._normalize_region_values(record.get("country_codes") or []))
         return codes
-
     def _get_availability_region_codes(self, item: Dict[str, Any]) -> set:
         codes = set(self._normalize_region_values(item.get("availability_regions") or []))
         if item.get("platform") == "netflix" and not codes:
             codes.update(self._normalize_region_values(item.get("region_codes") or []))
         return codes
-
     def _resolve_item_subscribe_season(
         self,
         item: Dict[str, Any],
@@ -2040,7 +2114,6 @@ class UpcomingReleases(_PluginBase):
             return None
         season, _ = self._extract_item_target_season(item, recognition)
         return season or 1
-
     def _extract_title_suffix_season(
         self,
         title: str,
@@ -2066,7 +2139,6 @@ class UpcomingReleases(_PluginBase):
         if 0 < season <= 100:
             return season
         return None
-
     def _parse_season_number_text(self, value: Any) -> int:
         text = self._clean_text(value)
         if not text:
@@ -2097,7 +2169,6 @@ class UpcomingReleases(_PluginBase):
             left, right = text.split("十", 1)
             return digit_map.get(left, 0) * 10 + digit_map.get(right, 0)
         return digit_map.get(text, 0)
-
     def _looks_like_title_sequel_prefix(
         self,
         prefix: str,
@@ -2119,7 +2190,6 @@ class UpcomingReleases(_PluginBase):
             ):
                 return True
         return self._contains_cjk(prefix_text)
-
     def _type_key_to_media_type(self, type_key: Optional[str]) -> Optional[MediaType]:
         normalized = self._clean_text(type_key).lower()
         if normalized == "movie":
@@ -2127,13 +2197,11 @@ class UpcomingReleases(_PluginBase):
         if normalized in {"tv", "anime", "variety", "short", "documentary", "kids", "humanity"}:
             return MediaType.TV
         return None
-
     def _type_key_to_subscribe_lookup(self, type_key: Optional[str], season: Optional[int] = None) -> Tuple[str, Optional[int]]:
         media_type = self._type_key_to_media_type(type_key)
         if media_type == MediaType.MOVIE:
             return MediaType.MOVIE.value, None
         return MediaType.TV.value, season or 1
-
     def _list_subscribe_history(self) -> List[Any]:
         registry = get_scoped_session()
         db = registry()
@@ -2147,7 +2215,6 @@ class UpcomingReleases(_PluginBase):
                 db.close()
             finally:
                 registry.remove()
-
     def _get_subscribe_history_by_identity(self, media_source: Optional[str], media_id: Optional[str]):
         source_value = self._clean_text(media_source)
         id_value = self._clean_text(media_id)
@@ -2172,14 +2239,13 @@ class UpcomingReleases(_PluginBase):
                 db.close()
             finally:
                 registry.remove()
-
-    def _find_existing_subscribe_history(
-        self,
-        item: Dict[str, Any],
-        username: Optional[str] = None,
-        populate_recognition: bool = False,
-        recognition: Optional[Dict[str, Any]] = None,
-    ):
+    def _find_existing_subscribe_history(
+        self,
+        item: Dict[str, Any],
+        username: Optional[str] = None,
+        populate_recognition: bool = False,
+        recognition: Optional[Dict[str, Any]] = None,
+    ):
         recognition = recognition or self._get_cached_recognition(
             item,
             populate=populate_recognition,
@@ -2196,114 +2262,107 @@ class UpcomingReleases(_PluginBase):
                 getattr(record, "season", None),
             )
         ):
-            return record
-
-        expected_title = self._normalize_compare_text(item.get("title"))
-        if not expected_title:
-            return None
-        expected_year = self._clean_text(item.get("year"))
-        recognition = recognition or self._get_cached_recognition(
-            item,
-            populate=populate_recognition,
-            require_ids=False,
+            return record
+        expected_title = self._normalize_compare_text(item.get("title"))
+        if not expected_title:
+            return None
+        expected_year = self._clean_text(item.get("year"))
+        recognition = recognition or self._get_cached_recognition(
+            item,
+            populate=populate_recognition,
+            require_ids=False,
         ) or {}
         type_candidates = self._get_item_type_candidates(item, recognition)
         resolved_season = self._resolve_item_subscribe_season(item, recognition)
         histories = self._list_subscribe_history()
         if not histories:
             return None
-
         for type_key in type_candidates:
             expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
             for history in histories:
                 if not self._subscribe_record_matches_username(history, username=username):
                     continue
-                if self._clean_text(getattr(history, "type", None)) != expected_type:
-                    continue
-                history_season = getattr(history, "season", None)
-                if (
-                    identity_source
-                    and identity_id
-                    and self._clean_text(getattr(history, "media_source", None)) == identity_source
-                    and self._clean_text(getattr(history, "media_id", None)) == identity_id
-                    and self._subscribe_season_matches(expected_season, history_season)
-                ):
-                    return history
-
+                if self._clean_text(getattr(history, "type", None)) != expected_type:
+                    continue
+                history_season = getattr(history, "season", None)
+                if (
+                    identity_source
+                    and identity_id
+                    and self._clean_text(getattr(history, "media_source", None)) == identity_source
+                    and self._clean_text(getattr(history, "media_id", None)) == identity_id
+                    and self._subscribe_season_matches(expected_season, history_season)
+                ):
+                    return history
         for type_key in type_candidates:
             expected_type, expected_season = self._type_key_to_subscribe_lookup(type_key, resolved_season)
             for history in histories:
                 if not self._subscribe_record_matches_username(history, username=username):
                     continue
-                if self._clean_text(getattr(history, "type", None)) != expected_type:
-                    continue
-                if self._normalize_compare_text(getattr(history, "name", None)) != expected_title:
-                    continue
-                history_year = self._clean_text(getattr(history, "year", None))
-                if expected_year and history_year and history_year != expected_year:
-                    continue
-                history_season = getattr(history, "season", None)
+                if self._clean_text(getattr(history, "type", None)) != expected_type:
+                    continue
+                if self._normalize_compare_text(getattr(history, "name", None)) != expected_title:
+                    continue
+                history_year = self._clean_text(getattr(history, "year", None))
+                if expected_year and history_year and history_year != expected_year:
+                    continue
+                history_season = getattr(history, "season", None)
                 if not self._subscribe_season_matches(expected_season, history_season):
-                    continue
-                return history
-        return None
-
-    def _get_item_subscription_status(
-        self,
-        item: Dict[str, Any],
-        username: Optional[str] = None,
-        populate_recognition: bool = False,
-        recognition: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        recognition = recognition or self._get_cached_recognition(
-            item,
-            populate=populate_recognition,
-            require_ids=False,
-        ) or {}
-        if self._find_existing_subscribe(
-            item,
-            username=username,
-            populate_recognition=populate_recognition,
-            recognition=recognition,
-        ):
-            return "active"
-        if self._find_existing_subscribe_history(
-            item,
-            username=username,
-            populate_recognition=populate_recognition,
-            recognition=recognition,
-        ):
-            return "history"
-        return "none"
-
-    def _is_item_subscribed(
-        self,
-        item: Dict[str, Any],
-        username: Optional[str] = None,
-        populate_recognition: bool = False,
-    ) -> bool:
-        try:
-            return self._get_item_subscription_status(
-                item,
-                username=username,
-                populate_recognition=populate_recognition,
-            ) != "none"
-        except Exception as err:
-            logger.warning(f"[UpcomingReleases] subscribe status check failed: {err}")
-            return False
-
-    def _format_release_display(self, item: Dict[str, Any]) -> str:
-        release_date = self._clean_text(item.get("release_date"))
-        release_text = self._clean_text(item.get("release_text"))
-        time_match = re.search(r"(\d{1,2}:\d{2})", release_text)
+                    continue
+                return history
+        return None
+    def _get_item_subscription_status(
+        self,
+        item: Dict[str, Any],
+        username: Optional[str] = None,
+        populate_recognition: bool = False,
+        recognition: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        recognition = recognition or self._get_cached_recognition(
+            item,
+            populate=populate_recognition,
+            require_ids=False,
+        ) or {}
+        if self._find_existing_subscribe(
+            item,
+            username=username,
+            populate_recognition=populate_recognition,
+            recognition=recognition,
+        ):
+            return "active"
+        if self._find_existing_subscribe_history(
+            item,
+            username=username,
+            populate_recognition=populate_recognition,
+            recognition=recognition,
+        ):
+            return "history"
+        return "none"
+    def _is_item_subscribed(
+        self,
+        item: Dict[str, Any],
+        username: Optional[str] = None,
+        populate_recognition: bool = False,
+    ) -> bool:
+        try:
+            return self._get_item_subscription_status(
+                item,
+                username=username,
+                populate_recognition=populate_recognition,
+            ) != "none"
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] subscribe status check failed: {err}")
+            return False
+    def _format_release_display(self, item: Dict[str, Any]) -> str:
+        release_date = self._clean_text(item.get("release_date"))
+        release_text = self._clean_text(item.get("release_text"))
+        time_match = re.search(r"(\d{1,2}:\d{2})", release_text)
         if release_date:
-            if time_match:
-                return f"{release_date} {time_match.group(1)}"
-            return release_date
-        if release_text:
-            return release_text
-        return "待定"
-
+            if time_match:
+                return f"{release_date} {time_match.group(1)}"
+            return release_date
+        if release_text:
+            return release_text
+        return "待定"
     def _get_production_country_text(self, item: Dict[str, Any]) -> str:
         country_labels = [self._region_label(code) for code in sorted(self._get_production_country_codes(item))]
         record = self._get_cached_recognition_record(item)
@@ -2314,76 +2373,68 @@ class UpcomingReleases(_PluginBase):
         if record.get("recognition_failed"):
             return "识别失败"
         return "未提供国家信息"
-
     def _get_availability_region_text(self, item: Dict[str, Any]) -> str:
         labels = [self._region_label(code) for code in sorted(self._get_availability_region_codes(item))]
         return " / ".join(labels[:6]) if labels else ""
-
     def _get_item_region_text(self, item: Dict[str, Any]) -> str:
         production_text = self._get_production_country_text(item)
         availability_text = self._get_availability_region_text(item)
         if availability_text:
             return f"可用地区：{availability_text}；制作国家：{production_text}"
         return production_text
-
     def _get_item_genre_text(self, item: Dict[str, Any]) -> str:
         direct_genres = [self._clean_text(value) for value in item.get("genre_names") or [] if self._clean_text(value)]
         if direct_genres:
             return " / ".join(direct_genres[:4])
-
         record = self._get_cached_recognition(item, populate=False, require_ids=False)
         labels = []
         for genre_name in record.get("genre_names") or []:
             text_value = self._clean_text(genre_name)
             if text_value and text_value not in labels:
-                labels.append(text_value)
-        if labels:
-            return " / ".join(labels[:4])
-        type_fallback = {
-            "movie": "电影",
-            "tv": "剧集",
-            "anime": "动画",
-            "variety": "综艺",
-            "documentary": "纪录片",
-            "kids": "少儿",
-            "humanity": "人文",
-            "short": "短剧",
-        }
-        resolved_type = self._get_item_type_candidates(item, record)[0]
-        return type_fallback.get(resolved_type, "待识别")
-
-
-    def _make_browser_group_key(self, item: Dict[str, Any]) -> Tuple[str, str]:
+                labels.append(text_value)
+        if labels:
+            return " / ".join(labels[:4])
+        type_fallback = {
+            "movie": "电影",
+            "tv": "剧集",
+            "anime": "动画",
+            "variety": "综艺",
+            "documentary": "纪录片",
+            "kids": "少儿",
+            "humanity": "人文",
+            "short": "短剧",
+        }
+        resolved_type = self._get_item_type_candidates(item, record)[0]
+        return type_fallback.get(resolved_type, "待识别")
+    def _make_browser_group_key(self, item: Dict[str, Any]) -> Tuple[str, str]:
         if item.get("platform") == "netflix" and item.get("media_id"):
             return self._clean_text(item.get("media_id")), "netflix"
         title_key = self._normalize_compare_text(item.get("title"))
-        type_key = self._clean_text(item.get("type_key") or "").lower() or "unknown"
+        type_key = self._clean_text(item.get("type_key") or "").lower() or "unknown"
         target_season = safe_int(item.get("target_season"), 0)
         season_key = str(target_season) if target_season > 1 else ""
         return "|".join([title_key, season_key]) if season_key else title_key, type_key
-
-    def _merge_browser_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        merged_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for item in self._sanitize_items(items):
-            key = self._make_browser_group_key(item)
-            if not key[0]:
-                continue
-            merged_groups.setdefault(key, []).append(item)
-        return [self._merge_browser_group(group_items) for group_items in merged_groups.values()]
-
+    def _merge_browser_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for item in self._sanitize_items(items):
+            key = self._make_browser_group_key(item)
+            if not key[0]:
+                continue
+            merged_groups.setdefault(key, []).append(item)
+        return [self._merge_browser_group(group_items) for group_items in merged_groups.values()]
     def _merge_browser_group(self, group_items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        ranked_items = sorted(
-            group_items,
-            key=lambda item: (
-                1 if item.get("poster") else 0,
-                safe_int(item.get("reserve_count"), 0),
-                len(self._clean_text(item.get("story"))),
-            ),
-            reverse=True,
-        )
-        primary = copy.deepcopy(ranked_items[0])
-        platform_values = []
-        platform_labels = []
+        ranked_items = sorted(
+            group_items,
+            key=lambda item: (
+                1 if item.get("poster") else 0,
+                safe_int(item.get("reserve_count"), 0),
+                len(self._clean_text(item.get("story"))),
+            ),
+            reverse=True,
+        )
+        primary = copy.deepcopy(ranked_items[0])
+        platform_values = []
+        platform_labels = []
         detail_links = []
         stories = []
         region_codes = set()
@@ -2391,9 +2442,9 @@ class UpcomingReleases(_PluginBase):
         availability_regions = set()
         reserve_count = 0
         for item in group_items:
-            platform = self._clean_text(item.get("platform"))
-            platform_label = self._clean_text(item.get("platform_label"))
-            detail_link = self._clean_text(item.get("detail_link"))
+            platform = self._clean_text(item.get("platform"))
+            platform_label = self._clean_text(item.get("platform_label"))
+            detail_link = self._clean_text(item.get("detail_link"))
             story_text = self._clean_text(item.get("story"))
             if item.get("platform") != "netflix":
                 region_codes.update(self._normalize_source_region_codes(item.get("region_codes")))
@@ -2402,19 +2453,19 @@ class UpcomingReleases(_PluginBase):
             )
             availability_regions.update(self._get_availability_region_codes(item))
             reserve_count = max(reserve_count, safe_int(item.get("reserve_count"), 0))
-            if platform and platform not in platform_values:
-                platform_values.append(platform)
-            if platform_label and platform_label not in platform_labels:
-                platform_labels.append(platform_label)
-            if detail_link and detail_link not in detail_links:
-                detail_links.append(detail_link)
-            if story_text:
-                stories.append(story_text)
-        primary["platform"] = platform_values[0] if platform_values else primary.get("platform")
-        primary["platform_label"] = " / ".join(platform_labels) if platform_labels else primary.get("platform_label")
-        primary["platforms"] = platform_values
-        primary["platform_labels"] = platform_labels
-        primary["detail_link"] = detail_links[0] if detail_links else primary.get("detail_link")
+            if platform and platform not in platform_values:
+                platform_values.append(platform)
+            if platform_label and platform_label not in platform_labels:
+                platform_labels.append(platform_label)
+            if detail_link and detail_link not in detail_links:
+                detail_links.append(detail_link)
+            if story_text:
+                stories.append(story_text)
+        primary["platform"] = platform_values[0] if platform_values else primary.get("platform")
+        primary["platform_label"] = " / ".join(platform_labels) if platform_labels else primary.get("platform_label")
+        primary["platforms"] = platform_values
+        primary["platform_labels"] = platform_labels
+        primary["detail_link"] = detail_links[0] if detail_links else primary.get("detail_link")
         primary["detail_links"] = detail_links
         primary["reserve_count"] = reserve_count
         primary["region_codes"] = sorted(region_codes)
@@ -2431,10 +2482,8 @@ class UpcomingReleases(_PluginBase):
         if stories:
             primary["story"] = max(stories, key=len)
         return primary
-
     def _contains_cjk(self, text: str) -> bool:
         return bool(re.search(r"[\u4e00-\u9fff]", self._clean_text(text)))
-
     def _extract_media_display_title(self, media: MediaInfo, fallback_title: Optional[str] = None) -> str:
         fallback = self._clean_text(fallback_title)
         candidates: List[str] = []
@@ -2455,7 +2504,6 @@ class UpcomingReleases(_PluginBase):
                 text_value = self._clean_text(value)
                 if text_value and text_value not in candidates:
                     candidates.append(text_value)
-
         model_dump = getattr(media, "model_dump", None)
         if callable(model_dump):
             try:
@@ -2469,7 +2517,6 @@ class UpcomingReleases(_PluginBase):
                         text_value = self._clean_text(value)
                         if text_value and text_value not in candidates:
                             candidates.append(text_value)
-
         for candidate in candidates:
             if self._contains_cjk(candidate):
                 return candidate
@@ -2477,14 +2524,12 @@ class UpcomingReleases(_PluginBase):
             if candidate and candidate != fallback:
                 return candidate
         return fallback
-
     def _get_display_title(self, item: Dict[str, Any], recognition: Optional[Dict[str, Any]] = None) -> str:
         recognition = recognition or {}
         display_title = self._clean_text(recognition.get("display_title"))
         if display_title:
             return display_title
         return self._clean_text(item.get("title"))
-
     def _serialize_browser_item(self, item: Dict[str, Any], username: Optional[str] = None) -> Dict[str, Any]:
         story_text = self._clean_text(item.get("story"))
         if len(story_text) > 140:
@@ -2503,17 +2548,17 @@ class UpcomingReleases(_PluginBase):
             "original_title": item.get("title"),
             "year": item.get("year"),
             "poster": item.get("poster"),
-            "detail_link": item.get("detail_link"),
-            "platform": item.get("platform"),
-            "platform_label": item.get("platform_label"),
-            "platforms": item.get("platforms") or ([item.get("platform")] if item.get("platform") else []),
-            "platform_labels": item.get("platform_labels") or ([item.get("platform_label")] if item.get("platform_label") else []),
-            "type_key": item.get("type_key"),
-            "type_label": item.get("type_label"),
-            "time_key": time_key,
-            "time_label": TIME_LABELS.get(time_key) if time_key and time_key != "all" else "",
-            "release_display": self._format_release_display(item),
-            "release_date": item.get("release_date"),
+            "detail_link": item.get("detail_link"),
+            "platform": item.get("platform"),
+            "platform_label": item.get("platform_label"),
+            "platforms": item.get("platforms") or ([item.get("platform")] if item.get("platform") else []),
+            "platform_labels": item.get("platform_labels") or ([item.get("platform_label")] if item.get("platform_label") else []),
+            "type_key": item.get("type_key"),
+            "type_label": item.get("type_label"),
+            "time_key": time_key,
+            "time_label": TIME_LABELS.get(time_key) if time_key and time_key != "all" else "",
+            "release_display": self._format_release_display(item),
+            "release_date": item.get("release_date"),
             "release_text": item.get("release_text"),
             "target_season": safe_int(item.get("target_season"), 0) or None,
             "season_source": item.get("season_source"),
@@ -2523,38 +2568,34 @@ class UpcomingReleases(_PluginBase):
             "production_country_text": self._get_production_country_text(item),
             "availability_region_text": self._get_availability_region_text(item),
             "region_text": self._get_item_region_text(item),
-            "genre_text": self._get_item_genre_text(item),
-            "story": story_text,
-            "reserve_count": safe_int(item.get("reserve_count"), 0),
-            "subscribed": subscription_status != "none",
-            "subscription_status": subscription_status,
-            "subscription_label": "已完成" if subscription_status == "history" else ("已订阅" if subscription_status == "active" else ""),
-        }
-
+            "genre_text": self._get_item_genre_text(item),
+            "story": story_text,
+            "reserve_count": safe_int(item.get("reserve_count"), 0),
+            "subscribed": subscription_status != "none",
+            "subscription_status": subscription_status,
+            "subscription_label": "已完成" if subscription_status == "history" else ("已订阅" if subscription_status == "active" else ""),
+        }
     def page_set_filter(self, field: str, value: str = "all") -> Dict[str, Any]:
         if field == "region":
             field = "production_region"
         if field not in PAGE_FILTER_DEFAULTS:
-            self._set_page_feedback("error", "无效的筛选字段。")
-            return {"success": False, "message": "invalid field"}
-        filters = self._get_page_filters()
-        filters[field] = self._normalize_page_filter_value(field, value)
-        self.save_data("page_filters", filters)
-        self.save_data("page_feedback", None)
-        return {"success": True, "message": "ok"}
-
-    def page_reset_filters(self) -> Dict[str, Any]:
-        self.save_data("page_filters", copy.deepcopy(PAGE_FILTER_DEFAULTS))
-        self.save_data("page_feedback", None)
-        return {"success": True, "message": "ok"}
-
+            self._set_page_feedback("error", "无效的筛选字段。")
+            return {"success": False, "message": "invalid field"}
+        filters = self._get_page_filters()
+        filters[field] = self._normalize_page_filter_value(field, value)
+        self.save_data("page_filters", filters)
+        self.save_data("page_feedback", None)
+        return {"success": True, "message": "ok"}
+    def page_reset_filters(self) -> Dict[str, Any]:
+        self.save_data("page_filters", copy.deepcopy(PAGE_FILTER_DEFAULTS))
+        self.save_data("page_feedback", None)
+        return {"success": True, "message": "ok"}
     def page_refresh(self) -> Dict[str, Any]:
         items = self._get_items(force_refresh=True)
-        self._set_page_feedback("success", f"已同步最新待播数据，共 {len(items)} 条。")
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
+        self._set_page_feedback("success", f"已同步最新待播数据，共 {len(items)} 条。")
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
         return {"success": True, "count": len(items)}
-
     def refresh_cache_daily(self) -> Dict[str, Any]:
         if not self.get_state():
             return {"success": False, "count": 0}
@@ -2576,128 +2617,215 @@ class UpcomingReleases(_PluginBase):
                 f"[UpcomingReleases] daily cache refresh kept previous cache: items={len(items)}"
             )
         return {"success": refreshed, "count": len(items)}
-
-    def run_auto_subscribe_once(self) -> Dict[str, Any]:
-        if not self.get_state():
-            return {"success": False, "message": "插件未启用，无法执行自动订阅规则。"}
-        try:
-            items = self._get_items(force_refresh=True)
-            summary = self._run_auto_subscribe(items)
-            added = summary.get("added") or []
-            existing = summary.get("existing") or []
-            failed = summary.get("failed") or []
-            if self._config.get("auto_subscribe_notify") and (added or existing or failed):
-                self._post_auto_subscribe_summary(summary, manual=True)
-            if getattr(self, "_recognize_dirty", False):
-                self._persist_recognize_cache()
-            return {
-                "success": True,
-                "message": f"执行完成：新增 {len(added)} 条，已存在 {len(existing)} 条，失败 {len(failed)} 条。",
-                "count": len(items),
-                "added_count": len(added),
-                "existing_count": len(existing),
-                "failed_count": len(failed),
-                "summary": summary,
-            }
-        except Exception as err:
-            logger.error(f"[UpcomingReleases] 手动执行自动订阅失败: {err}")
-            return {"success": False, "message": f"执行失败：{err}"}
-
-    def _post_auto_subscribe_summary(self, summary: Dict[str, List[str]], manual: bool = False):
-        added = summary.get("added") or []
-        existing = summary.get("existing") or []
-        failed = summary.get("failed") or []
-        lines = ["待播自动订阅执行结果："]
-        if added:
-            lines.append(f"新增订阅 {len(added)} 条：")
-            for item in added[:10]:
-                lines.append(f"- {item}")
-        if existing:
-            lines.append(f"已存在 {len(existing)} 条：")
-            for item in existing[:10]:
-                lines.append(f"- {item}")
-        if failed:
-            lines.append(f"失败 {len(failed)} 条：")
-            for item in failed[:10]:
-                lines.append(f"- {item}")
-        self.post_message(
-            mtype=NotificationType.Plugin,
-            title="待播自动订阅结果（手动执行）" if manual else "待播自动订阅结果",
-            text="\n".join(lines),
-        )
-
-    def sync_and_push(self):
-        if not self.get_state():
-            return
-        items = self._get_items(force_refresh=True)
-        auto_summary = None
-        if self._config.get("auto_subscribe_enabled"):
-            auto_summary = self._run_auto_subscribe(items)
-
-        if self._config.get("push_enabled"):
-            days = max(1, safe_int(self._config.get("push_days"), 7))
-            limit = max(1, safe_int(self._config.get("push_limit"), 8))
-            push_items = [item for item in items if self._is_within_days(item, days)]
-            for item in self._filter_items(items, time_range="pending"):
-                if len(push_items) >= limit:
-                    break
-                if item not in push_items:
-                    push_items.append(item)
-            push_items = push_items[:limit]
-            if push_items:
-                signature = "|".join(f"{item.get('media_id')}:{item.get('release_date') or item.get('release_text')}" for item in push_items)
-                if signature and signature != self.get_data("last_push_signature"):
-                    lines = [f"未来 {days} 天待播提醒："]
-                    for item in push_items:
-                        lines.append(f"- {item.get('release_text') or '敬请期待'} | {item.get('platform_label')} | {item.get('type_label')} | {item.get('title')}")
-                    self.post_message(
-                        mtype=NotificationType.Plugin,
-                        title="待播影视提醒",
-                        text="\n".join(lines),
-                        image=push_items[0].get("poster"),
-                        link=push_items[0].get("detail_link") or None,
-                    )
-                    self.save_data("last_push_signature", signature)
-            else:
-                logger.info("[UpcomingReleases] 当前没有符合推送条件的待播内容")
-
-        if auto_summary and self._config.get("auto_subscribe_notify") and (auto_summary.get("added") or auto_summary.get("failed") or auto_summary.get("existing")):
-            self._post_auto_subscribe_summary(auto_summary)
-
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-    def stop_service(self):
-        if getattr(self, "_recognize_dirty", False):
-            self._persist_recognize_cache()
-
+    def run_auto_subscribe_once(self) -> Dict[str, Any]:
+        if not self.get_state():
+            return {"success": False, "message": "插件未启用，无法执行自动订阅规则。"}
+        try:
+            items = self._get_items(force_refresh=True)
+            summary = self._run_auto_subscribe(items)
+            added = summary.get("added") or []
+            existing = summary.get("existing") or []
+            failed = summary.get("failed") or []
+            if self._config.get("auto_subscribe_notify") and (added or existing or failed):
+                self._post_auto_subscribe_summary(summary, manual=True)
+            if getattr(self, "_recognize_dirty", False):
+                self._persist_recognize_cache()
+            return {
+                "success": True,
+                "message": f"执行完成：新增 {len(added)} 条，已存在 {len(existing)} 条，失败 {len(failed)} 条。",
+                "count": len(items),
+                "added_count": len(added),
+                "existing_count": len(existing),
+                "failed_count": len(failed),
+                "summary": summary,
+            }
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 手动执行自动订阅失败: {err}")
+            return {"success": False, "message": f"执行失败：{err}"}
+    def _post_auto_subscribe_summary(self, summary: Dict[str, List[str]], manual: bool = False):
+        added = summary.get("added") or []
+        existing = summary.get("existing") or []
+        failed = summary.get("failed") or []
+        lines = ["待播自动订阅执行结果："]
+        if added:
+            lines.append(f"新增订阅 {len(added)} 条：")
+            for item in added[:10]:
+                lines.append(f"- {item}")
+        if existing:
+            lines.append(f"已存在 {len(existing)} 条：")
+            for item in existing[:10]:
+                lines.append(f"- {item}")
+        if failed:
+            lines.append(f"失败 {len(failed)} 条：")
+            for item in failed[:10]:
+                lines.append(f"- {item}")
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title="待播自动订阅结果（手动执行）" if manual else "待播自动订阅结果",
+            text="\n".join(lines),
+        )
+    def sync_and_push(self):
+        if not self.get_state():
+            return
+        items = self._get_items(force_refresh=True)
+        auto_summary = None
+        if self._config.get("auto_subscribe_enabled"):
+            auto_summary = self._run_auto_subscribe(items)
+        if self._config.get("push_enabled"):
+            days = max(1, safe_int(self._config.get("push_days"), 7))
+            limit = max(1, safe_int(self._config.get("push_limit"), 8))
+            push_items = [item for item in items if self._is_within_days(item, days)]
+            for item in self._filter_items(items, time_range="pending"):
+                if len(push_items) >= limit:
+                    break
+                if item not in push_items:
+                    push_items.append(item)
+            push_items = push_items[:limit]
+            if push_items:
+                signature = "|".join(f"{item.get('media_id')}:{item.get('release_date') or item.get('release_text')}" for item in push_items)
+                if signature and signature != self.get_data("last_push_signature"):
+                    lines = [f"未来 {days} 天待播提醒："]
+                    for item in push_items:
+                        lines.append(f"- {item.get('release_text') or '敬请期待'} | {item.get('platform_label')} | {item.get('type_label')} | {item.get('title')}")
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title="待播影视提醒",
+                        text="\n".join(lines),
+                        image=push_items[0].get("poster"),
+                        link=push_items[0].get("detail_link") or None,
+                    )
+                    self.save_data("last_push_signature", signature)
+            else:
+                logger.info("[UpcomingReleases] 当前没有符合推送条件的待播内容")
+        if auto_summary and self._config.get("auto_subscribe_notify") and (auto_summary.get("added") or auto_summary.get("failed") or auto_summary.get("existing")):
+            self._post_auto_subscribe_summary(auto_summary)
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
+    def stop_service(self):
+        if getattr(self, "_recognize_dirty", False):
+            self._persist_recognize_cache()
     def _ensure_runtime_state(self):
-        if not isinstance(getattr(self, "_cache", None), dict):
-            self._cache = {"timestamp": 0, "items": []}
-        if not isinstance(getattr(self, "_recognize_cache", None), dict):
-            self._recognize_cache = {}
+        if not isinstance(getattr(self, "_cache", None), dict):
+            self._cache = {"timestamp": 0, "items": []}
+        if not isinstance(getattr(self, "_recognize_cache", None), dict):
+            self._recognize_cache = {}
         if not hasattr(self, "_recognize_dirty"):
             self._recognize_dirty = False
+        if not isinstance(getattr(self, "_source_health", None), dict):
+            self._source_health = self._load_source_health()
+        if not hasattr(self, "_last_http_error"):
+            self._last_http_error = ""
+
+    def _load_source_health(self) -> Dict[str, Dict[str, Any]]:
+        stored = self.get_data("source_health")
+        if isinstance(stored, dict):
+            return {
+                str(key): dict(value)
+                for key, value in stored.items()
+                if isinstance(value, dict)
+            }
+        return {}
+
+    def _record_source_health(
+        self,
+        platform: str,
+        status: str,
+        items: int = 0,
+        detail: str = "",
+        duration_ms: int = 0,
+    ):
+        if not platform:
+            return
+        self._ensure_runtime_state()
+        self._source_health[platform] = {
+            "status": status,
+            "items": safe_int(items, 0),
+            "detail": self._clean_text(detail),
+            "duration_ms": max(0, safe_int(duration_ms, 0)),
+            "at": int(time.time()),
+        }
+        try:
+            self.save_data("source_health", copy.deepcopy(self._source_health))
+        except Exception as err:
+            logger.warning(f"[UpcomingReleases] 渠道状态写入失败: {err}")
+
+    def _build_source_health_state(self) -> List[Dict[str, Any]]:
+        self._ensure_runtime_state()
+        result = []
+        for platform, label in PLATFORM_LABELS.items():
+            if platform == "all":
+                continue
+            entry = self._source_health.get(platform) or {}
+            status = self._clean_text(entry.get("status")) or "unknown"
+            result.append(
+                {
+                    "value": platform,
+                    "label": label,
+                    "status": status,
+                    "status_label": SOURCE_HEALTH_LABELS.get(status, "未检测"),
+                    "healthy": status == "ok",
+                    "items": safe_int(entry.get("items"), 0),
+                    "detail": self._clean_text(entry.get("detail")),
+                    "duration_ms": safe_int(entry.get("duration_ms"), 0),
+                    "at": self._format_health_time(entry.get("at")),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _format_health_time(value: Any) -> str:
+        timestamp = safe_int(value, 0)
+        if not timestamp:
+            return ""
+        return datetime.fromtimestamp(timestamp).strftime("%m-%d %H:%M")
+    def _apply_cached_metadata(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """把识别缓存里的国家/题材/年份回填到条目，页面与规则无需再触发识别。"""
+        record = self._get_cached_recognition_record(item)
+        if not isinstance(record, dict) or record.get("recognition_failed"):
+            return item
+        codes = set(self._normalize_region_values(record.get("country_codes") or []))
+        if codes:
+            item["production_country_codes"] = sorted(
+                set(self._normalize_source_region_codes(item.get("production_country_codes"))) | codes
+            )
+            if item.get("platform") != "netflix":
+                item["region_codes"] = sorted(
+                    set(self._normalize_source_region_codes(item.get("region_codes"))) | codes
+                )
+        genres = self._normalize_genre_values(record.get("genre_names") or [])
+        if genres and not item.get("genre_names"):
+            item["genre_names"] = sorted(genres)
+        media_year = self._normalize_media_year(record.get("media_year"))
+        if media_year and not item.get("year"):
+            item["year"] = media_year
+            item["year_source"] = "recognition"
+        return item
 
     def _get_cached_items(self) -> List[Dict[str, Any]]:
         self._ensure_runtime_state()
-        return self._sanitize_items(self._cache.get("items") or [])
+        return [self._apply_cached_metadata(item) for item in self._sanitize_items(self._cache.get("items") or [])]
+    def _enrich_production_countries(self, items: List[Dict[str, Any]], max_attempts: int = ENRICH_ATTEMPTS_PER_RUN) -> Dict[str, int]:
+        """把识别结果（制作国家 / 题材 / 年份）批量补齐到条目上。
 
-    def _enrich_production_countries(self, items: List[Dict[str, Any]]) -> Dict[str, int]:
+        先回填已有识别缓存，再对仍缺元数据的条目做有限次识别，避免整轮刷新过于耗时。
+        """
         counters = {
             "known": 0,
             "attempted": 0,
             "country_updated": 0,
             "country_missing": 0,
+            "metadata_updated": 0,
             "failed": 0,
             "failure_cached": 0,
             "missing_cached": 0,
         }
         now_ts = int(time.time())
+        attempt_limit = max(0, safe_int(max_attempts, ENRICH_ATTEMPTS_PER_RUN))
         for item in self._sanitize_items(items):
+            self._apply_cached_metadata(item)
             if self._get_production_country_codes(item):
                 counters["known"] += 1
                 continue
-
             record = self._get_cached_recognition_record(item)
             if isinstance(record, dict):
                 updated = safe_int(record.get("updated"), 0)
@@ -2711,7 +2839,8 @@ class UpcomingReleases(_PluginBase):
                     else:
                         counters["missing_cached"] += 1
                     continue
-
+            if counters["attempted"] >= attempt_limit:
+                continue
             counters["attempted"] += 1
             try:
                 media = self._recognize_item(item)
@@ -2720,50 +2849,89 @@ class UpcomingReleases(_PluginBase):
                     counters["failed"] += 1
                     continue
                 self._cache_recognition(item, media, self._media_to_type_key(media))
+                self._apply_cached_metadata(item)
                 if self._get_production_country_codes(item):
                     counters["country_updated"] += 1
                 else:
                     counters["country_missing"] += 1
+                if item.get("genre_names") or item.get("year"):
+                    counters["metadata_updated"] += 1
             except Exception:
                 self._store_recognition_record(item, self._build_text_fallback_recognition(item))
                 counters["failed"] += 1
-
         logger.info(
-            "[UpcomingReleases] production country enrichment: "
+            "[UpcomingReleases] metadata enrichment: "
             f"known={counters['known']} attempted={counters['attempted']} "
             f"updated={counters['country_updated']} missing={counters['country_missing']} "
+            f"genre_or_year={counters['metadata_updated']} "
             f"failed={counters['failed']} cached_failures={counters['failure_cached']} "
             f"cached_missing={counters['missing_cached']}"
         )
         return counters
-
     def _get_items(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        self._ensure_runtime_state()
-        if not self.get_state():
-            return []
-        ttl_seconds = max(300, safe_int(self._config.get("cache_ttl_minutes"), 180) * 60)
-        now_ts = time.time()
-        if (
-            not force_refresh
+        self._ensure_runtime_state()
+        if not self.get_state():
+            return []
+        ttl_seconds = max(300, safe_int(self._config.get("cache_ttl_minutes"), 180) * 60)
+        now_ts = time.time()
+        if (
+            not force_refresh
             and self._cache.get("items")
             and self._cache.get("netflix_regions_signature") == self._netflix_regions_signature()
-            and now_ts - safe_int(self._cache.get("timestamp"), 0) < ttl_seconds
-        ):
-            return self._sanitize_items(self._cache.get("items") or [])
-        try:
-            items: List[Dict[str, Any]] = []
-            if self._config.get("enable_iqiyi"):
-                items.extend(self._safe_fetch("爱奇艺", self._fetch_iqiyi))
-            if self._config.get("enable_tencent"):
-                items.extend(self._safe_fetch("腾讯视频", self._fetch_tencent))
-            if self._config.get("enable_youku"):
-                items.extend(self._safe_fetch("优酷", self._fetch_youku))
-            if self._config.get("enable_mgtv"):
-                items.extend(self._safe_fetch("芒果TV", self._fetch_mgtv))
+            and now_ts - safe_int(self._cache.get("timestamp"), 0) < ttl_seconds
+        ):
+            return self._sanitize_items(self._cache.get("items") or [])
+        try:
+            items: List[Dict[str, Any]] = []
+            items.extend(
+                self._collect_source_items(
+                    "iqiyi", "爱奇艺", self._fetch_iqiyi, self._config.get("enable_iqiyi")
+                )
+            )
+            items.extend(
+                self._collect_source_items(
+                    "tencent", "腾讯视频", self._fetch_tencent, self._config.get("enable_tencent")
+                )
+            )
+            items.extend(
+                self._collect_source_items(
+                    "youku", "优酷", self._fetch_youku, self._config.get("enable_youku")
+                )
+            )
+            items.extend(
+                self._collect_source_items(
+                    "mgtv", "芒果TV", self._fetch_mgtv, self._config.get("enable_mgtv")
+                )
+            )
+            tmdb_enabled = bool(self._config.get("enable_tmdb"))
+            if tmdb_enabled and not self._read_tmdb_api_key():
+                self._record_source_health("tmdb", "no_key", 0, "未配置 TMDB API Key")
+            else:
+                items.extend(
+                    self._collect_source_items(
+                        "tmdb", "TMDB", self._fetch_tmdb, tmdb_enabled, keep_cache=True
+                    )
+                )
+            items.extend(
+                self._collect_source_items(
+                    "bangumi",
+                    "Bangumi",
+                    self._fetch_bangumi,
+                    self._config.get("enable_bangumi"),
+                    keep_cache=True,
+                )
+            )
             if self._config.get("enable_netflix"):
+                self._last_http_error = ""
+                netflix_started = time.time()
                 netflix_items = self._safe_fetch("Netflix", self._fetch_netflix)
-                if getattr(self, "_netflix_fetch_succeeded", False):
+                netflix_error = self._last_http_error
+                netflix_duration = int((time.time() - netflix_started) * 1000)
+                if getattr(self, "_netflix_fetch_succeeded", False) and netflix_items:
                     items.extend(netflix_items)
+                    self._record_source_health(
+                        "netflix", "ok", len(netflix_items), f"{len(netflix_items)} 条", netflix_duration
+                    )
                 else:
                     cached_netflix = [
                         item
@@ -2775,6 +2943,23 @@ class UpcomingReleases(_PluginBase):
                             f"[UpcomingReleases] Netflix refresh failed; keeping {len(cached_netflix)} cached items"
                         )
                         items.extend(cached_netflix)
+                        self._record_source_health(
+                            "netflix",
+                            "stale",
+                            len(cached_netflix),
+                            f"{netflix_error or '本次未获取到数据'}，沿用缓存 {len(cached_netflix)} 条",
+                            netflix_duration,
+                        )
+                    else:
+                        self._record_source_health(
+                            "netflix",
+                            "failed" if netflix_error else "empty",
+                            0,
+                            netflix_error or "本次未获取到数据（检查代理）",
+                            netflix_duration,
+                        )
+            else:
+                self._record_source_health("netflix", "disabled", 0, "渠道开关已关闭")
             items = self._finalize_items(items)
             if not items and self._cache.get("items"):
                 logger.warning("[UpcomingReleases] refresh returned no items; keeping previous cache")
@@ -2788,40 +2973,91 @@ class UpcomingReleases(_PluginBase):
                 self._enrich_production_countries(items)
             try:
                 self._persist_cache()
-            except Exception as err:
-                logger.error(f"[UpcomingReleases] 缓存写入失败: {err}")
-            if self._recognize_dirty:
-                try:
-                    self._persist_recognize_cache()
-                except Exception as err:
-                    logger.error(f"[UpcomingReleases] 识别缓存写入失败: {err}")
-            return self._sanitize_items(items)
-        except Exception as err:
-            logger.error(f"[UpcomingReleases] 待播数据汇总失败: {err}")
-            return self._sanitize_items(self._cache.get("items") or [])
-
-    def _safe_fetch(self, label: str, fetcher) -> List[Dict[str, Any]]:
-        try:
-            return fetcher() or []
-        except Exception as err:
-            logger.error(f"[UpcomingReleases] 抓取 {label} 失败: {err}")
-            return []
-
-    def _finalize_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        result = []
+            except Exception as err:
+                logger.error(f"[UpcomingReleases] 缓存写入失败: {err}")
+            if self._recognize_dirty:
+                try:
+                    self._persist_recognize_cache()
+                except Exception as err:
+                    logger.error(f"[UpcomingReleases] 识别缓存写入失败: {err}")
+            return self._sanitize_items(items)
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 待播数据汇总失败: {err}")
+            return self._sanitize_items(self._cache.get("items") or [])
+    def _safe_fetch(self, label: str, fetcher) -> List[Dict[str, Any]]:
+        try:
+            return fetcher() or []
+        except Exception as err:
+            logger.error(f"[UpcomingReleases] 抓取 {label} 失败: {err}")
+            return []
+
+    def _collect_source_items(
+        self,
+        platform: str,
+        label: str,
+        fetcher,
+        enabled: Any,
+        keep_cache: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """抓取单个渠道并记录健康状态（成功/无数据/失败/沿用缓存）。"""
+        self._ensure_runtime_state()
+        if not enabled:
+            self._record_source_health(platform, "disabled", 0, "渠道开关已关闭")
+            return []
+        self._last_http_error = ""
+        started = time.time()
+        items: List[Dict[str, Any]] = []
+        error_text = ""
+        try:
+            items = fetcher() or []
+        except Exception as err:
+            error_text = f"{type(err).__name__}: {err}"
+            logger.error(f"[UpcomingReleases] 抓取 {label} 失败: {err}")
+        duration_ms = int((time.time() - started) * 1000)
+        if not error_text and self._last_http_error:
+            error_text = self._last_http_error
+        if items:
+            self._record_source_health(platform, "ok", len(items), f"{len(items)} 条", duration_ms)
+            return items
+        if keep_cache:
+            cached_items = [
+                item
+                for item in self._sanitize_items(self._cache.get("items") or [])
+                if item.get("platform") == platform
+            ]
+            if cached_items:
+                self._record_source_health(
+                    platform,
+                    "stale",
+                    len(cached_items),
+                    f"{error_text or '本次未获取到数据'}，沿用缓存 {len(cached_items)} 条",
+                    duration_ms,
+                )
+                return cached_items
+        self._record_source_health(
+            platform,
+            "failed" if error_text else "empty",
+            0,
+            error_text or "本次未获取到数据",
+            duration_ms,
+        )
+        return []
+    def _finalize_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result = []
         seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-        today = datetime.now().date()
-        for item in items:
-            if not item or not item.get("title"):
-                continue
-            release_date = item.get("release_date")
-            if release_date:
-                try:
-                    release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
-                    if release_dt < today:
-                        continue
-                except ValueError:
-                    pass
+        today = datetime.now().date()
+        for item in items:
+            if not item or not item.get("title"):
+                continue
+            self._apply_cached_metadata(item)
+            release_date = item.get("release_date")
+            if release_date:
+                try:
+                    release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
+                    if release_dt < today:
+                        continue
+                except ValueError:
+                    pass
             if item.get("platform") == "netflix" and item.get("media_id"):
                 dedup_key = ("netflix", item.get("media_id"))
             else:
@@ -2840,18 +3076,17 @@ class UpcomingReleases(_PluginBase):
             if item.get("platform") == "netflix" and item.get("availability_regions"):
                 item["availability_source"] = "netflix_catalog"
             seen[dedup_key] = item
-            item["platform_label"] = PLATFORM_LABELS.get(item.get("platform"), item.get("platform") or "")
-            item["type_label"] = TYPE_LABELS.get(item.get("type_key"), "电视剧")
-            item["time_key"] = self._compute_time_key(item.get("release_date"))
-            result.append(item)
-        result.sort(key=lambda item: (0 if item.get("release_date") else 1, item.get("release_date") or item.get("release_text") or "9999-12-31", item.get("title") or ""))
-        return result
-
-    def _filter_items(
-        self,
-        items: List[Dict[str, Any]],
-        platform: str = "all",
-        mtype: str = "all",
+            item["platform_label"] = PLATFORM_LABELS.get(item.get("platform"), item.get("platform") or "")
+            item["type_label"] = TYPE_LABELS.get(item.get("type_key"), "电视剧")
+            item["time_key"] = self._compute_time_key(item.get("release_date"))
+            result.append(item)
+        result.sort(key=lambda item: (0 if item.get("release_date") else 1, item.get("release_date") or item.get("release_text") or "9999-12-31", item.get("title") or ""))
+        return result
+    def _filter_items(
+        self,
+        items: List[Dict[str, Any]],
+        platform: str = "all",
+        mtype: str = "all",
         time_range: str = "all",
         region: str = "all",
         genre: str = "all",
@@ -2860,13 +3095,13 @@ class UpcomingReleases(_PluginBase):
     ) -> List[Dict[str, Any]]:
         filtered = []
         resolved_production_region = production_region if production_region is not None else region
-        for item in items:
+        for item in items:
             if platform not in {None, "", "all"} and item.get("platform") != platform:
                 continue
             if mtype not in {None, "", "all"} and item.get("type_key") != mtype:
                 continue
-            if not self._match_time_filter(item, time_range):
-                continue
+            if not self._match_time_filter(item, time_range):
+                continue
             if resolved_production_region not in {None, "", "all"} and not self._match_page_regions(
                 item, [resolved_production_region]
             ):
@@ -2877,79 +3112,77 @@ class UpcomingReleases(_PluginBase):
                 continue
             if genre not in {None, "", "all"} and not self._match_page_genres(item, [genre]):
                 continue
-            filtered.append(item)
-        return filtered
-
-    def _match_time_filter(self, item: Dict[str, Any], time_range: str) -> bool:
-        if time_range == "all":
-            return True
-        if time_range == "pending":
-            return not item.get("release_date")
-        release_date = item.get("release_date")
-        if not release_date:
-            return False
-        try:
-            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
-        except ValueError:
-            return False
-        delta = (release_dt - datetime.now().date()).days
-        if time_range == "today":
-            return delta == 0
-        if time_range == "tomorrow":
-            return delta == 1
-        if time_range == "3days":
-            return 0 <= delta <= 3
-        if time_range == "7days":
-            return 0 <= delta <= 7
-        if time_range == "30days":
-            return 0 <= delta <= 30
-        return True
-
-    def _is_within_days(self, item: Dict[str, Any], days: int) -> bool:
-        release_date = item.get("release_date")
-        if not release_date:
-            return False
-        try:
-            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
-        except ValueError:
-            return False
-        delta = (release_dt - datetime.now().date()).days
-        return 0 <= delta <= days
-
-    def _to_media_info(self, item: Dict[str, Any]) -> MediaInfo:
-        media_type = MediaType.MOVIE.value if item.get("type_key") == "movie" else MediaType.TV.value
-        summary = f"{item.get('platform_label')} / {item.get('type_label')}"
-        if item.get("release_text"):
-            summary = f"{summary} / {item.get('release_text')}"
-        overview = item.get("story") or ""
-        overview = f"{summary}\n{overview}" if overview else summary
+            filtered.append(item)
+        return filtered
+    def _match_time_filter(self, item: Dict[str, Any], time_range: str, days: Optional[int] = None) -> bool:
+        if time_range == "all":
+            return True
+        if time_range == "pending":
+            return not item.get("release_date")
+        release_date = item.get("release_date")
+        if not release_date:
+            return False
+        try:
+            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
+        except ValueError:
+            return False
+        delta = (release_dt - datetime.now().date()).days
+        if time_range == "today":
+            return delta == 0
+        if time_range == "tomorrow":
+            return delta == 1
+        if time_range == "3days":
+            return 0 <= delta <= 3
+        if time_range == "7days":
+            return 0 <= delta <= 7
+        if time_range == "30days":
+            return 0 <= delta <= 30
+        if time_range == "custom":
+            return 0 <= delta <= self._normalize_custom_days(days, self._config_default_days())
+        return True
+    def _is_within_days(self, item: Dict[str, Any], days: int) -> bool:
+        release_date = item.get("release_date")
+        if not release_date:
+            return False
+        try:
+            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
+        except ValueError:
+            return False
+        delta = (release_dt - datetime.now().date()).days
+        return 0 <= delta <= days
+    def _to_media_info(self, item: Dict[str, Any]) -> MediaInfo:
+        media_type = MediaType.MOVIE.value if item.get("type_key") == "movie" else MediaType.TV.value
+        summary = f"{item.get('platform_label')} / {item.get('type_label')}"
+        if item.get("release_text"):
+            summary = f"{summary} / {item.get('release_text')}"
+        overview = item.get("story") or ""
+        overview = f"{summary}\n{overview}" if overview else summary
         return MediaInfo(
-            media_source="upcomingreleases",
-            type=media_type,
-            title=item.get("title"),
-            year=item.get("year"),
-            title_year=build_title_year(item.get("title"), item.get("year")),
-            media_id=item.get("media_id"),
-            tmdb_id=None,
-            douban_id=None,
-            bangumi_id=None,
-            release_date=item.get("release_date"),
-            first_air_date=item.get("release_date") if media_type == MediaType.TV.value else None,
-            poster_path=item.get("poster"),
-            backdrop_path=item.get("poster"),
-            overview=overview,
-            category=f"{item.get('platform_label')} / {item.get('type_label')}",
-            detail_link=item.get("detail_link"),
-            tagline=item.get("release_text"),
-            vote_count=safe_int(item.get("reserve_count"), 0),
-        )
-
+            media_source="upcomingreleases",
+            type=media_type,
+            title=item.get("title"),
+            year=item.get("year"),
+            title_year=build_title_year(item.get("title"), item.get("year")),
+            media_id=item.get("media_id"),
+            tmdb_id=None,
+            douban_id=None,
+            bangumi_id=None,
+            release_date=item.get("release_date"),
+            first_air_date=item.get("release_date") if media_type == MediaType.TV.value else None,
+            poster_path=item.get("poster"),
+            backdrop_path=item.get("poster"),
+            overview=overview,
+            category=f"{item.get('platform_label')} / {item.get('type_label')}",
+            detail_link=item.get("detail_link"),
+            tagline=item.get("release_text"),
+            vote_count=safe_int(item.get("reserve_count"), 0),
+        )
     def _get_cached_recognition(
         self,
         item: Dict[str, Any],
         populate: bool = False,
         require_ids: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, Any]:
         lookup_key = self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))
         for key in [item.get("media_id"), lookup_key]:
             record = self._recognize_cache.get(key) if key else None
@@ -2983,49 +3216,45 @@ class UpcomingReleases(_PluginBase):
             if record:
                 return record
         return {}
-
     def _is_failed_recognition_record(self, record: Optional[Dict[str, Any]]) -> bool:
         return bool(record and record.get("recognition_failed"))
-
     def _is_current_recognition_strategy(self, record: Optional[Dict[str, Any]]) -> bool:
         return bool(
             isinstance(record, dict)
             and safe_int(record.get("strategy_version"), 0) >= RECOGNITION_STRATEGY_VERSION
         )
-
     def _get_cached_recognition_record(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         lookup_key = self._make_lookup_key(item.get("title"), item.get("year"), item.get("type_key"))
         for key in [item.get("media_id"), lookup_key]:
             if key and key in self._recognize_cache:
                 return self._recognize_cache.get(key)
         return None
-
-    def _fetch_iqiyi(self) -> List[Dict[str, Any]]:
-        html = self._request_text("https://www.iqiyi.com/newOnlinePCW", headers={"Referer": "https://www.iqiyi.com/"})
-        if not html:
-            return []
-        start_index = html.find("allVideos:[")
-        if start_index < 0:
-            logger.warning("[UpcomingReleases] iqiyi page missing allVideos payload")
-            return []
-        array_start = html.find("[", start_index)
-        payload = self._extract_bracket_array(html, array_start) if array_start >= 0 else None
-        if not payload:
-            logger.warning("[UpcomingReleases] iqiyi allVideos array is incomplete")
-            return []
-        items = []
-        cursor = payload.find("{")
-        while cursor >= 0:
-            obj_text = self._extract_brace_object(payload, cursor)
-            if not obj_text:
-                break
-            title = self._clean_text(self._extract_js_string_field(obj_text, "name"))
-            publish_text = self._clean_text(self._extract_js_string_field(obj_text, "publishText"))
-            page_url = normalize_url(self._extract_js_string_field(obj_text, "pageUrl"))
-            thumbnail = normalize_url(
-                self._extract_js_string_field(obj_text, "thumbnail")
-                or self._extract_js_string_field(obj_text, "imageUrl")
-            )
+    def _fetch_iqiyi(self) -> List[Dict[str, Any]]:
+        html = self._request_text("https://www.iqiyi.com/newOnlinePCW", headers={"Referer": "https://www.iqiyi.com/"})
+        if not html:
+            return []
+        start_index = html.find("allVideos:[")
+        if start_index < 0:
+            logger.warning("[UpcomingReleases] iqiyi page missing allVideos payload")
+            return []
+        array_start = html.find("[", start_index)
+        payload = self._extract_bracket_array(html, array_start) if array_start >= 0 else None
+        if not payload:
+            logger.warning("[UpcomingReleases] iqiyi allVideos array is incomplete")
+            return []
+        items = []
+        cursor = payload.find("{")
+        while cursor >= 0:
+            obj_text = self._extract_brace_object(payload, cursor)
+            if not obj_text:
+                break
+            title = self._clean_text(self._extract_js_string_field(obj_text, "name"))
+            publish_text = self._clean_text(self._extract_js_string_field(obj_text, "publishText"))
+            page_url = normalize_url(self._extract_js_string_field(obj_text, "pageUrl"))
+            thumbnail = normalize_url(
+                self._extract_js_string_field(obj_text, "thumbnail")
+                or self._extract_js_string_field(obj_text, "imageUrl")
+            )
             desc = self._clean_text(self._extract_js_string_field(obj_text, "desc"))
             source_metadata = {
                 key: (
@@ -3046,104 +3275,109 @@ class UpcomingReleases(_PluginBase):
                 }
             )
             if title and publish_text:
-                release_date, parsed_text = self._parse_release_info(publish_text)
-                raw_id = self._search_text(page_url, r"/([^/]+)\.html") or title
+                release_date, parsed_text = self._parse_release_info(publish_text)
+                raw_id = self._search_text(page_url, r"/([^/]+)\.html") or title
                 year, year_source = self._extract_source_year(source_metadata)
                 if not year:
                     year = self._guess_year(title, release_date, publish_text)
                     year_source = "title_or_labeled_text" if year else ""
-                type_key = self._extract_iqiyi_type_key(obj_text) or self._infer_type_key(
-                    title=title,
-                    year=year,
-                    story=desc,
-                    release_text=publish_text,
-                    cache_key=raw_id,
-                    prefer_cached=False,
-                )
-                items.append(
-                    self._build_item(
-                        platform="iqiyi",
-                        raw_id=raw_id,
-                        title=title,
-                        type_key=type_key,
-                        release_date=release_date,
-                        release_text=parsed_text,
-                        poster=thumbnail,
-                        detail_link=page_url,
+                type_key = self._extract_iqiyi_type_key(obj_text) or self._infer_type_key(
+                    title=title,
+                    year=year,
+                    story=desc,
+                    release_text=publish_text,
+                    cache_key=raw_id,
+                    prefer_cached=False,
+                )
+                items.append(
+                    self._build_item(
+                        platform="iqiyi",
+                        raw_id=raw_id,
+                        title=title,
+                        type_key=type_key,
+                        release_date=release_date,
+                        release_text=parsed_text,
+                        poster=thumbnail,
+                        detail_link=page_url,
                         story=desc,
                         year=year,
                         year_source=year_source,
                         alternate_titles=self._extract_source_alternate_titles(source_metadata, title),
                         region_codes=region_codes,
                     )
-                )
-            cursor = payload.find("{", cursor + len(obj_text))
-        logger.info(f"[UpcomingReleases] iqiyi fetched {len(items)} items")
-        return items
-
-    def _extract_iqiyi_type_key(self, obj_text: str) -> str:
-        for pattern in [
-            r"\bchannelId\s*:\s*(\d+)",
-            r"\bchannelID\s*:\s*(\d+)",
-            r"\bchannelType\s*:\s*(\d+)",
-            r"\balbumType\s*:\s*(\d+)",
-            r"\bvideoType\s*:\s*(\d+)",
-        ]:
-            channel_value = self._search_text(obj_text, pattern)
-            if channel_value in IQIYI_TYPE_MAP:
-                return IQIYI_TYPE_MAP[channel_value]
-        return ""
-
-    def _fetch_tencent(self) -> List[Dict[str, Any]]:
-        url = (
-            "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData"
-            "?video_appid=1000005&vplatform=2&vversion_name=8.9.10&new_mark_label_enabled=1"
-        )
-        items = []
-        seen_ids = set()
-        for channel in TENCENT_CHANNELS.values():
-            payload = {
-                "page_params": {
-                    "channel_id": channel["channel_id"],
-                    "page_type": "channel_operation",
-                    "page_id": "channel_list_second_page",
-                    "filter_params": f"iyear={channel['upcoming_value']}",
-                }
-            }
-            response = self._request_json(
-                url,
-                method="POST",
-                json_body=payload,
-                headers={"Referer": "https://v.qq.com/", "Content-Type": "application/json"},
-            )
-            module_list = response.get("data", {}).get("module_list_datas") or []
-            for module in module_list:
-                for module_data in module.get("module_datas") or []:
-                    entries = module_data.get("item_data_lists", {}).get("item_datas", [])
-                    for entry in entries:
-                        if str(entry.get("item_type")) != "2":
-                            continue
-                        params = entry.get("item_params") or {}
-                        title = self._clean_text(params.get("title"))
-                        cid = str(params.get("cid") or "").strip()
-                        dedup_key = (channel["type_key"], cid)
-                        if not title or not cid or dedup_key in seen_ids:
-                            continue
-                        seen_ids.add(dedup_key)
+                )
+            cursor = payload.find("{", cursor + len(obj_text))
+        logger.info(f"[UpcomingReleases] iqiyi fetched {len(items)} items")
+        return items
+    def _extract_iqiyi_type_key(self, obj_text: str) -> str:
+        for pattern in [
+            r"\bchannelId\s*:\s*(\d+)",
+            r"\bchannelID\s*:\s*(\d+)",
+            r"\bchannelType\s*:\s*(\d+)",
+            r"\balbumType\s*:\s*(\d+)",
+            r"\bvideoType\s*:\s*(\d+)",
+        ]:
+            channel_value = self._search_text(obj_text, pattern)
+            if channel_value in IQIYI_TYPE_MAP:
+                return IQIYI_TYPE_MAP[channel_value]
+        return ""
+    def _fetch_tencent(self) -> List[Dict[str, Any]]:
+        url = (
+            "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData"
+            "?video_appid=1000005&vplatform=2&vversion_name=8.9.10&new_mark_label_enabled=1"
+        )
+        items = []
+        seen_ids = set()
+        channels = list(TENCENT_CHANNELS.values())
+        if (self._config or {}).get("tencent_extra_channels"):
+            current_year = str(datetime.now().year)
+            channels.extend(
+                {**extra_channel, "upcoming_value": current_year}
+                for extra_channel in TENCENT_EXTRA_CHANNELS.values()
+            )
+        for channel in channels:
+            payload = {
+                "page_params": {
+                    "channel_id": channel["channel_id"],
+                    "page_type": "channel_operation",
+                    "page_id": "channel_list_second_page",
+                    "filter_params": f"iyear={channel['upcoming_value']}",
+                }
+            }
+            response = self._request_json(
+                url,
+                method="POST",
+                json_body=payload,
+                headers={"Referer": "https://v.qq.com/", "Content-Type": "application/json"},
+            )
+            module_list = response.get("data", {}).get("module_list_datas") or []
+            for module in module_list:
+                for module_data in module.get("module_datas") or []:
+                    entries = module_data.get("item_data_lists", {}).get("item_datas", [])
+                    for entry in entries:
+                        if str(entry.get("item_type")) != "2":
+                            continue
+                        params = entry.get("item_params") or {}
+                        title = self._clean_text(params.get("title"))
+                        cid = str(params.get("cid") or "").strip()
+                        dedup_key = (channel["type_key"], cid)
+                        if not title or not cid or dedup_key in seen_ids:
+                            continue
+                        seen_ids.add(dedup_key)
                         release_hint = params.get("publish_date") or params.get("second_title") or params.get("sub_title") or ""
                         release_date, parsed_text = self._parse_release_info(release_hint)
                         reserve_text = self._clean_text(" / ".join(filter(None, [params.get("third_title"), params.get("chnlist_search_label")])))
                         year, year_source = self._extract_source_year([params, entry])
                         items.append(
-                            self._build_item(
-                                platform="tencent",
-                                raw_id=cid,
-                                title=title,
-                                type_key=channel["type_key"],
-                                release_date=release_date,
-                                release_text=parsed_text,
-                                poster=normalize_url(params.get("new_pic_vt") or params.get("new_pic_hz") or params.get("pic_url") or params.get("image_url")),
-                                detail_link=normalize_url(params.get("href") or f"https://v.qq.com/x/cover/{cid}.html"),
+                            self._build_item(
+                                platform="tencent",
+                                raw_id=cid,
+                                title=title,
+                                type_key=channel["type_key"],
+                                release_date=release_date,
+                                release_text=parsed_text,
+                                poster=normalize_url(params.get("new_pic_vt") or params.get("new_pic_hz") or params.get("pic_url") or params.get("image_url")),
+                                detail_link=normalize_url(params.get("href") or f"https://v.qq.com/x/cover/{cid}.html"),
                                 story=self._clean_text(params.get("second_title") or params.get("sub_title") or reserve_text),
                                 year=year,
                                 year_source=year_source,
@@ -3151,53 +3385,52 @@ class UpcomingReleases(_PluginBase):
                                 reserve_count=parse_reserve_count(reserve_text),
                                 region_codes=self._extract_source_region_codes([params, entry]),
                             )
-                        )
-        logger.info(f"[UpcomingReleases] 腾讯视频待播抓取完成，共 {len(items)} 条")
-        return items
-
-    def _fetch_youku(self) -> List[Dict[str, Any]]:
-        html = self._request_text("https://www.youku.com/ku/new")
-        if not html:
-            return []
-        payload_text = extract_balanced_object(html, "__INITIAL_DATA__")
-        if not payload_text:
-            return []
-        try:
-            data = json.loads(js_object_to_json(payload_text))
-        except json.JSONDecodeError as err:
-            logger.error(f"[UpcomingReleases] 优酷 JSON 解析失败: {err}")
-            return []
-        module_list = self._deep_find_first(data, "moduleList") or []
-        items = []
-        for module in module_list:
-            components = module.get("components") or []
-            for component in components:
-                section_title = self._clean_text(
-                    component.get("title")
-                    or component.get("moduleTitle")
-                    or component.get("header", {}).get("title")
-                )
-                if "即将上线" not in section_title:
-                    continue
-                type_name = re.split(r"[-|｜]", section_title)[0].strip()
-                type_key = YOUKU_SECTION_MAP.get(type_name, "tv")
-                candidates: List[Dict[str, Any]] = []
-                self._collect_matching_dicts(
-                    component,
-                    lambda node: bool(node.get("title")) and bool(node.get("reserve") or node.get("subtitle") or node.get("img") or node.get("desc")),
-                    candidates,
-                )
-                seen = set()
-                for entry in candidates:
-                    title = self._clean_text(entry.get("title"))
-                    reserve = entry.get("reserve") or {}
-                    raw_id = str(reserve.get("id") or entry.get("id") or "").strip()
-                    subtitle = self._clean_text(entry.get("subtitle"))
-                    desc = self._clean_text(entry.get("desc") or reserve.get("desc"))
-                    dedup_key = (title, raw_id or subtitle)
-                    if not title or dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
+                        )
+        logger.info(f"[UpcomingReleases] 腾讯视频待播抓取完成，共 {len(items)} 条")
+        return items
+    def _fetch_youku(self) -> List[Dict[str, Any]]:
+        html = self._request_text("https://www.youku.com/ku/new")
+        if not html:
+            return []
+        payload_text = extract_balanced_object(html, "__INITIAL_DATA__")
+        if not payload_text:
+            return []
+        try:
+            data = json.loads(js_object_to_json(payload_text))
+        except json.JSONDecodeError as err:
+            logger.error(f"[UpcomingReleases] 优酷 JSON 解析失败: {err}")
+            return []
+        module_list = self._deep_find_first(data, "moduleList") or []
+        items = []
+        for module in module_list:
+            components = module.get("components") or []
+            for component in components:
+                section_title = self._clean_text(
+                    component.get("title")
+                    or component.get("moduleTitle")
+                    or component.get("header", {}).get("title")
+                )
+                if "即将上线" not in section_title:
+                    continue
+                type_name = re.split(r"[-|｜]", section_title)[0].strip()
+                type_key = YOUKU_SECTION_MAP.get(type_name, "tv")
+                candidates: List[Dict[str, Any]] = []
+                self._collect_matching_dicts(
+                    component,
+                    lambda node: bool(node.get("title")) and bool(node.get("reserve") or node.get("subtitle") or node.get("img") or node.get("desc")),
+                    candidates,
+                )
+                seen = set()
+                for entry in candidates:
+                    title = self._clean_text(entry.get("title"))
+                    reserve = entry.get("reserve") or {}
+                    raw_id = str(reserve.get("id") or entry.get("id") or "").strip()
+                    subtitle = self._clean_text(entry.get("subtitle"))
+                    desc = self._clean_text(entry.get("desc") or reserve.get("desc"))
+                    dedup_key = (title, raw_id or subtitle)
+                    if not title or dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
                     release_date, parsed_text = self._parse_release_info(subtitle or desc)
                     detail_link = f"https://v.youku.com/video?s={raw_id}" if raw_id else ""
                     poster = normalize_url(entry.get("img") or entry.get("poster") or entry.get("cover"))
@@ -3206,86 +3439,89 @@ class UpcomingReleases(_PluginBase):
                         year = self._guess_year(title, release_date, subtitle or desc)
                         year_source = "title_or_labeled_text" if year else ""
                     items.append(
-                        self._build_item(
-                            platform="youku",
-                            raw_id=raw_id or title,
-                            title=title,
-                            type_key=type_key,
-                            release_date=release_date,
-                            release_text=parsed_text,
-                            poster=poster,
-                            detail_link=detail_link,
-                            story=desc,
+                        self._build_item(
+                            platform="youku",
+                            raw_id=raw_id or title,
+                            title=title,
+                            type_key=type_key,
+                            release_date=release_date,
+                            release_text=parsed_text,
+                            poster=poster,
+                            detail_link=detail_link,
+                            story=desc,
                             year=year,
                             year_source=year_source,
                             alternate_titles=self._extract_source_alternate_titles([entry, reserve], title),
                             reserve_count=parse_reserve_count(str(reserve.get("count") or reserve.get("desc") or "")),
                             region_codes=self._extract_source_region_codes([entry, reserve]),
                         )
-                    )
-        logger.info(f"[UpcomingReleases] 优酷抓取到 {len(items)} 条")
-        return items
-
-    def _fetch_mgtv(self) -> List[Dict[str, Any]]:
-        response = self._request_json(
-            "https://playbill.api.mgtv.com/yy/module?pbId=9",
-            headers={"Referer": "https://www.mgtv.com/"},
-        )
-        candidates: List[Dict[str, Any]] = []
-        self._collect_matching_dicts(
-            response,
-            lambda node: bool(node.get("title")) and bool(node.get("aid") or node.get("url") or node.get("onlineTime") or node.get("beginTime")),
-            candidates,
-        )
-        items = []
-        seen = set()
-        for entry in candidates:
-            title = self._clean_text(entry.get("title"))
-            raw_id = str(entry.get("aid") or entry.get("id") or "").strip()
-            dedup_key = raw_id or title
-            if not title or dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-            begin_time = self._clean_text(entry.get("beginTime"))
-            online_time = self._clean_text(entry.get("onlineTime"))
-            release_hint = begin_time or online_time
-            release_date, parsed_text = self._parse_release_info(release_hint or f"{begin_time} {online_time}".strip())
-            poster = normalize_url(entry.get("imgVer") or entry.get("img"))
-            detail_link = normalize_url(entry.get("url"))
-            if detail_link.startswith("/"):
-                detail_link = f"https://www.mgtv.com{detail_link}"
-            story = self._clean_text(entry.get("stroy") or entry.get("story"))
+                    )
+        logger.info(f"[UpcomingReleases] 优酷抓取到 {len(items)} 条")
+        return items
+    def _fetch_mgtv(self) -> List[Dict[str, Any]]:
+        pb_ids = ["9"]
+        if (self._config or {}).get("mgtv_extra_modules", True):
+            pb_ids.extend(["10", "3", "12"])
+        candidates: List[Dict[str, Any]] = []
+        for pb_id in pb_ids:
+            response = self._request_json(
+                f"https://playbill.api.mgtv.com/yy/module?pbId={pb_id}",
+                headers={"Referer": "https://www.mgtv.com/"},
+                log_context=f"mgtv pbId={pb_id}",
+            )
+            self._collect_matching_dicts(
+                response,
+                lambda node: bool(node.get("title")) and bool(node.get("aid") or node.get("url") or node.get("onlineTime") or node.get("beginTime")),
+                candidates,
+            )
+        items = []
+        seen = set()
+        for entry in candidates:
+            title = self._clean_text(entry.get("title"))
+            raw_id = str(entry.get("aid") or entry.get("id") or "").strip()
+            dedup_key = raw_id or title
+            if not title or dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            begin_time = self._clean_text(entry.get("beginTime"))
+            online_time = self._clean_text(entry.get("onlineTime"))
+            release_hint = begin_time or online_time
+            release_date, parsed_text = self._parse_release_info(release_hint or f"{begin_time} {online_time}".strip())
+            poster = normalize_url(entry.get("imgVer") or entry.get("img"))
+            detail_link = normalize_url(entry.get("url"))
+            if detail_link.startswith("/"):
+                detail_link = f"https://www.mgtv.com{detail_link}"
+            story = self._clean_text(entry.get("stroy") or entry.get("story"))
             year, year_source = self._extract_source_year(entry)
             if not year:
                 year = self._guess_year(title, release_date, release_hint)
                 year_source = "title_or_labeled_text" if year else ""
-            type_key = self._infer_type_key(
-                title=title,
-                year=year,
-                story=story,
-                release_text=release_hint,
-                cache_key=raw_id or self._make_lookup_key(title, year),
-            )
-            items.append(
-                self._build_item(
-                    platform="mgtv",
-                    raw_id=raw_id or title,
-                    title=title,
-                    type_key=type_key,
-                    release_date=release_date,
-                    release_text=parsed_text,
-                    poster=poster,
-                    detail_link=detail_link,
+            type_key = self._infer_type_key(
+                title=title,
+                year=year,
+                story=story,
+                release_text=release_hint,
+                cache_key=raw_id or self._make_lookup_key(title, year),
+            )
+            items.append(
+                self._build_item(
+                    platform="mgtv",
+                    raw_id=raw_id or title,
+                    title=title,
+                    type_key=type_key,
+                    release_date=release_date,
+                    release_text=parsed_text,
+                    poster=poster,
+                    detail_link=detail_link,
                     story=story,
                     year=year,
                     year_source=year_source,
                     alternate_titles=self._extract_source_alternate_titles(entry, title),
                     region_codes=self._extract_source_region_codes(entry),
                 )
-            )
+            )
         logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
         return items
-
     def _fetch_netflix(self) -> List[Dict[str, Any]]:
         today = datetime.now().date()
         merged_items: Dict[str, Dict[str, Any]] = {}
@@ -3316,7 +3552,6 @@ class UpcomingReleases(_PluginBase):
                         break
                     page += 1
                     continue
-
                 self._netflix_fetch_succeeded = True
                 total_pages = max(page, safe_int(response.get("totalPages"), page))
                 entries = response.get("data") or []
@@ -3337,7 +3572,6 @@ class UpcomingReleases(_PluginBase):
                     if release_dt < today:
                         continue
                     seen_region_ids.add(raw_id)
-
                     existing = merged_items.get(raw_id)
                     if existing:
                         existing["availability_regions"] = sorted(
@@ -3347,7 +3581,6 @@ class UpcomingReleases(_PluginBase):
                         )
                         overlap_count += 1
                         continue
-
                     type_key = self._resolve_netflix_type_key(entry, title, subtitle)
                     story = subtitle if subtitle and subtitle.lower() != title.lower() else ""
                     year, year_source = self._extract_source_year(entry)
@@ -3378,7 +3611,6 @@ class UpcomingReleases(_PluginBase):
                 f"[UpcomingReleases] Netflix region {region_code} returned={returned_count} "
                 f"unique={len(seen_region_ids)} overlap={overlap_count}"
             )
-
         items = list(merged_items.values())
         region_count_distribution: Dict[int, int] = {}
         for item in items:
@@ -3393,7 +3625,6 @@ class UpcomingReleases(_PluginBase):
             f"availability_count_distribution={distribution_text}"
         )
         return items
-
     def _request_netflix_page(
         self,
         region: str,
@@ -3412,7 +3643,6 @@ class UpcomingReleases(_PluginBase):
             proxy_url=proxy_url,
             log_context=f"Netflix region {region.upper()} page {page}",
         )
-
     def _resolve_netflix_type_key(self, entry: Dict[str, Any], title: str, subtitle: str = "") -> str:
         direct_type_map = {
             "movie": "movie", "film": "movie", "feature": "movie",
@@ -3427,15 +3657,12 @@ class UpcomingReleases(_PluginBase):
             value = self._clean_text(entry.get(field)).lower()
             if value in direct_type_map:
                 return direct_type_map[value]
-
         collection_id = safe_int(entry.get("collection"), 0)
         if collection_id in NETFLIX_COLLECTION_TYPE_MAP:
             return NETFLIX_COLLECTION_TYPE_MAP[collection_id]
-
         genre_id = safe_int(entry.get("genre"), 0)
         if genre_id in NETFLIX_GENRE_TYPE_MAP:
             return NETFLIX_GENRE_TYPE_MAP[genre_id]
-
         text_value = " ".join(filter(None, [title, subtitle])).lower()
         if any(keyword in text_value for keyword in ["podcast", "special presentation", "特别节目", "播客"]):
             return "other"
@@ -3451,13 +3678,11 @@ class UpcomingReleases(_PluginBase):
             if any(marker in text_value for marker in markers):
                 return type_key
         return "other"
-
     def _resolve_netflix_genre_names(self, entry: Dict[str, Any], type_key: str) -> List[str]:
         labels: List[str] = []
         genre_label = NETFLIX_GENRE_NAME_MAP.get(safe_int(entry.get("genre"), 0))
         if genre_label:
             labels.append(genre_label)
-
         type_fallback = {
             "anime": "动画",
             "documentary": "纪录片",
@@ -3467,17 +3692,16 @@ class UpcomingReleases(_PluginBase):
         if type_fallback and type_fallback not in labels:
             labels.append(type_fallback)
         return labels
-
     def _build_item(
         self,
         platform: str,
         raw_id: str,
-        title: str,
-        type_key: str,
-        release_date: Optional[str],
-        release_text: Optional[str],
-        poster: str,
-        detail_link: str = "",
+        title: str,
+        type_key: str,
+        release_date: Optional[str],
+        release_text: Optional[str],
+        poster: str,
+        detail_link: str = "",
         story: str = "",
         year: Optional[str] = None,
         year_source: Optional[str] = None,
@@ -3485,8 +3709,8 @@ class UpcomingReleases(_PluginBase):
         reserve_count: int = 0,
         region_codes: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        if type_key not in TYPE_LABELS:
-            type_key = "tv"
+        if type_key not in TYPE_LABELS:
+            type_key = "tv"
         normalized_year = self._normalize_media_year(year)
         normalized_year_source = self._clean_text(year_source).lower()
         if not normalized_year:
@@ -3495,36 +3719,46 @@ class UpcomingReleases(_PluginBase):
         normalized_alternate_titles = self._normalize_alternate_titles(
             alternate_titles, primary_title=title
         )
+        # 未定档条目：上映时间列固定显示“敬请期待”，原始文案（多为宣传语）移入简介，
+        # 避免把“余年不尽共赴一梦”这类宣传语当成上映时间展示。
+        cleaned_release_text = self._clean_text(release_text)
+        cleaned_story = self._clean_text(story)
+        if not release_date and cleaned_release_text and cleaned_release_text != "敬请期待":
+            if not cleaned_story:
+                cleaned_story = cleaned_release_text
+            cleaned_release_text = ""
+        release_text_value = cleaned_release_text or "敬请期待"
+        date_confidence = "exact" if release_date else "unknown"
         season_item = {
             "type_key": type_key,
             "title": self._clean_text(title),
-            "release_text": self._clean_text(release_text) or "敬请期待",
-            "story": self._clean_text(story),
+            "release_text": release_text_value,
+            "story": cleaned_story,
         }
         target_season, season_source = self._extract_item_target_season(season_item)
         normalized_region_codes = self._normalize_source_region_codes(region_codes)
         return {
-            "platform": platform,
-            "platform_label": PLATFORM_LABELS.get(platform, platform),
-            "type_key": type_key,
-            "type_label": TYPE_LABELS.get(type_key, "电视剧"),
-            "title": self._clean_text(title),
+            "platform": platform,
+            "platform_label": PLATFORM_LABELS.get(platform, platform),
+            "type_key": type_key,
+            "type_label": TYPE_LABELS.get(type_key, "电视剧"),
+            "title": self._clean_text(title),
             "year": normalized_year,
             "year_source": normalized_year_source,
             "alternate_titles": normalized_alternate_titles,
-            "release_date": release_date,
-            "release_text": self._clean_text(release_text) or "敬请期待",
-            "poster": poster,
-            "detail_link": detail_link,
-            "story": self._clean_text(story),
+            "release_date": release_date,
+            "release_text": release_text_value,
+            "date_confidence": date_confidence,
+            "poster": poster,
+            "detail_link": detail_link,
+            "story": cleaned_story,
             "reserve_count": safe_int(reserve_count, 0),
-            "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text or ""),
+            "media_id": self._make_media_id(platform, raw_id, title, release_date or release_text_value),
             "region_codes": normalized_region_codes,
             "production_country_codes": normalized_region_codes if platform != "netflix" else [],
             "target_season": target_season,
             "season_source": season_source,
-        }
-
+        }
     def _resolve_media_dict(self, item: Dict[str, Any], target_media_source: str) -> Dict[str, Any]:
         record = self._get_cached_recognition_record(item)
         if record:
@@ -3537,14 +3771,13 @@ class UpcomingReleases(_PluginBase):
         media = self._recognize_item(item)
         if not media:
             return {}
-        resolved_type = self._media_to_type_key(media)
-        self._cache_recognition(item, media, resolved_type)
-        if target_media_source == "themoviedb" and media.tmdb_id:
-            return {"id": media.tmdb_id}
-        if target_media_source == "douban" and media.douban_id:
-            return {"id": media.douban_id}
-        return {}
-
+        resolved_type = self._media_to_type_key(media)
+        self._cache_recognition(item, media, resolved_type)
+        if target_media_source == "themoviedb" and media.tmdb_id:
+            return {"id": media.tmdb_id}
+        if target_media_source == "douban" and media.douban_id:
+            return {"id": media.douban_id}
+        return {}
     def _recognize_item(self, item: Dict[str, Any]) -> Optional[MediaInfo]:
         titles = self._build_recognition_title_candidates(item)
         if not titles:
@@ -3565,7 +3798,6 @@ class UpcomingReleases(_PluginBase):
             if candidate in candidate_types:
                 continue
             candidate_types.append(candidate)
-
         year = self._normalize_media_year(item.get("year"))
         year_source = self._clean_text(item.get("year_source")).lower()
         title_year = self._normalize_media_year(primary_title)
@@ -3586,7 +3818,6 @@ class UpcomingReleases(_PluginBase):
         for candidate_type in candidate_types[1:]:
             for candidate_title in titles:
                 attempts.append((candidate_title, None, candidate_type))
-
         last_error = None
         attempted = set()
         attempt_count = 0
@@ -3621,7 +3852,6 @@ class UpcomingReleases(_PluginBase):
                 f"error={type(last_error).__name__}"
             )
         return None
-
     def _cache_recognition(self, item: Dict[str, Any], media: MediaInfo, type_key: Optional[str] = None):
         if not media:
             return
@@ -3644,12 +3874,13 @@ class UpcomingReleases(_PluginBase):
             "source_season": source_season,
             "target_season": target_season,
             "season_source": season_source,
+            "media_year": self._normalize_media_year(getattr(media, "year", None)) or "",
             "title": item.get("title"),
             "display_title": display_title or item.get("title"),
             "year": item.get("year"),
             "country_codes": country_codes,
             "country_names": [self._region_label(code) for code in country_codes],
-            "genre_names": sorted(self._extract_genre_names(media, item)),
+            "genre_names": sorted(self._extract_genre_names(media, item)),
             "updated": int(time.time()),
         }
         if country_codes:
@@ -3662,23 +3893,53 @@ class UpcomingReleases(_PluginBase):
                 item["region_codes"] = sorted(
                     self._normalize_source_region_codes([item.get("region_codes"), country_codes])
                 )
-        keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), resolved_type_key)]
-        changed = False
-        for key in keys:
-            if not key:
-                continue
-            if self._recognize_cache.get(key) != record:
-                self._recognize_cache[key] = record
-                changed = True
-        if changed:
-            self._recognize_dirty = True
-
+        keys = [item.get("media_id"), self._make_lookup_key(item.get("title"), item.get("year"), resolved_type_key)]
+        changed = False
+        for key in keys:
+            if not key:
+                continue
+            if self._recognize_cache.get(key) != record:
+                self._recognize_cache[key] = record
+                changed = True
+        if changed:
+            self._recognize_dirty = True
+    def _build_source_recognition(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """数据源自带 TMDB/Bangumi ID 时直接构造识别记录，省掉一次媒体识别。"""
+        tmdb_id = safe_int(item.get("tmdb_id"), 0)
+        bangumi_id = safe_int(item.get("bangumi_id"), 0)
+        if not tmdb_id and not bangumi_id:
+            return None
+        return {
+            "recognition_failed": False,
+            "strategy_version": RECOGNITION_STRATEGY_VERSION,
+            "type_key": item.get("type_key") or "tv",
+            "tmdb_id": tmdb_id or None,
+            "douban_id": None,
+            "bangumi_id": bangumi_id or None,
+            "season": None,
+            "source_season": None,
+            "target_season": safe_int(item.get("target_season"), 0) or None,
+            "season_source": "item",
+            "title": item.get("title"),
+            "display_title": item.get("title"),
+            "year": item.get("year"),
+            "media_year": self._normalize_media_year(item.get("year")) or "",
+            "country_codes": sorted(self._normalize_region_values(item.get("production_country_codes") or [])),
+            "country_names": [],
+            "genre_names": sorted(self._normalize_genre_values(item.get("genre_names") or [])),
+            "updated": int(time.time()),
+        }
+
     def _get_subscription_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
         record = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
         if record and not record.get("recognition_failed") and any(
             record.get(key) for key in ("tmdb_id", "douban_id", "bangumi_id")
         ):
             return record
+        source_record = self._build_source_recognition(item)
+        if source_record:
+            self._store_recognition_record(item, source_record)
+            return source_record
         media = self._recognize_item(item)
         if media:
             self._cache_recognition(item, media, self._media_to_type_key(media))
@@ -3686,15 +3947,16 @@ class UpcomingReleases(_PluginBase):
         fallback = self._build_text_fallback_recognition(item)
         self._store_recognition_record(item, fallback)
         return fallback
-
     def _run_auto_subscribe(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
         rules = self._load_auto_subscribe_rules()
         summary = {"added": [], "existing": [], "failed": [], "diagnostics": []}
-        if not rules:
-            return summary
-        subscribe_chain = SubscribeChain()
+        if not rules:
+            return summary
+        subscribe_chain = SubscribeChain()
         default_username = self._get_default_subscribe_username()
         processed = set()
+        creation_limit = max(1, safe_int(self._config.get("auto_subscribe_max_per_run"), 20))
+        creation_attempts = 0
         for rule in rules:
             counters = {
                 "platform_filtered": 0,
@@ -3719,10 +3981,13 @@ class UpcomingReleases(_PluginBase):
                 elif reason in counters:
                     counters[reason] += 1
             logger.info(f"[UpcomingReleases] auto-subscribe rule {rule.get('name')} matched {len(matched_items)} items")
-            for item in matched_items:
-                process_key = self._make_browser_group_key(item)
-                if process_key in processed:
-                    continue
+            for item in sorted(
+                matched_items,
+                key=lambda value: (value.get("release_date") or "9999-12-31", value.get("title") or ""),
+            ):
+                process_key = self._make_browser_group_key(item)
+                if process_key in processed:
+                    continue
                 processed.add(process_key)
                 try:
                     recognition = self._get_subscription_recognition(item)
@@ -3736,10 +4001,10 @@ class UpcomingReleases(_PluginBase):
                         )
                         continue
                     subscription_status = self._get_item_subscription_status(
-                        item,
-                        username=default_username,
-                        recognition=recognition,
-                    )
+                        item,
+                        username=default_username,
+                        recognition=recognition,
+                    )
                     if subscription_status == "active":
                         summary["existing"].append(detail)
                         counters["existing"] += 1
@@ -3748,7 +4013,13 @@ class UpcomingReleases(_PluginBase):
                         summary["existing"].append(f"{detail} [已在订阅历史]")
                         counters["existing"] += 1
                         continue
-
+                    if creation_attempts >= creation_limit:
+                        counters["failed"] += 1
+                        summary["failed"].append(
+                            f"{detail} - 已达单次运行订阅上限 {creation_limit} 条，剩余候选将在下次运行处理"
+                        )
+                        continue
+                    creation_attempts += 1
                     resolved_mtype = self._type_key_to_media_type(recognition.get("type_key")) or self._type_key_to_media_type(item.get("type_key")) or MediaType.TV
                     resolved_season = self._resolve_item_subscribe_season(item, recognition)
                     detail = f"[{rule.get('name')}] {self._format_subscribe_result_detail(item, target_season=resolved_season)}"
@@ -3763,8 +4034,8 @@ class UpcomingReleases(_PluginBase):
                         exist_ok=True,
                         username=default_username,
                     )
-                    logger.info(f"[UpcomingReleases] auto subscribe result: rule={rule.get('name')} title={item.get('title')} sid={sid} message={message or ''}")
-                    if sid and not self._is_exists_message(message):
+                    logger.info(f"[UpcomingReleases] auto subscribe result: rule={rule.get('name')} title={item.get('title')} sid={sid} message={message or ''}")
+                    if sid and not self._is_exists_message(message):
                         verified, actual_season, verify_message = self._verify_added_subscribe(
                             item, sid, resolved_season, recognition=recognition
                         )
@@ -3800,124 +4071,145 @@ class UpcomingReleases(_PluginBase):
                 f"[UpcomingReleases] rule={rule.get('name')} "
                 + " ".join(f"{key}={value}" for key, value in counters.items())
             )
-        logger.info(f"[UpcomingReleases] auto subscribe finished: added {len(summary['added'])}, existing {len(summary['existing'])}, failed {len(summary['failed'])}")
-        return summary
-
-    def _ensure_rule_list(self, value: Any, default: Optional[List[str]] = None) -> List[str]:
-        if value is None:
-            return list(default or [])
-        if isinstance(value, (list, tuple, set)):
-            values = list(value)
-        else:
-            text_value = str(value).strip()
-            if not text_value:
-                return list(default or [])
-            values = [part for part in re.split(r"[,，、|\n]+", text_value) if str(part).strip()]
-        normalized = [self._clean_text(item) for item in values if self._clean_text(item)]
-        return normalized or list(default or [])
-
-    def _normalize_rule_time_range(self, value: Any) -> str:
-        raw_value = self._clean_text(value or "")
-        if not raw_value:
-            return ""
-        lookup_value = raw_value.lower()
-        if lookup_value in TIME_LABELS:
-            return lookup_value
-        for key, label in TIME_LABELS.items():
-            if raw_value == label:
-                return key
-        return ""
-
-    def _infer_rule_time_range(self, item: Dict[str, Any]) -> str:
-        time_range = self._normalize_rule_time_range(item.get("time_range") or item.get("window"))
-        if time_range:
-            return time_range
-        days = safe_int(item.get("days") or item.get("window_days"), 0)
-        if days <= 0:
-            return "pending" if bool(item.get("include_pending", False)) else ""
-        if days == 1:
-            return "today"
-        if days <= 3:
-            return "3days"
-        if days <= 7:
-            return "7days"
-        if days <= 30:
-            return "30days"
-        return "all"
-
-    def _load_auto_subscribe_rules(self) -> List[Dict[str, Any]]:
-        raw_rules = self._config.get("auto_subscribe_rules")
-        if isinstance(raw_rules, list):
-            data = raw_rules
-        else:
-            text_value = str(raw_rules or "").strip()
-            if not text_value:
-                return []
-            try:
-                data = json.loads(text_value)
-            except json.JSONDecodeError as err:
-                logger.warning(f"[UpcomingReleases] 自动订阅规则 JSON 解析失败: {err}")
-                return []
-        if not isinstance(data, list):
-            return []
-        rules = []
-        for index, item in enumerate(data, start=1):
-            if not isinstance(item, dict):
-                continue
-            rule = {
-                "name": self._clean_text(item.get("name") or f"规则{index}"),
-                "enabled": bool(item.get("enabled", True)),
-                "time_range": self._infer_rule_time_range(item),
-                "days": max(1, safe_int(item.get("days") or item.get("window_days"), 7)),
-                "types": self._ensure_rule_list(item.get("types") or item.get("type") or item.get("mtype"), ["all"]),
+        logger.info(f"[UpcomingReleases] auto subscribe finished: added {len(summary['added'])}, existing {len(summary['existing'])}, failed {len(summary['failed'])}")
+        return summary
+    def _ensure_rule_list(self, value: Any, default: Optional[List[str]] = None) -> List[str]:
+        if value is None:
+            return list(default or [])
+        if isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            text_value = str(value).strip()
+            if not text_value:
+                return list(default or [])
+            values = [part for part in re.split(r"[,，、|\n]+", text_value) if str(part).strip()]
+        normalized = [self._clean_text(item) for item in values if self._clean_text(item)]
+        return normalized or list(default or [])
+    def _normalize_rule_time_range(self, value: Any) -> str:
+        raw_value = self._clean_text(value or "")
+        if not raw_value:
+            return ""
+        lookup_value = raw_value.lower()
+        if lookup_value in RULE_TIME_LABELS:
+            return lookup_value
+        for key, label in RULE_TIME_LABELS.items():
+            if raw_value == label:
+                return key
+        custom_days = re.fullmatch(r"(?:d|day\s*|days\s*)?(\d{1,3})\s*(?:天|日|d|day|days)?", lookup_value)
+        if custom_days:
+            return "custom"
+        return ""
+
+    def _infer_rule_time_range(self, item: Dict[str, Any]) -> str:
+        time_range = self._normalize_rule_time_range(item.get("time_range") or item.get("window"))
+        if time_range:
+            return time_range
+        days = safe_int(item.get("days") or item.get("window_days"), 0)
+        if days <= 0:
+            return "default"
+        if days == 1:
+            return "today"
+        if days <= 3:
+            return "3days"
+        if days <= 7:
+            return "7days"
+        if days <= 30:
+            return "30days"
+        return "custom"
+
+    def _rule_custom_days(self, rule: Dict[str, Any]) -> int:
+        return self._normalize_custom_days(
+            rule.get("days") or rule.get("window_days"), self._config_default_days()
+        )
+
+    def _config_default_days(self) -> int:
+        return self._normalize_custom_days(
+            (self._config or {}).get("default_days"), DEFAULT_RULE_DAYS
+        )
+
+    def _config_default_time_range(self) -> str:
+        configured = self._normalize_default_time_range((self._config or {}).get("default_time_range"))
+        return configured or DEFAULT_RULE_TIME_RANGE
+
+    def _resolve_rule_time_range(self, rule: Dict[str, Any]) -> Tuple[str, int]:
+        """把“跟随默认/自定义天数”解析成实际窗口。返回 (time_range, days)。"""
+        time_range = self._normalize_rule_time_range(rule.get("time_range"))
+        days = self._rule_custom_days(rule)
+        if not time_range or time_range == "default":
+            time_range = self._config_default_time_range()
+            if time_range == "custom":
+                days = self._config_default_days()
+        return time_range, days
+
+    def _load_auto_subscribe_rules(self) -> List[Dict[str, Any]]:
+        raw_rules = self._config.get("auto_subscribe_rules")
+        if isinstance(raw_rules, list):
+            data = raw_rules
+        else:
+            text_value = str(raw_rules or "").strip()
+            if not text_value:
+                return []
+            try:
+                data = json.loads(text_value)
+            except json.JSONDecodeError as err:
+                logger.warning(f"[UpcomingReleases] 自动订阅规则 JSON 解析失败: {err}")
+                return []
+        if not isinstance(data, list):
+            return []
+        rules = []
+        for index, item in enumerate(data, start=1):
+            if not isinstance(item, dict):
+                continue
+            rule = {
+                "name": self._clean_text(item.get("name") or f"规则{index}"),
+                "enabled": bool(item.get("enabled", True)),
+                "time_range": self._infer_rule_time_range(item),
+                "days": self._normalize_custom_days(
+                    item.get("days") or item.get("window_days"), self._config_default_days()
+                ),
+                "types": self._ensure_rule_list(item.get("types") or item.get("type") or item.get("mtype"), ["all"]),
                 "platforms": self._ensure_rule_list(item.get("platforms") or item.get("platform"), ["all"]),
                 "regions": self._ensure_rule_list(item.get("regions") or item.get("region") or item.get("countries")),
                 "region_match_mode": "production",
                 "genres": self._ensure_rule_list(item.get("genres") or item.get("genre") or item.get("tags")),
-                "exclude_genres": self._ensure_rule_list(item.get("exclude_genres") or item.get("exclude_genre")),
-                "include_pending": bool(item.get("include_pending", False)),
-                "keyword": self._clean_text(item.get("keyword") or ""),
-                "exclude_keyword": self._clean_text(item.get("exclude_keyword") or item.get("exclude") or ""),
-            }
-            if rule["enabled"]:
-                rules.append(rule)
-        return rules
-
+                "exclude_genres": self._ensure_rule_list(item.get("exclude_genres") or item.get("exclude_genre")),
+                "include_pending": bool(item.get("include_pending", True)),
+                "keyword": self._clean_text(item.get("keyword") or ""),
+                "exclude_keyword": self._clean_text(item.get("exclude_keyword") or item.get("exclude") or ""),
+            }
+            if rule["enabled"]:
+                rules.append(rule)
+        return rules
     def _rule_matches_item(self, item: Dict[str, Any], rule: Dict[str, Any]) -> bool:
         matched, _ = self._evaluate_rule_item(item, rule)
         return matched
-
     def _evaluate_rule_item(self, item: Dict[str, Any], rule: Dict[str, Any]) -> Tuple[bool, str]:
         platforms = self._normalize_platform_values(rule.get("platforms") or ["all"])
         if platforms and "all" not in platforms and item.get("platform") not in platforms:
             return False, "platform_filtered"
-
         if not self._match_rule_types(item, rule.get("types") or ["all"]):
             return False, "type_filtered"
-
         if rule.get("keyword") and rule.get("keyword") not in item.get("title", "") and rule.get("keyword") not in item.get("story", ""):
             return False, "keyword_filtered"
         if rule.get("exclude_keyword") and (rule.get("exclude_keyword") in item.get("title", "") or rule.get("exclude_keyword") in item.get("story", "")):
             return False, "keyword_filtered"
-
-        time_range = self._normalize_rule_time_range(rule.get("time_range"))
-        if time_range:
-            if item.get("release_date"):
-                if not self._match_time_filter(item, time_range):
+        time_range, window_days = self._resolve_rule_time_range(rule)
+        if time_range:
+            if item.get("release_date"):
+                if not self._match_time_filter(item, time_range, window_days):
                     return False, "time_filtered"
             elif time_range != "pending" and not rule.get("include_pending"):
                 return False, "time_filtered"
-        else:
-            if item.get("release_date"):
-                try:
-                    delta = (datetime.strptime(item.get("release_date"), "%Y-%m-%d").date() - datetime.now().date()).days
+        else:
+            if item.get("release_date"):
+                try:
+                    delta = (datetime.strptime(item.get("release_date"), "%Y-%m-%d").date() - datetime.now().date()).days
                 except ValueError:
                     return False, "time_filtered"
                 if delta < 0 or delta > max(1, safe_int(rule.get("days"), 7)):
                     return False, "time_filtered"
             elif not rule.get("include_pending"):
                 return False, "time_filtered"
-
         regions = rule.get("regions") or []
         if regions:
             matched, reason = self._match_rule_regions_with_reason(
@@ -3927,38 +4219,31 @@ class UpcomingReleases(_PluginBase):
             )
             if not matched:
                 return False, reason
-
         genres = rule.get("genres") or []
         if genres and not self._match_rule_genres(item, genres):
             return False, "genre_filtered"
-
         exclude_genres = rule.get("exclude_genres") or []
         if exclude_genres and self._match_rule_genres(item, exclude_genres):
             return False, "genre_filtered"
         return True, "matched"
-
-    def _match_rule_types(self, item: Dict[str, Any], types: List[Any]) -> bool:
-        normalized_types = self._normalize_rule_types(types)
-        if not normalized_types or "all" in normalized_types:
-            return True
-        item_type = item.get("type_key")
-        return any(item_type in AUTO_SUBSCRIBE_TYPE_GROUPS.get(type_name, {type_name}) for type_name in normalized_types)
-
+    def _match_rule_types(self, item: Dict[str, Any], types: List[Any]) -> bool:
+        normalized_types = self._normalize_rule_types(types)
+        if not normalized_types or "all" in normalized_types:
+            return True
+        item_type = item.get("type_key")
+        return any(item_type in AUTO_SUBSCRIBE_TYPE_GROUPS.get(type_name, {type_name}) for type_name in normalized_types)
     def _get_local_item_region_codes(self, item: Dict[str, Any]) -> set:
         return self._get_production_country_codes(item)
-
     def _match_page_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
         expected = self._normalize_region_values(regions)
         if not expected:
             return True
         return bool(self._get_local_item_region_codes(item) & expected)
-
     def _match_page_availability_regions(self, item: Dict[str, Any], regions: List[Any]) -> bool:
         expected = self._normalize_region_values(regions)
         if not expected:
             return True
         return bool(self._get_availability_region_codes(item) & expected)
-
     def _match_page_genres(self, item: Dict[str, Any], genres: List[Any]) -> bool:
         expected = self._normalize_genre_values(genres)
         if not expected:
@@ -3973,11 +4258,9 @@ class UpcomingReleases(_PluginBase):
             )
         )
         return bool(actual & expected)
-
     def _normalize_region_match_mode(self, value: Any) -> str:
         mode = self._clean_text(value or "production").lower()
         return mode if mode in {"production", "availability", "either", "auto"} else "production"
-
     def _match_production_regions(self, item: Dict[str, Any], expected: set) -> Tuple[bool, bool]:
         actual = self._get_production_country_codes(item)
         if actual & expected:
@@ -3997,7 +4280,6 @@ class UpcomingReleases(_PluginBase):
         self._cache_recognition(item, media, type_key)
         actual = self._get_production_country_codes(item)
         return bool(actual & expected), False
-
     def _match_rule_regions_with_reason(
         self,
         item: Dict[str, Any],
@@ -4021,7 +4303,6 @@ class UpcomingReleases(_PluginBase):
         if recognition_failed:
             return False, "recognition_failed"
         return False, "production_region_filtered"
-
     def _match_rule_regions(
         self,
         item: Dict[str, Any],
@@ -4030,7 +4311,6 @@ class UpcomingReleases(_PluginBase):
     ) -> bool:
         matched, _ = self._match_rule_regions_with_reason(item, regions, mode)
         return matched
-
     def _match_rule_genres(self, item: Dict[str, Any], genres: List[Any]) -> bool:
         expected = self._normalize_genre_values(genres)
         if not expected:
@@ -4052,15 +4332,13 @@ class UpcomingReleases(_PluginBase):
         media = self._recognize_item(item)
         if not media:
             return False
-        type_key = self._media_to_type_key(media)
-        self._cache_recognition(item, media, type_key)
-        actual.update(self._extract_genre_names(media, item))
-        return bool(actual & expected)
-
+        type_key = self._media_to_type_key(media)
+        self._cache_recognition(item, media, type_key)
+        actual.update(self._extract_genre_names(media, item))
+        return bool(actual & expected)
     def _extract_region_codes(self, media: MediaInfo) -> set:
         if not media:
             return set()
-
         payload: Dict[str, Any] = {}
         for serializer_name in ("model_dump", "dict"):
             serializer = getattr(media, serializer_name, None)
@@ -4073,7 +4351,6 @@ class UpcomingReleases(_PluginBase):
             if isinstance(serialized, dict):
                 payload = serialized
                 break
-
         media_type = self._clean_text(getattr(media, "type", None) or payload.get("type"))
         is_movie = media_type == MediaType.MOVIE.value or media_type.lower() == "movie"
         field_order = (
@@ -4085,99 +4362,93 @@ class UpcomingReleases(_PluginBase):
         for field in field_order:
             codes.update(self._normalize_source_region_codes(getattr(media, field, None)))
             codes.update(self._normalize_source_region_codes(payload.get(field)))
-
         language = self._clean_text(
             getattr(media, "original_language", None) or payload.get("original_language")
         ).lower()
         if not codes and language in LANGUAGE_REGION_MAP:
             codes.add(LANGUAGE_REGION_MAP[language])
         return codes
-
-    def _extract_genre_names(self, media: MediaInfo, item: Optional[Dict[str, Any]] = None) -> set:
-        values = set()
-        for genre in media.genres or []:
-            if isinstance(genre, dict):
-                name = self._clean_text(genre.get("name"))
-            else:
-                name = self._clean_text(genre)
-            if name:
-                values.update(self._normalize_genre_values([name]))
-        if item:
-            values.update(self._extract_text_genre_names(" ".join(filter(None, [item.get("title"), item.get("story"), item.get("release_text")]))))
-        return values
-
-    def _extract_text_region_codes(self, text: str) -> set:
-        text_value = self._clean_text(text)
-        if not text_value:
-            return set()
+    def _extract_genre_names(self, media: MediaInfo, item: Optional[Dict[str, Any]] = None) -> set:
+        values = set()
+        for genre in media.genres or []:
+            if isinstance(genre, dict):
+                name = self._clean_text(genre.get("name"))
+            else:
+                name = self._clean_text(genre)
+            if name:
+                values.update(self._normalize_genre_values([name]))
+        if item:
+            values.update(self._extract_text_genre_names(" ".join(filter(None, [item.get("title"), item.get("story"), item.get("release_text")]))))
+        return values
+    def _extract_text_region_codes(self, text: str) -> set:
+        text_value = self._clean_text(text)
+        if not text_value:
+            return set()
         country_name_codes = {
             code for code, label in REGION_CODE_LABELS.items() if label and label in text_value
         }
         values = set(country_name_codes)
-        for alias, codes in REGION_ALIAS_MAP.items():
-            alias_text = self._clean_text(alias)
-            if not alias_text:
-                continue
+        for alias, codes in REGION_ALIAS_MAP.items():
+            alias_text = self._clean_text(alias)
+            if not alias_text:
+                continue
             if alias_text == "中国" and any(name in text_value for name in ("中国香港", "中国台湾")):
                 continue
-
             if re.fullmatch(r"[A-Za-z]{2,3}", alias_text):
                 if re.search(
                     rf"(?:国家|地区|区域|区)\s*[:：]?\s*{re.escape(alias_text)}\b",
                     text_value,
                     re.IGNORECASE,
                 ):
-                    values.update(codes)
-            elif alias_text in text_value:
-                values.update(codes)
-        return values
-
-    def _extract_text_genre_names(self, text: str) -> set:
-        text_value = self._clean_text(text).lower()
-        if not text_value:
-            return set()
-        values = set()
-        for genre_name, aliases in GENRE_ALIAS_MAP.items():
-            alias_values = {genre_name.lower()} | {self._clean_text(alias).lower() for alias in aliases if self._clean_text(alias)}
-            if any(alias and alias in text_value for alias in alias_values):
-                values.add(genre_name)
-        fallback_map = {
-            "综艺": "综艺",
-            "动漫": "动画",
-            "动画": "动画",
-            "纪录片": "纪录片",
-            "少儿": "少儿",
-            "人文": "人文",
-            "短剧": "短剧",
-        }
-        for keyword, label in fallback_map.items():
-            if keyword in text and label not in values:
-                values.add(label)
-        return values
-
-    def _build_text_fallback_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        text_blob = " ".join(
-            filter(
-                None,
-                [
-                    item.get("title"),
-                    item.get("story"),
-                    item.get("release_text"),
-                    item.get("type_label"),
-                    item.get("detail_link"),
-                ],
-            )
-        )
-        country_codes = sorted(self._extract_text_region_codes(text_blob))
-        genre_names = sorted(self._extract_text_genre_names(text_blob))
-        type_key = self._clean_text(item.get("type_key")).lower()
-        type_genre_fallback = {
-            "anime": "动画",
-            "variety": "综艺",
-            "documentary": "纪录片",
-            "kids": "少儿",
-            "humanity": "人文",
-            "short": "短剧",
+                    values.update(codes)
+            elif alias_text in text_value:
+                values.update(codes)
+        return values
+    def _extract_text_genre_names(self, text: str) -> set:
+        text_value = self._clean_text(text).lower()
+        if not text_value:
+            return set()
+        values = set()
+        for genre_name, aliases in GENRE_ALIAS_MAP.items():
+            alias_values = {genre_name.lower()} | {self._clean_text(alias).lower() for alias in aliases if self._clean_text(alias)}
+            if any(alias and alias in text_value for alias in alias_values):
+                values.add(genre_name)
+        fallback_map = {
+            "综艺": "综艺",
+            "动漫": "动画",
+            "动画": "动画",
+            "纪录片": "纪录片",
+            "少儿": "少儿",
+            "人文": "人文",
+            "短剧": "短剧",
+        }
+        for keyword, label in fallback_map.items():
+            if keyword in text and label not in values:
+                values.add(label)
+        return values
+    def _build_text_fallback_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        text_blob = " ".join(
+            filter(
+                None,
+                [
+                    item.get("title"),
+                    item.get("story"),
+                    item.get("release_text"),
+                    item.get("type_label"),
+                    item.get("detail_link"),
+                ],
+            )
+        )
+        country_codes = sorted(self._extract_text_region_codes(text_blob))
+        genre_names = sorted(self._extract_text_genre_names(text_blob))
+        type_key = self._clean_text(item.get("type_key")).lower()
+        type_genre_fallback = {
+            "anime": "动画",
+            "variety": "综艺",
+            "documentary": "纪录片",
+            "kids": "少儿",
+            "humanity": "人文",
+            "short": "短剧",
         }
         if not genre_names and type_key in type_genre_fallback:
             genre_names = [type_genre_fallback[type_key]]
@@ -4198,28 +4469,25 @@ class UpcomingReleases(_PluginBase):
             "year": item.get("year"),
             "country_codes": country_codes,
             "country_names": [self._region_label(code) for code in country_codes],
-            "genre_names": genre_names,
-            "updated": int(time.time()),
-        }
-
+            "genre_names": genre_names,
+            "updated": int(time.time()),
+        }
     def _store_recognition_record(self, item: Dict[str, Any], record: Dict[str, Any]):
-        keys = [
-            item.get("media_id"),
-            self._make_lookup_key(item.get("title"), item.get("year"), record.get("type_key") or item.get("type_key")),
-        ]
-        changed = False
-        for key in keys:
-            if not key:
-                continue
-            if self._recognize_cache.get(key) != record:
-                self._recognize_cache[key] = record
-                changed = True
+        keys = [
+            item.get("media_id"),
+            self._make_lookup_key(item.get("title"), item.get("year"), record.get("type_key") or item.get("type_key")),
+        ]
+        changed = False
+        for key in keys:
+            if not key:
+                continue
+            if self._recognize_cache.get(key) != record:
+                self._recognize_cache[key] = record
+                changed = True
         if changed:
             self._recognize_dirty = True
-
     def _normalize_source_region_codes(self, value: Any) -> List[str]:
         codes = set()
-
         def visit(current: Any):
             if current is None:
                 return
@@ -4235,7 +4503,6 @@ class UpcomingReleases(_PluginBase):
                 for entry in current:
                     visit(entry)
                 return
-
             for serializer_name in ("model_dump", "dict"):
                 serializer = getattr(current, serializer_name, None)
                 if not callable(serializer):
@@ -4255,7 +4522,6 @@ class UpcomingReleases(_PluginBase):
             if object_fields:
                 visit(object_fields)
                 return
-
             text_value = self._clean_text(current)
             if not text_value:
                 return
@@ -4279,31 +4545,27 @@ class UpcomingReleases(_PluginBase):
                 resolved = label_code or english_code
                 if resolved:
                     codes.add(resolved)
-
         visit(value)
         return sorted(codes)
-
     def _extract_source_region_codes(self, payload: Any) -> List[str]:
         return self._normalize_source_region_codes(payload)
-
     def _normalize_region_values(self, regions: List[Any]) -> set:
-        values = set()
+        values = set()
         for region in regions:
             text_value = self._clean_text(region).upper()
             if not text_value:
                 continue
             if text_value in {"ALL", "全部", "全部地区", "全部制作国家", "全部可用地区"}:
                 return set()
-            if text_value in REGION_ALIAS_MAP:
-                values.update(REGION_ALIAS_MAP[text_value])
-            else:
+            if text_value in REGION_ALIAS_MAP:
+                values.update(REGION_ALIAS_MAP[text_value])
+            else:
                 label_code = next(
                     (code for code, label in REGION_CODE_LABELS.items() if self._clean_text(label) == self._clean_text(region)),
                     None,
                 )
                 values.add(label_code or text_value)
         return values
-
     def _normalize_netflix_regions(self, value: Any) -> List[str]:
         if isinstance(value, (list, tuple, set)):
             raw_values = list(value)
@@ -4320,51 +4582,47 @@ class UpcomingReleases(_PluginBase):
             if len(normalized) >= MAX_NETFLIX_REGIONS:
                 break
         return normalized or list(DEFAULT_NETFLIX_REGIONS)
-
     def _netflix_regions_signature(self) -> str:
         return ",".join(self._normalize_netflix_regions(self._config.get("netflix_regions")))
-
-    def _normalize_genre_values(self, genres: List[Any]) -> set:
-        values = set()
-        for genre in genres:
-            text_value = self._clean_text(genre).lower()
-            if not text_value:
-                continue
-            matched = False
-            for genre_name, aliases in GENRE_ALIAS_MAP.items():
-                alias_values = {genre_name.lower()} | {self._clean_text(alias).lower() for alias in aliases if self._clean_text(alias)}
-                if text_value in alias_values:
-                    values.add(genre_name)
-                    matched = True
-                    break
-            if not matched:
-                values.add(self._clean_text(genre))
-        return values
-
-    def _normalize_platform_values(self, platforms: List[Any]) -> set:
-        values = set()
-        for platform in platforms:
-            text_value = self._clean_text(platform).lower()
-            if not text_value:
-                continue
-            values.add(PLATFORM_ALIAS_MAP.get(text_value, text_value))
-        return values
-
-    def _normalize_rule_types(self, types: List[Any]) -> set:
-        values = set()
-        for type_value in types:
-            text_value = self._clean_text(type_value).lower()
-            if not text_value:
-                continue
-            values.add(TYPE_ALIAS_MAP.get(text_value, text_value))
-        return values or {"all"}
+    def _normalize_genre_values(self, genres: List[Any]) -> set:
+        values = set()
+        for genre in genres:
+            text_value = self._clean_text(genre).lower()
+            if not text_value:
+                continue
+            matched = False
+            for genre_name, aliases in GENRE_ALIAS_MAP.items():
+                alias_values = {genre_name.lower()} | {self._clean_text(alias).lower() for alias in aliases if self._clean_text(alias)}
+                if text_value in alias_values:
+                    values.add(genre_name)
+                    matched = True
+                    break
+            if not matched:
+                values.add(self._clean_text(genre))
+        return values
+    def _normalize_platform_values(self, platforms: List[Any]) -> set:
+        values = set()
+        for platform in platforms:
+            text_value = self._clean_text(platform).lower()
+            if not text_value:
+                continue
+            values.add(PLATFORM_ALIAS_MAP.get(text_value, text_value))
+        return values
+    def _normalize_rule_types(self, types: List[Any]) -> set:
+        values = set()
+        for type_value in types:
+            text_value = self._clean_text(type_value).lower()
+            if not text_value:
+                continue
+            values.add(TYPE_ALIAS_MAP.get(text_value, text_value))
+        return values or {"all"}
     def _infer_type_key(
         self,
         title: str,
         year: Optional[str] = None,
         story: str = "",
-        release_text: str = "",
-        cache_key: str = "",
+        release_text: str = "",
+        cache_key: str = "",
         prefer_cached: bool = True,
     ) -> str:
         for key in [cache_key, self._make_lookup_key(title, year)]:
@@ -4377,108 +4635,102 @@ class UpcomingReleases(_PluginBase):
         media = self._recognize_item({"title": title, "year": year})
         if media:
             type_key = self._media_to_type_key(media)
-            if not prefer_cached and keyword_type == "movie" and type_key == "tv":
-                type_key = "movie"
-            temp_item = {
-                "media_id": cache_key or self._make_media_id("mgtv", title, title, release_text),
-                "title": title,
-                "year": year,
-                "type_key": type_key,
-            }
-            self._cache_recognition(temp_item, media, type_key)
-            return type_key
-        return keyword_type
-
-    def _media_to_type_key(self, media: MediaInfo) -> str:
-        if media.type == MediaType.MOVIE.value:
-            return "movie"
-        genre_names = [str(genre.get("name") or "").lower() for genre in media.genres or [] if isinstance(genre, dict)]
-        if any("动画" in name or "animation" in name for name in genre_names):
-            return "anime"
-        if any("纪录" in name or "documentary" in name for name in genre_names):
-            return "documentary"
-        return "tv"
-
-    def _keyword_type_key(self, text: str) -> str:
-        text = self._clean_text(text).lower()
-        if any(keyword in text for keyword in ["动漫", "动画", "番剧", "animation"]):
-            return "anime"
-        if any(keyword in text for keyword in ["纪录", "纪实", "documentary"]):
-            return "documentary"
-        if any(keyword in text for keyword in ["综艺", "晚会", "脱口秀", "真人秀"]):
-            return "variety"
-        if any(keyword in text for keyword in ["电影", "院线", "大片", "film", "movie"]):
-            return "movie"
-        return "tv"
-
-    def _build_filter_ui(self) -> List[Dict[str, Any]]:
-        return [
-            self._build_chip_group("平台", "platform", PLATFORM_LABELS),
-            self._build_chip_group("类型", "mtype", TYPE_LABELS),
-            self._build_chip_group("时间", "time_range", TIME_LABELS),
+            if not prefer_cached and keyword_type == "movie" and type_key == "tv":
+                type_key = "movie"
+            temp_item = {
+                "media_id": cache_key or self._make_media_id("mgtv", title, title, release_text),
+                "title": title,
+                "year": year,
+                "type_key": type_key,
+            }
+            self._cache_recognition(temp_item, media, type_key)
+            return type_key
+        return keyword_type
+    def _media_to_type_key(self, media: MediaInfo) -> str:
+        if media.type == MediaType.MOVIE.value:
+            return "movie"
+        genre_names = [str(genre.get("name") or "").lower() for genre in media.genres or [] if isinstance(genre, dict)]
+        if any("动画" in name or "animation" in name for name in genre_names):
+            return "anime"
+        if any("纪录" in name or "documentary" in name for name in genre_names):
+            return "documentary"
+        return "tv"
+    def _keyword_type_key(self, text: str) -> str:
+        text = self._clean_text(text).lower()
+        if any(keyword in text for keyword in ["动漫", "动画", "番剧", "animation"]):
+            return "anime"
+        if any(keyword in text for keyword in ["纪录", "纪实", "documentary"]):
+            return "documentary"
+        if any(keyword in text for keyword in ["综艺", "晚会", "脱口秀", "真人秀"]):
+            return "variety"
+        if any(keyword in text for keyword in ["电影", "院线", "大片", "film", "movie"]):
+            return "movie"
+        return "tv"
+    def _build_filter_ui(self) -> List[Dict[str, Any]]:
+        return [
+            self._build_chip_group("平台", "platform", PLATFORM_LABELS),
+            self._build_chip_group("类型", "mtype", TYPE_LABELS),
+            self._build_chip_group("时间", "time_range", TIME_LABELS),
             self._build_chip_group("制作国家", "production_region", PAGE_REGION_LABELS),
             self._build_chip_group("Netflix 可用地区", "availability_region", PAGE_REGION_LABELS),
-            self._build_chip_group("题材", "genre", PAGE_GENRE_LABELS),
-        ]
-
-    def _build_chip_group(self, label: str, model: str, options: Dict[str, str]) -> Dict[str, Any]:
-        return {
-            "component": "div",
-            "props": {"class": "flex justify-start items-center flex-wrap mb-3"},
-            "content": [
-                {
-                    "component": "div",
-                    "props": {"class": "mr-5 mb-2"},
-                    "content": [{"component": "VLabel", "text": label}],
-                },
-                {
-                    "component": "VChipGroup",
-                    "props": {"model": model},
-                    "content": [
-                        {"component": "VChip", "props": {"filter": True, "tile": True, "value": key}, "text": value}
-                        for key, value in options.items()
-                    ],
-                },
-            ],
-        }
-
-    def _ensure_security_domains(self):
-        if self._security_domains_ready:
-            return
-        domains = ["iqiyipic.com", "qpic.cn", "ykimg.com", "hitv.com", "mgtv.com", "nflximg.net", "dnm.nflximg.net"]
-        for domain in domains:
-            if domain not in settings.SECURITY_IMAGE_DOMAINS:
-                settings.SECURITY_IMAGE_DOMAINS.append(domain)
-        self._security_domains_ready = True
-
-    def _restore_cache(self):
-        self._ensure_runtime_state()
-        cache = self.get_data("cache")
+            self._build_chip_group("题材", "genre", PAGE_GENRE_LABELS),
+        ]
+    def _build_chip_group(self, label: str, model: str, options: Dict[str, str]) -> Dict[str, Any]:
+        return {
+            "component": "div",
+            "props": {"class": "flex justify-start items-center flex-wrap mb-3"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "mr-5 mb-2"},
+                    "content": [{"component": "VLabel", "text": label}],
+                },
+                {
+                    "component": "VChipGroup",
+                    "props": {"model": model},
+                    "content": [
+                        {"component": "VChip", "props": {"filter": True, "tile": True, "value": key}, "text": value}
+                        for key, value in options.items()
+                    ],
+                },
+            ],
+        }
+    def _ensure_security_domains(self):
+        if self._security_domains_ready:
+            return
+        domains = [
+            "iqiyipic.com", "qpic.cn", "ykimg.com", "hitv.com", "mgtv.com",
+            "nflximg.net", "dnm.nflximg.net", "image.tmdb.org", "lain.bgm.tv", "bgm.tv",
+        ]
+        for domain in domains:
+            if domain not in settings.SECURITY_IMAGE_DOMAINS:
+                settings.SECURITY_IMAGE_DOMAINS.append(domain)
+        self._security_domains_ready = True
+    def _restore_cache(self):
+        self._ensure_runtime_state()
+        cache = self.get_data("cache")
         cache_version = safe_int(cache.get("schema_version"), 0) if isinstance(cache, dict) else 0
         if isinstance(cache, dict) and cache_version in {13, 14, CACHE_SCHEMA_VERSION}:
-            items = cache.get("items") or []
-            if isinstance(items, list):
-                self._cache = {
-                    "timestamp": safe_int(cache.get("timestamp"), 0),
+            items = cache.get("items") or []
+            if isinstance(items, list):
+                self._cache = {
+                    "timestamp": safe_int(cache.get("timestamp"), 0),
                     "items": self._migrate_cached_items(items),
                     "schema_version": CACHE_SCHEMA_VERSION,
                     "netflix_regions_signature": cache.get("netflix_regions_signature") or (
                         "us" if cache_version == 13 else self._netflix_regions_signature()
                     ),
-                }
+                }
         elif cache_version > CACHE_SCHEMA_VERSION:
             logger.warning(f"[UpcomingReleases] cache schema {cache_version} is newer and was ignored")
-
         recognize_cache = self.get_data("recognize_cache")
         recognize_version = safe_int(recognize_cache.get("schema_version"), 0) if isinstance(recognize_cache, dict) else 0
         if isinstance(recognize_cache, dict) and recognize_version in {13, 14, CACHE_SCHEMA_VERSION}:
-            records = recognize_cache.get("records") or {}
-            if isinstance(records, dict):
+            records = recognize_cache.get("records") or {}
+            if isinstance(records, dict):
                 self._recognize_cache = self._migrate_recognition_records(records)
-
         elif recognize_version > CACHE_SCHEMA_VERSION:
             logger.warning(f"[UpcomingReleases] recognition cache schema {recognize_version} is newer and was ignored")
-
     def _migrate_cached_items(self, items: List[Any]) -> List[Dict[str, Any]]:
         migrated = []
         for raw_item in self._sanitize_items(items):
@@ -4505,7 +4757,6 @@ class UpcomingReleases(_PluginBase):
                 item["availability_regions"] = sorted(availability_codes)
             migrated.append(item)
         return migrated
-
     def _migrate_recognition_records(self, records: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         migrated = {}
         for key, raw_record in records.items():
@@ -4517,16 +4768,14 @@ class UpcomingReleases(_PluginBase):
             record["country_names"] = [self._region_label(code) for code in codes]
             migrated[key] = record
         return migrated
-
     def _persist_cache(self):
-        cache_payload = {
-            "timestamp": self._cache.get("timestamp"),
-            "items": self._cache.get("items") or [],
+        cache_payload = {
+            "timestamp": self._cache.get("timestamp"),
+            "items": self._cache.get("items") or [],
             "schema_version": CACHE_SCHEMA_VERSION,
             "netflix_regions_signature": self._netflix_regions_signature(),
-        }
-        self.save_data("cache", cache_payload)
-
+        }
+        self.save_data("cache", cache_payload)
     def _persist_recognize_cache(self):
         self.save_data(
             "recognize_cache",
@@ -4536,7 +4785,6 @@ class UpcomingReleases(_PluginBase):
             },
         )
         self._recognize_dirty = False
-
     def _build_proxy_url(self, raw_proxy: Any) -> str:
         proxy = self._clean_text(raw_proxy)
         if not proxy:
@@ -4545,7 +4793,8 @@ class UpcomingReleases(_PluginBase):
             return f"http://{proxy}"
         return proxy
 
-    def _get_netflix_proxy_url(self) -> str:
+    def _get_media_proxy_url(self) -> str:
+        """Netflix / TMDB 等出海请求共用的代理地址。"""
         proxy_candidates = [
             getattr(settings, "PROXY_HOST", None),
             getattr(settings, "proxy_host", None),
@@ -4561,6 +4810,281 @@ class UpcomingReleases(_PluginBase):
                 return proxy_url
         return ""
 
+    def _get_netflix_proxy_url(self) -> str:
+        return self._get_media_proxy_url()
+
+    def _build_proxy_status(self) -> Dict[str, Any]:
+        """给配置页展示的代理自检结果：urllib 只支持 HTTP 代理，SOCKS 需显式提示。"""
+        raw_proxy = self._get_media_proxy_url()
+        if not raw_proxy:
+            return {
+                "value": "",
+                "scheme": "",
+                "supported": False,
+                "message": "未检测到代理；Netflix 与 TMDB 需要可用的 HTTP 代理，例如 http://192.168.19.219:1099",
+            }
+        scheme = raw_proxy.split("://", 1)[0].lower() if "://" in raw_proxy else "http"
+        if scheme.startswith("socks"):
+            return {
+                "value": raw_proxy,
+                "scheme": scheme,
+                "supported": False,
+                "message": "检测到 SOCKS 代理，但插件基于 urllib 只支持 HTTP 代理；请改用 HTTP 端口，例如 http://192.168.19.219:1099",
+            }
+        if scheme not in {"http", "https"}:
+            return {
+                "value": raw_proxy,
+                "scheme": scheme,
+                "supported": False,
+                "message": f"代理协议 {scheme} 不受支持，请使用 HTTP 代理地址",
+            }
+        return {"value": raw_proxy, "scheme": scheme, "supported": True, "message": "代理可用（HTTP）"}
+
+    def _normalize_tmdb_language(self, value: Any) -> str:
+        text_value = self._clean_text(value or "").lower().replace("_", "-")
+        if re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", text_value):
+            return text_value
+        return "zh-CN"
+
+    def _normalize_tmdb_regions(self, value: Any) -> List[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = re.split(r"[,，;；\s|]+", str(value or ""))
+        regions: List[str] = []
+        for item in raw_items:
+            code = self._clean_text(item).upper()
+            if code in ISO_3166_ALPHA2_CODES and code not in regions:
+                regions.append(code)
+        return regions or list(TMDB_UPCOMING_REGIONS)
+
+    def _read_tmdb_api_key(self) -> str:
+        candidates = [
+            (self._config or {}).get("tmdb_api_key"),
+            getattr(settings, "TMDB_API_KEY", None),
+            getattr(settings, "tmdb_api_key", None),
+            os.environ.get("TMDB_API_KEY"),
+            os.environ.get("TMDB_API_KEY_V3"),
+        ]
+        for value in candidates:
+            key = self._clean_text(value)
+            if key:
+                return key
+        # MoviePilot 系统设置里的 TMDB Key（宿主版本差异较大，导入失败时静默跳过）
+        try:
+            from app.db.systemconfig_oper import SystemConfigOper
+            from app.schemas.types import SystemConfigKey
+
+            key_enum = getattr(SystemConfigKey, "TMDB_API_KEY", None)
+            if key_enum is not None:
+                key = self._clean_text(SystemConfigOper().get(key_enum))
+                if key:
+                    return key
+        except Exception:
+            pass
+        return ""
+
+    def _tmdb_request(self, path: str, params: Dict[str, Any], api_key: str = "") -> Any:
+        key = api_key or self._read_tmdb_api_key()
+        if not key:
+            return {}
+        query = {"api_key": key, "language": (self._config or {}).get("tmdb_language") or "zh-CN"}
+        query.update({name: value for name, value in params.items() if value not in (None, "")})
+        url = f"https://api.themoviedb.org/3{path}?{urlencode(query)}"
+        return self._request_json(
+            url, proxy_url=self._get_media_proxy_url(), log_context=f"tmdb {path}"
+        )
+
+    def _tmdb_genre_names(self, entry: Dict[str, Any], extra: Optional[List[str]] = None) -> List[str]:
+        names: List[str] = []
+        for genre in (entry.get("genres") or []):
+            name = self._clean_text(genre.get("name") if isinstance(genre, dict) else genre)
+            if name and name not in names:
+                names.append(name)
+        for genre_id in entry.get("genre_ids") or []:
+            name = TMDB_GENRE_NAME_MAP.get(safe_int(genre_id, 0))
+            if name and name not in names:
+                names.append(name)
+        for name in extra or []:
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _tmdb_type_key(self, entry: Dict[str, Any], default_type: str) -> str:
+        genre_ids = {safe_int(value, 0) for value in entry.get("genre_ids") or []}
+        if TMDB_ANIME_GENRE_ID in genre_ids:
+            return "anime"
+        if genre_ids & TMDB_DOCUMENTARY_GENRE_IDS:
+            return "documentary"
+        if genre_ids & TMDB_VARIETY_GENRE_IDS:
+            return "variety"
+        if genre_ids & TMDB_KIDS_GENRE_IDS:
+            return "kids"
+        return default_type
+
+    def _tmdb_poster_url(self, entry: Dict[str, Any]) -> str:
+        poster_path = self._clean_text(entry.get("poster_path"))
+        return f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path.startswith("/") else ""
+
+    def _fetch_tmdb(self) -> List[Dict[str, Any]]:
+        api_key = self._read_tmdb_api_key()
+        if not api_key:
+            logger.warning("[UpcomingReleases] 未配置 TMDB API Key，跳过 TMDB 数据源")
+            return []
+        today = datetime.now().date()
+        date_from = today.strftime("%Y-%m-%d")
+        date_to = (today + timedelta(days=TMDB_SOURCE_DAYS)).strftime("%Y-%m-%d")
+        items: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def add_entries(entries, default_type: str, origin_country: str):
+            for entry in entries or []:
+                tmdb_id = str(entry.get("id") or "").strip()
+                if not tmdb_id:
+                    continue
+                type_key = self._tmdb_type_key(entry, default_type)
+                if (tmdb_id, type_key) in seen:
+                    continue
+                seen.add((tmdb_id, type_key))
+                release_date = self._clean_text(entry.get("release_date") or entry.get("first_air_date"))
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", release_date):
+                    release_date = ""
+                title = self._clean_text(entry.get("title") or entry.get("name"))
+                if not title:
+                    continue
+                original_title = self._clean_text(
+                    entry.get("original_title") or entry.get("original_name")
+                )
+                year = release_date[:4] if release_date else ""
+                media_kind = "movie" if default_type == "movie" else "tv"
+                item = self._build_item(
+                    platform="tmdb",
+                    raw_id=tmdb_id,
+                    title=title,
+                    type_key=type_key,
+                    release_date=release_date or None,
+                    release_text=release_date or "敬请期待",
+                    poster=self._tmdb_poster_url(entry),
+                    detail_link=f"https://www.themoviedb.org/{media_kind}/{tmdb_id}",
+                    story=self._clean_text(entry.get("overview")),
+                    year=year,
+                    alternate_titles=[original_title] if original_title else [],
+                    region_codes=[origin_country],
+                )
+                item["genre_names"] = self._tmdb_genre_names(entry)
+                item["tmdb_id"] = safe_int(tmdb_id, 0) or None
+                item["source_label"] = "TMDB"
+                items.append(item)
+
+        regions = self._normalize_tmdb_regions((self._config or {}).get("tmdb_regions"))
+        for region in regions:
+            for page in range(1, TMDB_RESULT_PAGES + 1):
+                payload = self._tmdb_request(
+                    "/discover/movie",
+                    {
+                        "with_origin_country": region,
+                        "with_release_type": "1|2|3",
+                        "primary_release_date.gte": date_from,
+                        "primary_release_date.lte": date_to,
+                        "sort_by": "popularity.desc",
+                        "region": region,
+                        "page": page,
+                    },
+                    api_key=api_key,
+                )
+                add_entries((payload or {}).get("results"), "movie", region)
+        for country in TMDB_TV_ORIGIN_COUNTRIES:
+            payload = self._tmdb_request(
+                "/discover/tv",
+                {
+                    "with_origin_country": country,
+                    "first_air_date.gte": date_from,
+                    "first_air_date.lte": date_to,
+                    "sort_by": "popularity.desc",
+                    "page": 1,
+                },
+                api_key=api_key,
+            )
+            add_entries((payload or {}).get("results"), "tv", country)
+        for country in TMDB_ANIME_ORIGIN_COUNTRIES:
+            for media_kind in ("tv", "movie"):
+                params = {
+                    "with_genres": str(TMDB_ANIME_GENRE_ID),
+                    "with_origin_country": country,
+                    "sort_by": "popularity.desc",
+                    "page": 1,
+                }
+                if media_kind == "movie":
+                    params.update({"with_release_type": "1|2|3", "primary_release_date.gte": date_from,
+                                   "primary_release_date.lte": date_to, "region": country})
+                else:
+                    params.update({"first_air_date.gte": date_from, "first_air_date.lte": date_to})
+                payload = self._tmdb_request(f"/discover/{media_kind}", params, api_key=api_key)
+                add_entries((payload or {}).get("results"), media_kind, country)
+        logger.info(f"[UpcomingReleases] TMDB 抓取到 {len(items)} 条")
+        return items
+
+    def _next_bangumi_air_date(self, entry: Dict[str, Any]) -> Optional[str]:
+        today = datetime.now().date()
+        weekday = safe_int(entry.get("air_weekday"), 0)
+        if 1 <= weekday <= 7:
+            delta = (weekday - today.isoweekday()) % 7
+            return (today + timedelta(days=delta)).strftime("%Y-%m-%d")
+        air_date = self._clean_text(entry.get("air_date"))
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", air_date):
+            return air_date
+        return None
+
+    def _fetch_bangumi(self) -> List[Dict[str, Any]]:
+        payload = self._request_json(
+            BANGUMI_CALENDAR_URL,
+            headers={"Referer": "https://bangumi.tv/"},
+            proxy_url=self._get_media_proxy_url(),
+            log_context="bangumi calendar",
+        )
+        weekdays = payload if isinstance(payload, list) else []
+        items: List[Dict[str, Any]] = []
+        seen: set = set()
+        for day in weekdays:
+            if not isinstance(day, dict):
+                continue
+            for entry in day.get("items") or []:
+                if not isinstance(entry, dict):
+                    continue
+                bangumi_id = str(entry.get("id") or "").strip()
+                if not bangumi_id or bangumi_id in seen:
+                    continue
+                seen.add(bangumi_id)
+                title = self._clean_text(entry.get("name_cn") or entry.get("name"))
+                original_title = self._clean_text(entry.get("name"))
+                if not title:
+                    continue
+                air_date = self._next_bangumi_air_date(entry)
+                images = entry.get("images") or {}
+                poster = self._clean_text(images.get("large") or images.get("common") or "")
+                if poster.startswith("http://"):
+                    poster = f"https://{poster[7:]}"
+                item = self._build_item(
+                    platform="bangumi",
+                    raw_id=bangumi_id,
+                    title=title,
+                    type_key="anime",
+                    release_date=air_date,
+                    release_text=air_date or "敬请期待",
+                    poster=poster,
+                    detail_link=self._clean_text(entry.get("url")) or f"https://bangumi.tv/subject/{bangumi_id}",
+                    story=self._clean_text(entry.get("summary")),
+                    year=self._clean_text(entry.get("air_date"))[:4] if entry.get("air_date") else "",
+                    alternate_titles=[original_title] if original_title and original_title != title else [],
+                    region_codes=["JP"],
+                )
+                item["genre_names"] = ["动画"]
+                item["source_label"] = "Bangumi"
+                item["bangumi_id"] = safe_int(bangumi_id, 0) or None
+                items.append(item)
+        logger.info(f"[UpcomingReleases] Bangumi 抓取到 {len(items)} 条")
+        return items
+
     def _request_text(
         self,
         url: str,
@@ -4570,14 +5094,14 @@ class UpcomingReleases(_PluginBase):
         proxy_url: str = "",
         log_context: str = "",
     ) -> str:
-        req_headers = dict(DEFAULT_HEADERS)
-        if headers:
-            req_headers.update(headers)
-        data = None
-        if json_body is not None:
-            data = json.dumps(json_body).encode("utf-8")
-            req_headers.setdefault("Content-Type", "application/json")
-            method = "POST"
+        req_headers = dict(DEFAULT_HEADERS)
+        if headers:
+            req_headers.update(headers)
+        data = None
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+            method = "POST"
         request = Request(url, headers=req_headers, data=data, method=method)
         try:
             if proxy_url:
@@ -4589,14 +5113,16 @@ class UpcomingReleases(_PluginBase):
                 content = response.read()
                 charset = response.headers.get_content_charset() or "utf-8"
                 return content.decode(charset, errors="ignore")
-        except HTTPError as err:
+        except HTTPError as err:
+            self._last_http_error = f"HTTP {err.code}"
             logger.warning(f"[UpcomingReleases] {log_context or 'request'} failed: HTTP {err.code}")
-        except URLError as err:
+        except URLError as err:
+            self._last_http_error = f"网络错误 {type(err).__name__}"
             logger.warning(f"[UpcomingReleases] {log_context or 'request'} failed: {type(err).__name__}")
-        except Exception as err:
+        except Exception as err:
+            self._last_http_error = f"{type(err).__name__}"
             logger.warning(f"[UpcomingReleases] {log_context or 'request'} failed: {type(err).__name__}")
-        return ""
-
+        return ""
     def _request_json(
         self,
         url: str,
@@ -4614,76 +5140,72 @@ class UpcomingReleases(_PluginBase):
             proxy_url=proxy_url,
             log_context=log_context,
         )
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as err:
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as err:
             logger.warning(f"[UpcomingReleases] {log_context or 'request'} JSON parse failed: {type(err).__name__}")
-            return {}
-
-    def _find_item_by_mediaid(self, media_id: str) -> Optional[Dict[str, Any]]:
+            return {}
+    def _find_item_by_mediaid(self, media_id: str) -> Optional[Dict[str, Any]]:
         # Page and media-conversion lookups must never turn a cache read into a full source refresh.
         for item in self._get_cached_items():
-            if item.get("media_id") == media_id:
-                return item
-        return None
-
-    def _parse_release_info(self, text: str) -> Tuple[Optional[str], str]:
-        raw = self._clean_text(text)
-        if not raw:
-            return None, "敬请期待"
-        today = datetime.now().date()
-        if any(keyword in raw for keyword in ["敬请期待", "待定", "暂未定档", "即将上线", "即将播出"]) and not re.search(r"\d", raw):
-            return None, raw
-        if "今日" in raw or "今天" in raw:
-            return today.strftime("%Y-%m-%d"), raw
-        if "明日" in raw or "明天" in raw:
-            return (today + timedelta(days=1)).strftime("%Y-%m-%d"), raw
-        matched = re.search(r"((?:19|20)\d{2})[./-](\d{1,2})[./-](\d{1,2})", raw)
-        if matched:
-            year, month, day = map(int, matched.groups())
-            try:
-                return datetime(year, month, day).strftime("%Y-%m-%d"), raw
-            except ValueError:
-                return None, raw
-        matched = re.search(r"(\d{1,2})月(\d{1,2})日", raw)
-        if not matched:
-            matched = re.search(r"(?<!\d)(\d{1,2})[./-](\d{1,2})(?!\d)", raw)
-        if matched:
-            month, day = map(int, matched.groups())
-            year = today.year
-            try:
-                candidate = datetime(year, month, day).date()
-            except ValueError:
-                return None, raw
-            if candidate < today - timedelta(days=30):
-                candidate = datetime(year + 1, month, day).date()
-            return candidate.strftime("%Y-%m-%d"), raw
-        return None, raw
-
-    def _compute_time_key(self, release_date: Optional[str]) -> str:
-        if not release_date:
-            return "pending"
-        try:
-            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
-        except ValueError:
-            return "pending"
-        delta = (release_dt - datetime.now().date()).days
-        if delta < 0:
-            return "past"
-        if delta == 0:
-            return "today"
-        if delta == 1:
-            return "tomorrow"
-        if delta <= 3:
-            return "3days"
-        if delta <= 7:
-            return "7days"
-        if delta <= 30:
-            return "30days"
-        return "all"
-
+            if item.get("media_id") == media_id:
+                return item
+        return None
+    def _parse_release_info(self, text: str) -> Tuple[Optional[str], str]:
+        raw = self._clean_text(text)
+        if not raw:
+            return None, "敬请期待"
+        today = datetime.now().date()
+        if any(keyword in raw for keyword in ["敬请期待", "待定", "暂未定档", "即将上线", "即将播出"]) and not re.search(r"\d", raw):
+            return None, raw
+        if "今日" in raw or "今天" in raw:
+            return today.strftime("%Y-%m-%d"), raw
+        if "明日" in raw or "明天" in raw:
+            return (today + timedelta(days=1)).strftime("%Y-%m-%d"), raw
+        matched = re.search(r"((?:19|20)\d{2})[./-](\d{1,2})[./-](\d{1,2})", raw)
+        if matched:
+            year, month, day = map(int, matched.groups())
+            try:
+                return datetime(year, month, day).strftime("%Y-%m-%d"), raw
+            except ValueError:
+                return None, raw
+        matched = re.search(r"(\d{1,2})月(\d{1,2})日", raw)
+        if not matched:
+            matched = re.search(r"(?<!\d)(\d{1,2})[./-](\d{1,2})(?!\d)", raw)
+        if matched:
+            month, day = map(int, matched.groups())
+            year = today.year
+            try:
+                candidate = datetime(year, month, day).date()
+            except ValueError:
+                return None, raw
+            if candidate < today - timedelta(days=30):
+                candidate = datetime(year + 1, month, day).date()
+            return candidate.strftime("%Y-%m-%d"), raw
+        return None, raw
+    def _compute_time_key(self, release_date: Optional[str]) -> str:
+        if not release_date:
+            return "pending"
+        try:
+            release_dt = datetime.strptime(release_date, "%Y-%m-%d").date()
+        except ValueError:
+            return "pending"
+        delta = (release_dt - datetime.now().date()).days
+        if delta < 0:
+            return "past"
+        if delta == 0:
+            return "today"
+        if delta == 1:
+            return "tomorrow"
+        if delta <= 3:
+            return "3days"
+        if delta <= 7:
+            return "7days"
+        if delta <= 30:
+            return "30days"
+        return "all"
     def _normalize_alternate_titles(
         self,
         value: Any,
@@ -4691,7 +5213,6 @@ class UpcomingReleases(_PluginBase):
     ) -> List[str]:
         titles: List[str] = []
         primary_key = self._normalize_compare_text(primary_title)
-
         def add_text(current: Any):
             text_value = self._clean_text(current)
             if not text_value:
@@ -4706,7 +5227,6 @@ class UpcomingReleases(_PluginBase):
                     self._normalize_compare_text(existing) != candidate_key for existing in titles
                 ):
                     titles.append(candidate)
-
         def visit(current: Any):
             if current is None:
                 return
@@ -4729,14 +5249,11 @@ class UpcomingReleases(_PluginBase):
                     visit(nested)
                 return
             add_text(current)
-
         visit(value)
         return titles[:8]
-
     def _extract_source_year(self, payload: Any) -> Tuple[Optional[str], str]:
         field_order = ("productionyear", "releaseyear", "publishyear", "showyear", "year")
         nodes: List[Dict[str, Any]] = []
-
         def visit(current: Any):
             if current is None:
                 return
@@ -4761,7 +5278,6 @@ class UpcomingReleases(_PluginBase):
                 if isinstance(serialized, dict):
                     visit(serialized)
                     return
-
         visit(payload)
         for expected_field in field_order:
             for node in nodes:
@@ -4772,7 +5288,6 @@ class UpcomingReleases(_PluginBase):
                     if year:
                         return year, expected_field
         return None, ""
-
     def _extract_source_alternate_titles(
         self,
         payload: Any,
@@ -4782,7 +5297,6 @@ class UpcomingReleases(_PluginBase):
             "originaltitle", "englishtitle", "enname", "othername", "alias", "aliases", "aka",
         }
         values: List[Any] = []
-
         def visit(current: Any):
             if isinstance(current, dict):
                 for key, value in current.items():
@@ -4794,10 +5308,8 @@ class UpcomingReleases(_PluginBase):
             elif isinstance(current, (list, tuple, set)):
                 for nested in current:
                     visit(nested)
-
         visit(payload)
         return self._normalize_alternate_titles(values, primary_title=primary_title)
-
     def _build_recognition_title_candidates(self, item: Dict[str, Any]) -> List[str]:
         primary_title = self._clean_text(item.get("title"))
         values = [primary_title]
@@ -4829,7 +5341,6 @@ class UpcomingReleases(_PluginBase):
                 values.append(cleaned)
         values.extend(item.get("alternate_titles") or [])
         return self._normalize_alternate_titles(values)[:4]
-
     def _normalize_media_year(self, value: Any) -> Optional[str]:
         matched = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", self._clean_text(value))
         if not matched:
@@ -4838,7 +5349,6 @@ class UpcomingReleases(_PluginBase):
         if 1900 <= year <= datetime.now().year + 2:
             return str(year)
         return None
-
     def _guess_year(self, title: str, release_date: Optional[str], text: Optional[str]) -> Optional[str]:
         title_year = self._normalize_media_year(title)
         if title_year:
@@ -4855,75 +5365,70 @@ class UpcomingReleases(_PluginBase):
             if matched:
                 return self._normalize_media_year(matched.group(1))
         return None
-
-    def _make_lookup_key(self, title: str, year: Optional[str], type_key: Optional[str] = None) -> str:
-        title_part = self._normalize_compare_text(title)
-        title_part = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", title_part)
-        year_part = re.sub(r"[^0-9]", "", self._clean_text(year))[:4]
-        type_part = re.sub(r"[^0-9a-z]+", "", self._clean_text(type_key).lower())
-        base = "|".join(part for part in [title_part, year_part, type_part] if part)
-        if not base:
-            return "upcoming_default"
-        return base[:96]
-
-    def _make_media_id(self, platform: str, raw_id: str, title: str, suffix: str) -> str:
-        raw_id = str(raw_id or "").strip()
-        if raw_id and re.fullmatch(r"[0-9A-Za-z_-]{1,48}", raw_id):
-            key = raw_id
-        else:
-            base = self._clean_text(f"{title or ''}-{suffix or ''}").lower()
-            key = re.sub(r"[^0-9a-z]+", "", base)[:32]
-            if not key:
-                checksum = sum((index + 1) * ord(char) for index, char in enumerate(f"{platform}|{title}|{suffix}"))
-                key = str(checksum)
-        return f"{platform}_{key}"
-
-    def _decode_js_string(self, raw: str) -> str:
-        if raw is None:
-            return ""
-        value = str(raw)
-        if not value or "\\" not in value:
-            return value
-        try:
-            return json.loads(f'"{value}"')
-        except Exception:
-            value = re.sub(
-                r"\\u([0-9a-fA-F]{4})",
-                lambda match: chr(int(match.group(1), 16)),
-                value,
-            )
-            return (
-                value.replace("\\/", "/")
-                .replace('\\"', '"')
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-            )
-
+    def _make_lookup_key(self, title: str, year: Optional[str], type_key: Optional[str] = None) -> str:
+        title_part = self._normalize_compare_text(title)
+        title_part = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", title_part)
+        year_part = re.sub(r"[^0-9]", "", self._clean_text(year))[:4]
+        type_part = re.sub(r"[^0-9a-z]+", "", self._clean_text(type_key).lower())
+        base = "|".join(part for part in [title_part, year_part, type_part] if part)
+        if not base:
+            return "upcoming_default"
+        return base[:96]
+    def _make_media_id(self, platform: str, raw_id: str, title: str, suffix: str) -> str:
+        raw_id = str(raw_id or "").strip()
+        if raw_id and re.fullmatch(r"[0-9A-Za-z_-]{1,48}", raw_id):
+            key = raw_id
+        else:
+            base = self._clean_text(f"{title or ''}-{suffix or ''}").lower()
+            key = re.sub(r"[^0-9a-z]+", "", base)[:32]
+            if not key:
+                checksum = sum((index + 1) * ord(char) for index, char in enumerate(f"{platform}|{title}|{suffix}"))
+                key = str(checksum)
+        return f"{platform}_{key}"
+    def _decode_js_string(self, raw: str) -> str:
+        if raw is None:
+            return ""
+        value = str(raw)
+        if not value or "\\" not in value:
+            return value
+        try:
+            return json.loads(f'"{value}"')
+        except Exception:
+            value = re.sub(
+                r"\\u([0-9a-fA-F]{4})",
+                lambda match: chr(int(match.group(1), 16)),
+                value,
+            )
+            return (
+                value.replace("\\/", "/")
+                .replace('\\"', '"')
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+            )
     def _extract_js_string_field(self, text: str, field: str) -> str:
         matched = re.search(
             rf'(?<![0-9A-Za-z_])["\']?{re.escape(field)}["\']?\s*:\s*"',
             text or "",
             re.IGNORECASE,
         )
-        if not matched:
-            return ""
-        start = matched.end()
-        value = []
-        escape = False
-        for char in text[start:]:
-            if escape:
-                value.append("\\" + char)
-                escape = False
-                continue
-            if char == "\\":
-                escape = True
-                continue
-            if char == '"':
-                return self._decode_js_string("".join(value))
-            value.append(char)
+        if not matched:
+            return ""
+        start = matched.end()
+        value = []
+        escape = False
+        for char in text[start:]:
+            if escape:
+                value.append("\\" + char)
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                return self._decode_js_string("".join(value))
+            value.append(char)
         return self._decode_js_string("".join(value))
-
     def _extract_js_year_field(self, text: str, field: str) -> str:
         string_value = self._extract_js_string_field(text, field)
         if string_value:
@@ -4932,98 +5437,89 @@ class UpcomingReleases(_PluginBase):
             text,
             rf'(?<![0-9A-Za-z_])["\']?{re.escape(field)}["\']?\s*:\s*["\']?((?:19|20)\d{{2}})',
         )
-
-    def _extract_bracket_array(self, text: str, start_index: int) -> Optional[str]:
-        if start_index < 0 or start_index >= len(text):
-            return None
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start_index, len(text)):
-            char = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "[":
-                depth += 1
-            elif char == "]":
-                depth -= 1
-                if depth == 0:
-                    return text[start_index:index + 1]
-        return None
-
-    def _extract_brace_object(self, text: str, start_index: int) -> Optional[str]:
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start_index, len(text)):
-            char = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start_index:index + 1]
-        return None
-
-    def _search_text(self, text: str, pattern: str) -> str:
-        matched = re.search(pattern, text or "", re.IGNORECASE | re.DOTALL)
-        if not matched:
-            return ""
-        return matched.group(1) if matched.groups() else matched.group(0)
-
-    def _clean_text(self, text: Any) -> str:
-        if text is None:
-            return ""
-        cleaned = unescape(str(text))
-        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned)
-        return cleaned.strip()
-
-    def _deep_find_first(self, node: Any, key: str):
-        if isinstance(node, dict):
-            if key in node:
-                return node.get(key)
-            for value in node.values():
-                found = self._deep_find_first(value, key)
-                if found is not None:
-                    return found
-        elif isinstance(node, list):
-            for value in node:
-                found = self._deep_find_first(value, key)
-                if found is not None:
-                    return found
-        return None
-
-    def _collect_matching_dicts(self, node: Any, predicate, output: List[Dict[str, Any]]):
-        if isinstance(node, dict):
-            try:
-                if predicate(node):
-                    output.append(node)
-            except Exception:
-                pass
-            for value in node.values():
-                self._collect_matching_dicts(value, predicate, output)
-        elif isinstance(node, list):
-            for value in node:
-                self._collect_matching_dicts(value, predicate, output)
-
-
-
+    def _extract_bracket_array(self, text: str, start_index: int) -> Optional[str]:
+        if start_index < 0 or start_index >= len(text):
+            return None
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start_index, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start_index:index + 1]
+        return None
+    def _extract_brace_object(self, text: str, start_index: int) -> Optional[str]:
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start_index, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start_index:index + 1]
+        return None
+    def _search_text(self, text: str, pattern: str) -> str:
+        matched = re.search(pattern, text or "", re.IGNORECASE | re.DOTALL)
+        if not matched:
+            return ""
+        return matched.group(1) if matched.groups() else matched.group(0)
+    def _clean_text(self, text: Any) -> str:
+        if text is None:
+            return ""
+        cleaned = unescape(str(text))
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
+    def _deep_find_first(self, node: Any, key: str):
+        if isinstance(node, dict):
+            if key in node:
+                return node.get(key)
+            for value in node.values():
+                found = self._deep_find_first(value, key)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = self._deep_find_first(value, key)
+                if found is not None:
+                    return found
+        return None
+    def _collect_matching_dicts(self, node: Any, predicate, output: List[Dict[str, Any]]):
+        if isinstance(node, dict):
+            try:
+                if predicate(node):
+                    output.append(node)
+            except Exception:
+                pass
+            for value in node.values():
+                self._collect_matching_dicts(value, predicate, output)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_matching_dicts(value, predicate, output)

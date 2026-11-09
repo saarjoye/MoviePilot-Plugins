@@ -104,21 +104,33 @@ const defaults = {
   push_cron: '0 9,18 * * *',
   push_days: 7,
   push_limit: 8,
+  default_time_range: '7days',
+  default_days: 7,
   enable_iqiyi: true,
   enable_tencent: true,
+  tencent_extra_channels: false,
   enable_youku: true,
   enable_mgtv: true,
+  mgtv_extra_modules: true,
   enable_netflix: true,
   netflix_regions: 'us,jp,kr,gb,ca,au,fr,de,it,es,in,br',
+  enable_tmdb: true,
+  tmdb_api_key: '',
+  tmdb_language: 'zh-CN',
+  tmdb_regions: 'US,JP,KR,GB,CN',
+  enable_bangumi: false,
+  auto_subscribe_max_per_run: 20,
   auto_subscribe_rules: '[]',
 };
 
 const TIME_OPTIONS = [
+  { value: 'default', label: '跟随默认' },
   { value: 'today', label: '今日上映' },
   { value: 'tomorrow', label: '明日上映' },
   { value: '3days', label: '3天内' },
   { value: '7days', label: '7天内' },
   { value: '30days', label: '30天内' },
+  { value: 'custom', label: '自定义天数' },
   { value: 'pending', label: '敬请期待' },
   { value: 'all', label: '全部时间' },
 ];
@@ -129,6 +141,9 @@ const TYPE_OPTIONS = [
   { value: 'short', label: '短剧' },
   { value: 'anime', label: '动漫' },
   { value: 'variety', label: '综艺' },
+  { value: 'documentary', label: '纪录片' },
+  { value: 'kids', label: '少儿' },
+  { value: 'humanity', label: '人文' },
   { value: 'other', label: '其它' },
 ];
 
@@ -138,14 +153,22 @@ const PLATFORM_OPTIONS = [
   { value: 'youku', label: '优酷' },
   { value: 'mgtv', label: '芒果 TV' },
   { value: 'netflix', label: 'Netflix' },
+  { value: 'tmdb', label: 'TMDB' },
+  { value: 'bangumi', label: 'Bangumi' },
 ];
 
 const RECOMMENDED_REGIONS = ['CN', 'HK', 'TW', 'KR', 'JP', 'US', 'GB', 'FR', 'DE', 'IT', 'ES', 'CA', 'AU', 'IN', 'TH'];
+const DEFAULT_WINDOW_OPTIONS = TIME_OPTIONS.filter(option => option.value !== 'default');
 const FALLBACK_RECOMMENDED_RULES = [
-  { name: '电视剧-3天内', enabled: true, time_range: '3days', days: 3, types: ['tv'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
-  { name: '电影-3天内', enabled: true, time_range: '3days', days: 3, types: ['movie'], platforms: ['tencent', 'youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
-  { name: '综艺-3天内', enabled: true, time_range: '3days', days: 3, types: ['variety'], platforms: ['youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
-  { name: '动漫-3天内', enabled: true, time_range: '3days', days: 3, types: ['anime'], platforms: ['youku', 'netflix'], regions: RECOMMENDED_REGIONS, region_match_mode: 'production' },
+  { name: '华语电影', enabled: true, time_range: 'default', types: ['movie'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'tmdb'], regions: ['CN', 'HK', 'TW'], genres: [], include_pending: true },
+  { name: '外语电影', enabled: true, time_range: 'default', types: ['movie'], platforms: ['netflix', 'tencent', 'youku', 'tmdb'], regions: ['US', 'GB', 'JP', 'KR'], genres: [], include_pending: true },
+  { name: '国产剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'tmdb'], regions: ['CN'], genres: [], include_pending: true },
+  { name: '日韩剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['netflix', 'youku', 'tmdb'], regions: ['JP', 'KR'], genres: [], include_pending: true },
+  { name: '美剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['netflix', 'tmdb'], regions: ['US', 'GB'], genres: [], include_pending: true },
+  { name: '国漫', enabled: true, time_range: 'default', types: ['anime'], platforms: ['iqiyi', 'youku', 'mgtv', 'tmdb'], regions: ['CN'], genres: [], include_pending: true },
+  { name: '日漫', enabled: true, time_range: 'default', types: ['anime'], platforms: ['netflix', 'youku', 'tmdb', 'bangumi'], regions: ['JP'], genres: [], include_pending: true },
+  { name: '美漫', enabled: true, time_range: 'default', types: ['anime'], platforms: ['netflix', 'tmdb'], regions: ['US'], genres: [], include_pending: true },
+  { name: '综艺', enabled: true, time_range: 'default', types: ['variety'], platforms: ['youku', 'mgtv', 'netflix'], regions: [], genres: [], include_pending: true },
 ];
 
 const REGION_ALIASES = {
@@ -195,6 +218,9 @@ const actionNotice = reactive({ type: 'info', text: '', details: [] });
 const recommendedRules = ref(FALLBACK_RECOMMENDED_RULES);
 const sourceCapabilities = ref([]);
 const sourceCounts = ref([]);
+const proxyStatus = ref(null);
+const tmdbStatus = ref(null);
+const sourceHealth = ref([]);
 
 let ruleSeed = 0;
 
@@ -236,11 +262,8 @@ function inferTimeRange(rule) {
     return directTimeRange
   }
   const days = Number(rule?.days ?? rule?.window_days);
-  if (!Number.isFinite(days)) {
-    return rule?.include_pending ? 'pending' : '7days'
-  }
-  if (days <= 0) {
-    return rule?.include_pending ? 'pending' : '7days'
+  if (!Number.isFinite(days) || days <= 0) {
+    return 'default'
   }
   if (days === 1) {
     return 'today'
@@ -254,7 +277,15 @@ function inferTimeRange(rule) {
   if (days <= 30) {
     return '30days'
   }
-  return 'all'
+  return 'custom'
+}
+
+function clampDays(value, fallback = defaults.default_days) {
+  const days = Number(value);
+  if (!Number.isFinite(days) || days <= 0) {
+    return fallback
+  }
+  return Math.min(90, Math.max(1, Math.round(days)))
 }
 
 function normalizeOptionValues(values, options) {
@@ -281,13 +312,14 @@ function createRule(raw = {}) {
     name: String(raw.name || '').trim(),
     enabled: raw.enabled !== false,
     time_range: inferTimeRange(raw),
+    days: clampDays(raw.days ?? raw.window_days, defaults.default_days),
     types: normalizeOptionValues(raw.types ?? raw.type ?? raw.mtype, TYPE_OPTIONS),
     platforms: normalizeOptionValues(raw.platforms ?? raw.platform, PLATFORM_OPTIONS),
     regions: normalizeRegionValues(raw.regions ?? raw.region ?? raw.countries),
     region_match_mode: 'production',
     genres: normalizeOptionValues(raw.genres ?? raw.genre ?? raw.tags, GENRE_OPTIONS),
     exclude_genres: normalizeOptionValues(raw.exclude_genres ?? raw.exclude_genre, GENRE_OPTIONS),
-    include_pending: Boolean(raw.include_pending),
+    include_pending: raw.include_pending !== false,
     keyword: String(raw.keyword || '').trim(),
     exclude_keyword: String(raw.exclude_keyword || raw.exclude || '').trim(),
   }
@@ -343,6 +375,15 @@ async function loadRegionOptions() {
     if (Array.isArray(result?.stats?.source_counts)) {
       sourceCounts.value = result.stats.source_counts
     }
+    if (result?.proxy_status) {
+      proxyStatus.value = result.proxy_status
+    }
+    if (result?.tmdb_status) {
+      tmdbStatus.value = result.tmdb_status
+    }
+    if (Array.isArray(result?.source_health)) {
+      sourceHealth.value = result.source_health
+    }
   } catch (error) {
     // Keep the common static regions when the state endpoint is unavailable.
   }
@@ -375,7 +416,10 @@ function buildRuleSummary(rule, index) {
   const regionLabels = getSelectedLabels(REGION_OPTIONS, rule.regions);
   const genreLabels = getSelectedLabels(GENRE_OPTIONS, rule.genres);
   const platformLabels = getSelectedLabels(PLATFORM_OPTIONS, rule.platforms);
-  const timeLabel = getOptionLabel(TIME_OPTIONS, rule.time_range) || '7天内';
+  let timeLabel = getOptionLabel(TIME_OPTIONS, rule.time_range) || '跟随默认';
+  if (rule.time_range === 'custom') {
+    timeLabel = `${clampDays(rule.days)}天内`;
+  }
 
   if (typeLabels.length) {
     parts.push(typeLabels.join('、'));
@@ -474,26 +518,30 @@ function mapTimeRangeToDays(timeRange) {
   if (timeRange === '7days') {
     return 7
   }
-  if (timeRange === '30days' || timeRange === 'pending' || timeRange === 'all') {
+  if (timeRange === '30days') {
     return 30
   }
-  return 7
+  if (timeRange === 'custom') {
+    return clampDays()
+  }
+  return null
 }
 
 function serializeRule(rule, index) {
+  const timeRange = normalizeTimeRange(rule.time_range) || 'default';
   return {
     ...(rule._extra || {}),
     name: rule.name.trim() || buildRuleSummary(rule, index).replace(/^条件\d+：/, '').trim(),
     enabled: Boolean(rule.enabled),
-    time_range: normalizeTimeRange(rule.time_range) || '7days',
-    days: mapTimeRangeToDays(rule.time_range),
+    time_range: timeRange,
+    days: timeRange === 'custom' ? clampDays(rule.days) : mapTimeRangeToDays(timeRange),
     types: rule.types.length ? [...rule.types] : ['all'],
     platforms: rule.platforms.length ? [...rule.platforms] : ['all'],
     regions: [...rule.regions],
     region_match_mode: 'production',
     genres: [...rule.genres],
     exclude_genres: [...rule.exclude_genres],
-    include_pending: Boolean(rule.include_pending),
+    include_pending: rule.include_pending !== false,
     keyword: rule.keyword.trim(),
     exclude_keyword: rule.exclude_keyword.trim(),
   }
@@ -679,6 +727,48 @@ return (_ctx, _cache) => {
             [_vModelText, config.push_limit]
           ])
         ]),
+        _createElementVNode("label", { class: "form-field" }, [
+          _createElementVNode("span", null, "单次自动订阅上限"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.auto_subscribe_max_per_run) = $event),
+            type: "number",
+            min: "1"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.auto_subscribe_max_per_run]
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field field-span-2" }, [
+          _createElementVNode("span", null, "默认时间窗（规则选“跟随默认”时生效）"),
+          _createElementVNode("div", { class: "choice-grid" }, [
+            (_openBlock(), _createElementBlock(_Fragment, null, _renderList(DEFAULT_WINDOW_OPTIONS, (option) => {
+              return _createElementVNode("label", {
+                key: `default-window-${option.value}`,
+                class: _normalizeClass(["choice-option choice-option--radio", { 'choice-option--active': config.default_time_range === option.value }])
+              }, [
+                _withDirectives(_createElementVNode("input", {
+                  "onUpdate:modelValue": $event => ((config.default_time_range) = $event),
+                  name: "default-window",
+                  type: "radio",
+                  value: option.value
+                }, null, 8, ["onUpdate:modelValue", "value"]), [
+                  [_vModelRadio, config.default_time_range]
+                ]),
+                _createElementVNode("span", null, _toDisplayString(option.label), 1)
+              ], 2)
+            }), 64))
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field" }, [
+          _createElementVNode("span", null, "默认窗口天数（选“自定义天数”时使用，1~90）"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.default_days) = $event),
+            type: "number",
+            min: "1",
+            max: "90"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.default_days]
+          ])
+        ]),
         _createElementVNode("label", { class: "form-field field-span-2" }, [
           _createElementVNode("span", null, "Netflix 国家代码（最多 12 个）"),
           _withDirectives(_createElementVNode("input", {
@@ -687,6 +777,36 @@ return (_ctx, _cache) => {
             placeholder: "us,jp,kr,gb,ca,au,fr,de,it,es,in,br"
           }, null, 8, ["onUpdate:modelValue"]), [
             [_vModelText, config.netflix_regions]
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field field-span-2" }, [
+          _createElementVNode("span", null, "TMDB API Key（个人账号免费申请：themoviedb.org/settings/api）"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.tmdb_api_key) = $event),
+            type: "text",
+            placeholder: "留空时回退到 MoviePilot 系统设置里的 TMDB Key"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.tmdb_api_key]
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field" }, [
+          _createElementVNode("span", null, "TMDB 语言"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.tmdb_language) = $event),
+            type: "text",
+            placeholder: "zh-CN"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.tmdb_language]
+          ])
+        ]),
+        _createElementVNode("label", { class: "form-field" }, [
+          _createElementVNode("span", null, "TMDB 抓取地区（逗号分隔 ISO 码）"),
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.tmdb_regions) = $event),
+            type: "text",
+            placeholder: "US,JP,KR,GB,CN"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelText, config.tmdb_regions]
           ])
         ])
       ])
@@ -732,12 +852,48 @@ return (_ctx, _cache) => {
         ]),
         _createElementVNode("label", { class: "toggle-field" }, [
           _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.tencent_extra_channels) = $event),
+            type: "checkbox"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelCheckbox, config.tencent_extra_channels]
+          ]),
+          _createTextVNode(" 腾讯综艺/动漫频道")
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.mgtv_extra_modules) = $event),
+            type: "checkbox"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelCheckbox, config.mgtv_extra_modules]
+          ]),
+          _createTextVNode(" 芒果扩展模块")
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.enable_netflix) = $event)),
             type: "checkbox"
           }, null, 512), [
             [_vModelCheckbox, config.enable_netflix]
           ]),
           _createTextVNode(" Netflix")
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.enable_tmdb) = $event),
+            type: "checkbox"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelCheckbox, config.enable_tmdb]
+          ]),
+          _createTextVNode(" TMDB")
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.enable_bangumi) = $event),
+            type: "checkbox"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelCheckbox, config.enable_bangumi]
+          ]),
+          _createTextVNode(" Bangumi")
         ])
       ])
     ]),
@@ -776,9 +932,32 @@ return (_ctx, _cache) => {
             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sourceCounts.value, (source) => {
               return (_openBlock(), _createElementBlock("span", {
                 key: `source-${source.value}`
-              }, _toDisplayString(`${source.label}：总数 ${source.total}，有日期 ${source.dated}，3天内 ${source.within_3days}，制作国家 ${source.production_country}`), 1))
+              }, _toDisplayString(`${source.label}：总数 ${source.total}，有日期 ${source.dated}（${source.dated_percent ?? 0}%），待定档 ${source.pending ?? 0}，年份 ${source.with_year ?? 0}，制作国家 ${source.with_country ?? source.production_country ?? 0}，题材 ${source.with_genre ?? 0}`), 1))
             }), 128))
           ]))
+        : _createCommentVNode("", true),
+      (sourceHealth.value.length)
+        ? (_openBlock(), _createElementBlock("div", { key: 6, class: "rule-overview" }, [
+            _createElementVNode("span", null, "渠道状态：", 1),
+            (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sourceHealth.value, (source) => {
+              return (_openBlock(), _createElementBlock("span", {
+                key: `health-${source.value}`,
+                title: source.detail || ''
+              }, _toDisplayString(`${source.label} ${source.status_label}${source.items ? ` · ${source.items} 条` : ''}${source.at ? ` · ${source.at}` : ''}`), 9, ["title"]))
+            }), 128))
+          ]))
+        : _createCommentVNode("", true),
+      (proxyStatus.value && !proxyStatus.value.supported)
+        ? (_openBlock(), _createElementBlock("div", {
+            key: 4,
+            class: "browser-notice browser-notice--warning"
+          }, _toDisplayString(`代理提示：${proxyStatus.value.message}`), 1))
+        : _createCommentVNode("", true),
+      (tmdbStatus.value && tmdbStatus.value.enabled && !tmdbStatus.value.key_configured)
+        ? (_openBlock(), _createElementBlock("div", {
+            key: 5,
+            class: "browser-notice browser-notice--warning"
+          }, "TMDB 未配置 API Key：请在上方「基础设置」填写，或确认 MoviePilot 系统设置里的 TMDB Key 可用，否则外语电影/美剧/日漫/美漫将缺少来源。", 1))
         : _createCommentVNode("", true),
       (ruleParseNotice.value)
         ? (_openBlock(), _createElementBlock("div", _hoisted_26, _toDisplayString(ruleParseNotice.value), 1))
@@ -864,7 +1043,20 @@ return (_ctx, _cache) => {
                       _createElementVNode("span", null, _toDisplayString(option.label), 1)
                     ], 2)
                   }), 64))
-                ])
+                ]),
+                (rule.time_range === 'custom')
+                  ? (_openBlock(), _createElementBlock("label", { key: `custom-days-${rule.id}`, class: "form-field" }, [
+                      _createElementVNode("span", null, "自定义天数（1~90）"),
+                      _withDirectives(_createElementVNode("input", {
+                        "onUpdate:modelValue": $event => ((rule.days) = $event),
+                        type: "number",
+                        min: "1",
+                        max: "90"
+                      }, null, 8, ["onUpdate:modelValue"]), [
+                        [_vModelText, rule.days]
+                      ])
+                    ]))
+                  : _createCommentVNode("", true),
               ]),
               _createElementVNode("section", _hoisted_43, [
                 _cache[33] || (_cache[33] = _createElementVNode("div", { class: "rule-block__title" }, "影视类型", -1)),

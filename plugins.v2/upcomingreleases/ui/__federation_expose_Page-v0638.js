@@ -41,6 +41,7 @@ function createEmptyState() {
       platform_counts: [],
       type_counts: [],
     },
+    source_health: [],
     pagination: {
       offset: 0,
       limit: 24,
@@ -53,6 +54,31 @@ function createEmptyState() {
   }
 }
 
+const HEALTH_COLORS = {
+  ok: '#2e7d32',
+  empty: '#f9a825',
+  failed: '#c62828',
+  stale: '#ef6c00',
+  no_key: '#6b7280',
+  disabled: '#9ca3af',
+  unknown: '#9ca3af',
+};
+
+function healthColor(status) {
+  return HEALTH_COLORS[status] || HEALTH_COLORS.unknown
+}
+
+function healthText(source) {
+  const parts = [`${source.label} ${source.status_label || ''}`.trim()];
+  if (source.items) {
+    parts.push(`${source.items} 条`);
+  }
+  if (source.detail && source.status !== 'ok') {
+    parts.push(source.detail.split('，')[0]);
+  }
+  return parts.join(' · ')
+}
+
 function normalizeError(error) {
   return (
     error?.response?.data?.detail ||
@@ -61,7 +87,6 @@ function normalizeError(error) {
     '请求失败，请稍后重试。'
   )
 }
-
 function cloneConfig(config) {
   return JSON.parse(JSON.stringify(config || {}))
 }
@@ -451,6 +476,26 @@ return (_ctx, _cache) => {
       _createElementVNode$1("span", null, "当前展示 " + _toDisplayString(_unref(state).stats.showing) + " 部", 1),
       _createElementVNode$1("span", null, "最近同步 " + _toDisplayString(_unref(state).stats.last_refresh), 1)
     ]),
+    (_unref(state).source_health?.length)
+      ? (_openBlock$1(), _createElementBlock$1("div", {
+          key: 7,
+          style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', margin: '2px 0 10px', fontSize: '12px', color: '#4b5563' }
+        }, [
+          _createElementVNode$1("span", { style: { fontWeight: '600', color: '#374151' } }, "渠道状态"),
+          (_openBlock$1(true), _createElementBlock$1(_Fragment, null, _renderList(_unref(state).source_health, (source) => {
+            return _createElementVNode$1("span", {
+              key: `health-${source.value}`,
+              title: source.detail || '',
+              style: { display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '2px 9px', borderRadius: '999px', background: '#f3f4f6', border: `1px solid ${healthColor(source.status)}33` }
+            }, [
+              _createElementVNode$1("span", {
+                style: { width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthColor(source.status) }
+              }, null, 4),
+              _createElementVNode$1("span", null, _toDisplayString(healthText(source)), 1)
+            ], 8, ["title"])
+          }), 128))
+        ]))
+      : _createCommentVNode$1("", true),
     (_unref(notice).text)
       ? (_openBlock$1(), _createElementBlock$1("div", {
           key: 0,
