@@ -192,3 +192,26 @@ python tests/test_dirupload115.py
 
 
 
+
+---
+
+## 已验证记录（2026-11-10）
+
+**离线逻辑测试**：18 组断言全过（`tests/test_dirupload115.py`），覆盖稳定阈值、单级目录粒度、状态文件不上传、幂等跳过、增量补传、115 校验失败拒绝删除、三态清理、strm 就绪判定、`emby` 模式查不到不删/查到才删、自动系列识别、增量集号不重编号。
+
+**真机验证（MoviePilot v3.2.5 + p115disk + CloudMediaSync）**：
+
+| 环节 | 实测结果 |
+|---|---|
+| 插件安装 | 经 `LocalPluginInstall` 上传 zip 安装成功，`lifecycle.py - 加载插件：DirUpload115 版本：1.0.0` |
+| 只传视频 | 115 上只出现 `.mp4`，NFO/封面未上传 |
+| 剧集命名 | `/媒体库/B站/一数-初中版 - 合集·测试课程/Season 1/一数-初中版 - 合集·测试课程 - S01E01 - 第1讲 有理数.mp4` |
+| 随片文件 | `tvshow.nfo` + 剧集 `poster.jpg` + 单集 `.nfo`/`-poster.jpg`，与 CMS 生成的 `.strm` 同目录 |
+| CMS 联动 | 上传后自动触发 `lift_by_token` 增量同步，40s 内 strm 出现 |
+| 就绪判定 | 检测到 strm 后 `判定通过（strm）`，按 `delete_mode` 处理本地 |
+| webhook 入口 | `POST /hook` 带 `X-API-KEY` → 200；无鉴权 → 401 |
+
+**部署前提**（这两条不满足就看不到效果）：
+
+1. MoviePilot 容器必须能看到 CMS 的 strm 输出目录（例如 `-v /mnt/movie/strm:/strm`），否则 `strm_root` 无效；
+2. `target_root`（115 根）与 `strm_root`（本地对应目录）**必须成对对齐**：115 的 `/媒体库/B站` ↔ 本地 `/strm/媒体库/B站`，两边层级一致，插件才能算出 strm 路径。
