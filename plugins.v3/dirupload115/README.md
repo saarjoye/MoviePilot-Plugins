@@ -189,29 +189,53 @@ python tests/test_dirupload115.py
 - 可选「上传完删本地 + 保留 NFO 一周」的策略
 - 直接内置 p115client 上传（不依赖 p115disk），代价是要自己算 SHA1 秒传
 
-
-
-
-
 ---
 
-## 已验证记录（2026-11-10）
+## 配置说明（v1.2.1）
 
-**离线逻辑测试**：18 组断言全过（`tests/test_dirupload115.py`），覆盖稳定阈值、单级目录粒度、状态文件不上传、幂等跳过、增量补传、115 校验失败拒绝删除、三态清理、strm 就绪判定、`emby` 模式查不到不删/查到才删、自动系列识别、增量集号不重编号。
+### 1. 监控目录 `watch_dirs`
+一行一个，格式 `本地目录 => 115 相对子目录`（后半段省略时用本地目录名）：
 
-**真机验证（MoviePilot v3.2.5 + p115disk + CloudMediaSync）**：
+```
+/downloads/bili/数学/一数-初中版-3546913471203629 => 数学
+/downloads/bili/语文/梓墨说语文-316069678      => 语文
+```
 
-| 环节 | 实测结果 |
+- 本地目录 = bili-sync 的**作者目录**（其下是各个「合集目录」）
+- `=> 数学` 就是 115/strm 上的**分类目录**，可以是多层，如 `=> 课程/数学`
+- 最终结构：`target_root / 映射目录 / Show(UP名 - 合集名) / Season N / 集文件`
+- ⚠️ 不要把映射写成 `数学/作者ID`：v1.2.0 起作者信息已经并入 Show 名，再写会多一层
+
+### 2. 目标与 strm 根
+| 配置 | 含义 | 示例 |
+|---|---|---|
+| `target_root` | 115 上的根目录 | `/媒体库/B站` |
+| `strm_root` | 上面那个目录在 MP 容器里对应的本地路径 | `/strm/媒体库/B站` |
+
+两者必须对应同一层，否则 NFO/封面会写到错位置。
+
+### 3. 命名模板
+| 配置 | 默认 | 可用变量 |
+|---|---|---|
+| `show_template` | `{upper} - {series}` | `{upper}` `{series}` `{title}` `{bvid}` `{index}` |
+| `episode_template` | `{title}E{ep:02}` | 同上 + `{ep:02}`（两位季集号） |
+
+- `{series}` 取「合集目录名」；当它和 UP 名相同时（投稿/单视频目录）自动替换为 `投稿`
+- v1.2.1 起单集额外生成 `<集名>-thumb.jpg`（Emby 单集缩略图规范），Show 级生成 `poster.jpg`/`fanart.jpg`/`tvshow.nfo`
+
+### 4. 就绪判定与清理
+| 值 | 含义 |
 |---|---|
-| 插件安装 | 经 `LocalPluginInstall` 上传 zip 安装成功，`lifecycle.py - 加载插件：DirUpload115 版本：1.0.0` |
-| 只传视频 | 115 上只出现 `.mp4`，NFO/封面未上传 |
-| 剧集命名 | `/媒体库/B站/一数-初中版 - 合集·测试课程/Season 1/一数-初中版 - 合集·测试课程 - S01E01 - 第1讲 有理数.mp4` |
-| 随片文件 | `tvshow.nfo` + 剧集 `poster.jpg` + 单集 `.nfo`/`-poster.jpg`，与 CMS 生成的 `.strm` 同目录 |
-| CMS 联动 | 上传后自动触发 `lift_by_token` 增量同步，40s 内 strm 出现 |
-| 就绪判定 | 检测到 strm 后 `判定通过（strm）`，按 `delete_mode` 处理本地 |
-| webhook 入口 | `POST /hook` 带 `X-API-KEY` → 200；无鉴权 → 401 |
+| `ready_mode = strm` | 本地 strm 目录出现同名 .strm 即算完成（推荐，零 115 请求） |
+| `ready_mode = emby` | 查 Emby 已入库才算完成 |
+| `ready_mode = storage` | 回查 115 文件存在且大小一致（会消耗 115 请求） |
+| `delete_mode = none` | 保留本地（推荐先跑一周） |
+| `delete_mode = recycle` | 移入回收目录 `recycle_root/YYYYMMDD/` |
+| `delete_mode = delete` | 直接删除该集目录 |
 
-**部署前提**（这两条不满足就看不到效果）：
+### 5. 已知坑
 
-1. MoviePilot 容器必须能看到 CMS 的 strm 输出目录（例如 `-v /mnt/movie/strm:/strm`），否则 `strm_root` 无效；
-2. `target_root`（115 根）与 `strm_root`（本地对应目录）**必须成对对齐**：115 的 `/媒体库/B站` ↔ 本地 `/strm/媒体库/B站`，两边层级一致，插件才能算出 strm 路径。
+1. **MP 插件配置是整体覆盖**：只 `PUT {"enabled": true}` 会把其它字段清空，请整表保存
+2. **`-thumb.jpg` 与 `-poster.jpg`**：Emby 单集缩略图只认 `-thumb.jpg`
+3. **bili-sync 的 `video_name` 必须是 `{{title}}`**（一视频一目录）；如果设成空（扁平布局），本插件的剧集识别会错位
+4. 115 有每小时请求上限（QPH），批量上传后不要立刻反复扫描
