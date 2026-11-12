@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -354,6 +354,7 @@ class DirUpload115(_PluginBase):
                 started_at=started_at,
                 queue=queue,
                 summary=summary,
+                stuck=stuck,
             )
 
         if summary["uploaded"] or summary["waiting"] or summary["failed"]:
@@ -444,6 +445,7 @@ class DirUpload115(_PluginBase):
         started_at: str,
         queue: Dict[str, Any],
         summary: Dict[str, Any],
+        stuck: List[Dict[str, Any]],
     ) -> None:
         """把队列与调度信息写成 JSON，供 bili-sync 仪表盘读取（原子写）"""
         try:
