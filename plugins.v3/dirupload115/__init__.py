@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.4.3"
+    plugin_version = "1.5.1"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -88,6 +88,14 @@ class DirUpload115(_PluginBase):
         self._yield_to_mp: bool = True
         self._run_lock = Lock()
         self._storage: Optional[StorageChain] = None
+        # 1.5.0：自建 strm —— 上传后直接用 115 的 pickcode 写 .strm，
+        # 不再依赖 CMS 的增量同步（115 秒传/批量上传时 CMS 可能收不到生活事件，
+        # 导致 strm 迟迟不生成、本地目录一直卡在 waiting_strm）
+        self._strm_self_gen: bool = False
+        self._strm_302_domain: str = ""          # 115 直链服务前缀，空则回落到 cms_base_url
+        self._pickcode_cache: Dict[str, Any] = {}  # remote_dir -> (时间戳, {文件名: pickcode})
+        self._pickcode_budget: int = 10             # 每轮最多额外查几次 115（防风控）
+        self._pickcode_budget_default: int = 10
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -171,6 +179,12 @@ class DirUpload115(_PluginBase):
         self._max_per_round = max(0, int(config.get("max_per_round") or 20))
         self._max_per_hour = max(0, int(config.get("max_per_hour") or 60))
         self._yield_to_mp = bool(config.get("yield_to_mp", True))
+        # 1.5.0：自建 strm（用 115 pickcode 直链），默认关闭；302 前缀留空则用 CMS 地址
+        self._strm_self_gen = bool(config.get("strm_self_gen", False))
+        self._strm_302_domain = str(config.get("strm_302_domain") or "").strip().rstrip("/")
+        self._pickcode_cache = {}
+        self._pickcode_budget = max(0, int(config.get("pickcode_budget") or 10))
+        self._pickcode_budget_default = self._pickcode_budget
         # 注意：StorageChain 不能在应用组合根就绪前实例化（实测报 "Chain 运行上下文尚未由启动组合根配置"），
         # 所以这里不创建，等真正用的时候再懒加载（_storage 为 None 时各处会现场创建）
         self._storage = None
@@ -291,6 +305,8 @@ class DirUpload115(_PluginBase):
             return summary
 
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 1.5.1：每轮重置「额外查 115 取 pickcode」的预算，避免连续 API 调用触发风控
+        self._pickcode_budget = max(0, int(self._pickcode_budget_default))
         queue = {"total": 0, "done": 0, "pending": 0, "waiting": 0, "failed": 0}
         stuck: List[Dict[str, Any]] = []
 
@@ -996,6 +1012,9 @@ class DirUpload115(_PluginBase):
         if mode in ("none", "storage"):
             ready, missing = True, []
         else:
+            # 1.5.0：先自己把 strm 写出来（幂等，已有同内容就跳过），再判断就绪
+            if self._strm_self_gen:
+                self._write_strm_by_pickcode(spec, media_dir, files, state)
             ready, missing = self._strm_ready(spec, media_dir, files)
             if ready and mode == "emby":
                 ready, missing = self._emby_ready(spec, media_dir, files)
@@ -1086,6 +1105,101 @@ class DirUpload115(_PluginBase):
     def _strm_dir(self, spec: Dict[str, Any], media_dir: Path) -> Path:
         """本地媒体目录 → CMS 的 strm 输出目录（与 115 路径严格同构：CMS 会镜像 115 结构）"""
         return Path(self._strm_root).joinpath(*self._rel_parts(spec, media_dir))
+
+    # ------------------------------------------------------------ 1.5.0 自建 strm
+
+    def _strm_302_base(self) -> str:
+        """115 直链服务前缀：优先 strm_302_domain，其次 CMS 地址"""
+        return (self._strm_302_domain or self._cms_base_url).rstrip("/")
+
+    def _pickcode_map(self, spec: Dict[str, Any], media_dir: Path, state: Dict[str, Any],
+                      files: List[Path]) -> Dict[str, str]:
+        """
+        取「远端文件名 → pickcode」。
+
+        优先用上传时 115 返回并记在 state 里的 pickcode（零额外 API 调用）；
+        只有补历史积压时才用 get_item 逐个查，且**每轮有预算上限**（默认 10 次），
+        避免像 1.5.0 那样每轮对 115 狂发请求触发风控（实测会触发 QPM/QPH 限流冷却）。
+        """
+        picks: Dict[str, str] = dict(state.get("pickcodes") or {})
+        remote_dir = self._remote_dir(spec, media_dir)
+        missing = [
+            self._remote_name_for(spec, media_dir, f)
+            for f in files
+            if f.suffix.lower() in self._video_ext
+            and self._remote_name_for(spec, media_dir, f) not in picks
+        ]
+        if not missing:
+            return picks
+        if self._storage is None:
+            self._storage = StorageChain()
+        for name in missing:
+            if self._pickcode_budget <= 0:
+                break
+            try:
+                self._pickcode_budget -= 1
+                item = self._storage.get_item(
+                    storage=self._target_storage, path=Path(remote_dir) / name
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"【{self.plugin_name}】查询 115 文件失败 {name}：{e}")
+                continue
+            code = getattr(item, "pickcode", None) if item else None
+            if code:
+                picks[name] = str(code)
+        if picks:
+            state["pickcodes"] = picks
+        return picks
+
+    def _write_strm_by_pickcode(self, spec: Dict[str, Any], media_dir: Path, files: List[Path],
+                                state: Dict[str, Any]) -> int:
+        """
+        用 115 的 pickcode 直接写 .strm（内容与 CMS 生成的格式一致）：
+            {302 前缀}/d/{pickcode}{后缀}?/{远端文件名}
+
+        为什么要自己写：CMS 的增量同步依赖 115「生活事件」，而 bili-sync 上传的视频经常是
+        秒传/批量完成，事件缺失或滞后，于是 strm 迟迟不出、ready_mode=strm 永远等不到。
+        自己写之后 CMS 即使后续补生成也只是覆盖成同样内容（STRM_EXIST_IS_REBUILD）。
+        失败只告警，绝不影响上传与清理判断。
+        """
+        if not self._strm_self_gen or not self._strm_root:
+            return 0
+        base_url = self._strm_302_base()
+        if not base_url:
+            logger.warning(
+                f"【{self.plugin_name}】已开自建 strm，但没有可用的 302 前缀"
+                f"（请填 strm_302_domain 或 CMS 地址）"
+            )
+            return 0
+        try:
+            pick = self._pickcode_map(spec, media_dir, state, files)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"【{self.plugin_name}】{media_dir.name} 取 pickcode 失败，跳过自建 strm：{e}")
+            return 0
+
+        base = self._strm_dir(spec, media_dir)
+        written = 0
+        for f in files:
+            if f.suffix.lower() not in self._video_ext:
+                continue
+            remote_name = self._remote_name_for(spec, media_dir, f)
+            code = pick.get(remote_name)
+            if not code:
+                continue
+            url = f"{base_url}/d/{code}{f.suffix}?/{remote_name}"
+            strm_path = base / (remote_name[: -len(f.suffix)] + ".strm")
+            try:
+                if strm_path.exists() and strm_path.read_text(encoding="utf-8").strip() == url:
+                    continue
+                strm_path.parent.mkdir(parents=True, exist_ok=True)
+                strm_path.write_text(url, encoding="utf-8")
+                written += 1
+            except OSError as e:  # noqa: BLE001
+                logger.warning(f"【{self.plugin_name}】写入 strm 失败 {strm_path.name}：{e}")
+        if written:
+            logger.info(f"【{self.plugin_name}】{media_dir.name} 已自建 {written} 个 strm（直链 {base_url}）")
+        return written
+
 
     def _strm_ready(
         self, spec: Dict[str, Any], media_dir: Path, files: List[Path]
@@ -1236,6 +1350,8 @@ class DirUpload115(_PluginBase):
 
         # 直接挂在 state 上，保证最终状态里带上完整清单（否则下一轮会整目录重传）
         done: Dict[str, Any] = state.setdefault("files", {})
+        # 1.5.1：顺手把 115 返回的 pickcode 存进 state（写 .strm 用，零额外 API 调用）
+        picks: Dict[str, str] = state.setdefault("pickcodes", {})
         uploaded: List[str] = []
         skipped: List[str] = []
         for f in files:
@@ -1249,6 +1365,9 @@ class DirUpload115(_PluginBase):
             item = self._storage.upload_file(fileitem=folder, path=f, new_name=remote_name)
             if not item:
                 raise RuntimeError(f"上传失败：{f}")
+            code = getattr(item, "pickcode", None) or getattr(item, "pick_code", None)
+            if code:
+                picks[remote_name] = str(code)
             done[name] = size
             uploaded.append(name)
             # 每传完一个就落盘状态，中途崩溃后只补传剩余文件
@@ -1552,6 +1671,24 @@ class DirUpload115(_PluginBase):
                                     "cms_base_url",
                                     "CMS 地址（可选）",
                                     "如 http://cloud-media-sync:9527，填了就在上传校验后触发增量同步",
+                                ),
+                            ),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(
+                                4,
+                                _switch("strm_self_gen", "自建 strm（不依赖 CMS 增量同步）"),
+                            ),
+                            _col(
+                                8,
+                                _text(
+                                    "strm_302_domain",
+                                    "115 直链前缀（可选，留空用 CMS 地址）",
+                                    "如 http://192.168.1.26:9527。开启自建后，插件按 {前缀}/d/{pickcode}.mp4?/{文件名} 直接写 .strm；"
+                                    "适合 CMS 收不到 115 秒传事件、strm 迟迟不生成的情况",
                                 ),
                             ),
                         ],
