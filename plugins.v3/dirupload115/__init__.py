@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -730,6 +730,10 @@ class DirUpload115(_PluginBase):
                     dest = ep_dir / (ep_stem + name[len(old_stem):])
                     if "-poster" in name or name.endswith("-thumb.jpg"):
                         poster_src = src
+                        # 1.2.1：Emby 单集缩略图认的是 <文件名>-thumb.jpg
+                        thumb_dest = ep_dir / (ep_stem + "-thumb.jpg")
+                        if thumb_dest != dest:
+                            copied += self._safe_copy(src, thumb_dest)
                 else:
                     dest = ep_dir / name
                 copied += self._safe_copy(src, dest)
