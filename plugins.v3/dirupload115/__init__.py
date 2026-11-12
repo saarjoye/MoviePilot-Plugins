@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -185,6 +185,23 @@ class DirUpload115(_PluginBase):
         self._pickcode_cache = {}
         self._pickcode_budget = max(0, int(config.get("pickcode_budget") or 10))
         self._pickcode_budget_default = self._pickcode_budget
+        # 1.5.2：累计统计与小时桶要能从插件数据里恢复，否则每次 reload（改配置/重启）都会清零，
+        # 仪表盘上「累计已上传」会莫名回退
+        try:
+            saved_totals = self.get_data("totals")
+            if isinstance(saved_totals, dict):
+                self._totals = {
+                    k: max(0, int(saved_totals.get(k) or 0))
+                    for k in ("uploaded", "deleted", "failed")
+                }
+            saved_hourly = self.get_data("hourly")
+            if isinstance(saved_hourly, dict):
+                self._hourly = {
+                    str(k): max(0, int(v)) for k, v in saved_hourly.items() if str(k)
+                }
+                self._hourly = dict(sorted(self._hourly.items())[-12:])
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"【{self.plugin_name}】恢复累计统计失败（不影响上传）：{e}")
         # 注意：StorageChain 不能在应用组合根就绪前实例化（实测报 "Chain 运行上下文尚未由启动组合根配置"），
         # 所以这里不创建，等真正用的时候再懒加载（_storage 为 None 时各处会现场创建）
         self._storage = None
