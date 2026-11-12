@@ -3,11 +3,12 @@
     "name": "目录监控上传115",
     "description": "监控本地目录，目录稳定后整目录上传到 115 网盘（不走 TMDB 整理）。支持课程→剧集模式（一合集=一季、SxxExx 命名）、上传前重命名、只传视频上传、NFO/封面留在本地 strm 目录、strm/Emby 就绪判定后清理本地。1.5.x 新增「自建 strm」：直接用 115 的 pickcode 写 .strm，不再依赖 CMS 的增量同步。",
     "labels": "115,工具,媒体库",
-    "version": "1.5.1",
+    "version": "1.5.2",
     "system_version": ">=3.0.0",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/DirUpload115.png",
     "author": "wYw",
     "history": {
+      "v1.5.2": "累计统计（已上传/已删除/失败）与按小时上传量改为可恢复：reload 或重启后不再清零（之前每次改配置都会把仪表盘数字打回 0）",
       "v1.5.1": "自建 strm 改为零额外 API 调用：pickcode 直接取上传返回值并落盘；补历史积压时才逐个查 115，且每轮有预算上限（默认 10 次），避免触发 115 风控",
       "v1.5.0": "新增「自建 strm」开关 + 115 直链前缀配置：上传后按 {前缀}/d/{pickcode}.mp4?/{文件名} 直接写 .strm，解决 CMS 收不到 115 秒传事件、strm 迟迟不生成导致本地目录卡在 waiting_strm 的问题",
       "v1.0.0": "首个版本：目录稳定判定、只传视频到 115（复用 u115 存储插件）、随片文件进 strm 目录、课程→剧集模式（SxxExx + tvshow.nfo）、上传前重命名、三段式命名模板、删本地三态（保留/回收/删除）、删本地判定依据可选 strm 或 emby、webhook 触发入口"
