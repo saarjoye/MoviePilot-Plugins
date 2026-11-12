@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.3.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -73,6 +73,9 @@ class DirUpload115(_PluginBase):
         self._cms_base_url: str = ""
         self._cms_token: str = ""
         self._interval_seconds: int = 300
+        # 1.3.0：每轮最多上传多少集（0=不限）、MP 转移队列繁忙时让路
+        self._max_per_round: int = 20
+        self._yield_to_mp: bool = True
         self._run_lock = Lock()
         self._storage: Optional[StorageChain] = None
 
@@ -152,6 +155,8 @@ class DirUpload115(_PluginBase):
         self._cms_base_url = str(config.get("cms_base_url") or "").strip().rstrip("/")
         self._cms_token = str(config.get("cms_token") or "").strip()
         self._interval_seconds = max(60, int(config.get("interval_seconds") or 300))
+        self._max_per_round = max(0, int(config.get("max_per_round") or 20))
+        self._yield_to_mp = bool(config.get("yield_to_mp", True))
         # 注意：StorageChain 不能在应用组合根就绪前实例化（实测报 "Chain 运行上下文尚未由启动组合根配置"），
         # 所以这里不创建，等真正用的时候再懒加载（_storage 为 None 时各处会现场创建）
         self._storage = None
@@ -265,6 +270,11 @@ class DirUpload115(_PluginBase):
         if not self._run_lock.acquire(blocking=False):
             logger.warning(f"【{self.plugin_name}】上一轮仍在执行，跳过本轮")
             return summary
+        # 1.3.0：MP 自己的转移队列繁忙时让路，避免两份调度互相抢配额
+        if self._yield_to_mp and self._mp_busy():
+            self._run_lock.release()
+            logger.info(f"【{self.plugin_name}】MP 转移队列仍在执行，本轮让路（{self._interval_seconds}s 后再试）")
+            return summary
 
         try:
             for spec in self._watch_dirs:
@@ -272,7 +282,17 @@ class DirUpload115(_PluginBase):
                 if not watch.exists():
                     logger.warning(f"【{self.plugin_name}】监控目录不存在：{watch}")
                     continue
+                if self._max_per_round and len(summary["uploaded"]) >= self._max_per_round:
+                    logger.info(
+                        f"【{self.plugin_name}】本轮已达上限 {self._max_per_round} 集，剩余留到下一轮"
+                    )
+                    break
                 for item in self._iter_entries(spec):
+                    if self._max_per_round and len(summary["uploaded"]) >= self._max_per_round:
+                        logger.info(
+                            f"【{self.plugin_name}】本轮已达上限 {self._max_per_round} 集，剩余留到下一轮"
+                        )
+                        break
                     summary["scanned"] += 1
                     try:
                         outcome = self._handle_media_dir(spec, item)
@@ -290,6 +310,42 @@ class DirUpload115(_PluginBase):
                 f"跳过 {len(summary['skipped'])}，失败 {len(summary['failed'])}"
             )
         return summary
+
+    def _mp_busy(self) -> bool:
+        """查询 MP 自身的转移队列是否还有未完成任务（只读，失败时按空闲处理）"""
+        try:
+            import asyncio
+            import os
+
+            import asyncpg
+
+            async def _q() -> int:
+                conn = await asyncpg.connect(
+                    host=os.environ.get("DB_POSTGRESQL_HOST", "127.0.0.1"),
+                    port=int(os.environ.get("DB_POSTGRESQL_PORT", "5432")),
+                    user=os.environ.get("DB_POSTGRESQL_USERNAME", "moviepilot"),
+                    password=os.environ.get("DB_POSTGRESQL_PASSWORD", ""),
+                    database=os.environ.get("DB_POSTGRESQL_DATABASE", "moviepilot"),
+                    timeout=5,
+                )
+                try:
+                    return int(
+                        await conn.fetchval(
+                            "select count(*) from transferpending "
+                            "where state in ('planned', 'running')"
+                        )
+                        or 0
+                    )
+                finally:
+                    await conn.close()
+
+            pending = asyncio.run(_q())
+            if pending:
+                logger.info(f"【{self.plugin_name}】MP 转移队列还有 {pending} 个任务未完成")
+            return pending > 0
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"【{self.plugin_name}】查询 MP 队列失败（按空闲处理）：{e}")
+            return False
 
     def _iter_entries(self, spec: Dict[str, Any]) -> List[Path]:
         """
