@@ -26,6 +26,10 @@ DEFAULT_VIDEO_EXT = ".mp4,.mkv,.ts,.flv,.m4v"
 DEFAULT_UPLOAD_EXT = ".mp4,.mkv,.ts,.flv,.m4v"
 # 随片文件：不上传 115，而是复制到本地 strm 目录供 Emby 本地刮削
 DEFAULT_SIDECAR_EXT = ".nfo,.jpg,.jpeg,.png,.webp,.ass,.srt,.vtt"
+
+
+class _RiskPause(RuntimeError):
+    """115 风控冷却（MP 会把请求 sleep 住）→ 立刻中止本轮，避免整轮被卡住一小时"""
 # 状态文件名（放在被监控的媒体目录里，不会被上传）
 STATE_FILE = ".upload115.state"
 # 正在上传的互斥标记
@@ -37,16 +41,22 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.4"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
     auth_level = 2
+    # 1.5.4：115 风控 —— 冷却 1 小时，结束后再等 30 分钟才恢复
+    RISK_COOLDOWN_SECONDS = 3600
+    RISK_RESUME_DELAY = 1800
+    # 单次 115 调用超过这个秒数，基本可判定是被风控冷却 sleep 住了
+    RISK_SLOW_CALL_SECONDS = 45
 
     def __init__(self) -> None:
         super().__init__()
         self._enabled: bool = False
         self._watch_dirs: List[Path] = []
+        self._risk_until: float = 0.0
         self._target_storage: str = "u115"
         self._target_root: str = "/B站"
         self._stable_seconds: int = 120
@@ -107,7 +117,10 @@ class DirUpload115(_PluginBase):
 
         self._enabled = bool(config.get("enabled"))
         # 每行格式：本地路径 => 115 上的相对子路径（后半段可省略，默认用本地目录名）
+        # 1.5.3：支持 `父目录 => @auto` —— 自动把父目录下的「科目/UP 目录」两层展开成监控项，
+        #        新增科目或新 UP 不用再改配置（之前必须一行一个 UP，属于设计缺陷）
         self._watch_dirs = []
+        _auto_roots: List[Path] = []
         for line in str(config.get("watch_dirs") or "").replace(";", "\n").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -119,10 +132,26 @@ class DirUpload115(_PluginBase):
                 local, remote = line, ""
             if not local:
                 continue
+            if remote.lower() in ("@auto", "*"):
+                _auto_roots.append(Path(local))
+                continue
             path = Path(local)
             self._watch_dirs.append({"local": path, "remote": remote or path.name})
+        # 自动展开：<父>/<科目>/<UP目录> → 监控项 <父>/<科目>/<UP目录>，115 子目录 = 科目名
+        for root in _auto_roots:
+            try:
+                if not root.exists():
+                    logger.warning(f"【{self.plugin_name}】自动监控根目录不存在：{root}")
+                    continue
+                for subject in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+                    for up in sorted(p for p in subject.iterdir() if p.is_dir() and not p.name.startswith(".")):
+                        self._watch_dirs.append({"local": up, "remote": subject.name})
+            except OSError as e:  # noqa: BLE001
+                logger.warning(f"【{self.plugin_name}】自动展开 {root} 失败：{e}")
         self._target_storage = (config.get("target_storage") or "u115").strip()
-        self._target_root = "/" + str(config.get("target_root") or "/B站").strip().strip("/")
+        # 1.5.4：不再默默回落到 "/B站"（历史上曾因此把内容传到网盘根目录）；没填就留空，由 scan_once 拒绝上传
+        _raw_target_root = str(config.get("target_root") or "").strip().strip("/")
+        self._target_root = ("/" + _raw_target_root) if _raw_target_root else ""
         self._stable_seconds = int(config.get("stable_seconds") or 120)
         self._video_ext = [
             e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
@@ -185,6 +214,11 @@ class DirUpload115(_PluginBase):
         self._pickcode_cache = {}
         self._pickcode_budget = max(0, int(config.get("pickcode_budget") or 10))
         self._pickcode_budget_default = self._pickcode_budget
+        # 1.5.4：风控暂停时间要持久化，reload 之后仍然生效
+        try:
+            self._risk_until = float(self.get_data("risk_until") or 0)
+        except Exception:  # noqa: BLE001
+            self._risk_until = 0.0
         # 1.5.2：累计统计与小时桶要能从插件数据里恢复，否则每次 reload（改配置/重启）都会清零，
         # 仪表盘上「累计已上传」会莫名回退
         try:
@@ -315,6 +349,21 @@ class DirUpload115(_PluginBase):
         if not self._run_lock.acquire(blocking=False):
             logger.warning(f"【{self.plugin_name}】上一轮仍在执行，跳过本轮")
             return summary
+        # 1.5.4：target_root 必须显式配置，否则宁可不上传也不要往网盘根目录乱建目录
+        if not self._target_root or self._target_root == "/":
+            self._run_lock.release()
+            logger.error(
+                f"【{self.plugin_name}】未配置「115 目标根路径」(target_root)，为避免把内容传到网盘根目录，本轮跳过"
+            )
+            return summary
+        # 1.5.4：风控暂停中直接跳过（不发起任何 115 请求，避免被 MP 的冷却 sleep 卡住整整一小时）
+        if time.time() < self._risk_until:
+            self._run_lock.release()
+            left = int(self._risk_until - time.time())
+            logger.warning(
+                f"【{self.plugin_name}】115 风控冷却中，暂停上传，约 {left // 60} 分钟后再试"
+            )
+            return summary
         # 1.3.0：MP 自己的转移队列繁忙时让路，避免两份调度互相抢配额
         if self._yield_to_mp and self._mp_busy():
             self._run_lock.release()
@@ -387,6 +436,20 @@ class DirUpload115(_PluginBase):
                         if outcome in ("uploaded", "waiting", "skipped"):
                             self._push_event(item.name, outcome)
                         summary[outcome].append(str(item))
+                    except _RiskPause as e:
+                        # 1.5.4：撞上 115 风控（MP 的风控冷却会把请求 sleep 住）→ 立刻停止本轮，
+                        # 冷却 1 小时后再加 30 分钟缓冲才恢复
+                        self._risk_until = time.time() + self.RISK_COOLDOWN_SECONDS + self.RISK_RESUME_DELAY
+                        resume = time.strftime("%H:%M:%S", time.localtime(self._risk_until))
+                        try:
+                            self.save_data("risk_until", self._risk_until)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.warning(
+                            f"【{self.plugin_name}】检测到 115 风控（{e}），立即停止本轮上传，"
+                            f"暂停到 {resume}（冷却 1 小时 + 缓冲 30 分钟）"
+                        )
+                        break
                     except Exception as e:  # noqa: BLE001
                         logger.error(f"【{self.plugin_name}】处理 {item} 失败：{e}")
                         summary["failed"].append(f"{item}: {e}")
@@ -510,6 +573,12 @@ class DirUpload115(_PluginBase):
                 ),
                 "yield_to_mp": bool(self._yield_to_mp),
                 "delete_mode": self._delete_mode,
+                # 1.5.4：风控暂停信息（>现在 时表示暂停中，前端/脚本可据此显示）
+                "risk_paused_until": (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._risk_until))
+                    if self._risk_until > time.time()
+                    else ""
+                ),
                 "ready_mode": self._ready_mode,
                 "queue": queue,
                 "by_dir": [
@@ -1119,6 +1188,15 @@ class DirUpload115(_PluginBase):
                 return True
         return False
 
+    def _slow(self, fn, label: str):
+        """包一层计时：单次 115 调用过慢说明正被风控冷却 sleep，直接抛 _RiskPause 中止本轮"""
+        t0 = time.time()
+        result = fn()
+        elapsed = time.time() - t0
+        if elapsed >= self.RISK_SLOW_CALL_SECONDS:
+            raise _RiskPause(f"{label} 单次耗时 {int(elapsed)}s")
+        return result
+
     def _strm_dir(self, spec: Dict[str, Any], media_dir: Path) -> Path:
         """本地媒体目录 → CMS 的 strm 输出目录（与 115 路径严格同构：CMS 会镜像 115 结构）"""
         return Path(self._strm_root).joinpath(*self._rel_parts(spec, media_dir))
@@ -1155,9 +1233,14 @@ class DirUpload115(_PluginBase):
                 break
             try:
                 self._pickcode_budget -= 1
-                item = self._storage.get_item(
-                    storage=self._target_storage, path=Path(remote_dir) / name
+                item = self._slow(
+                    lambda: self._storage.get_item(
+                        storage=self._target_storage, path=Path(remote_dir) / name
+                    ),
+                    f"get_item {name}",
                 )
+            except _RiskPause:
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"【{self.plugin_name}】查询 115 文件失败 {name}：{e}")
                 continue
@@ -1190,6 +1273,8 @@ class DirUpload115(_PluginBase):
             return 0
         try:
             pick = self._pickcode_map(spec, media_dir, state, files)
+        except _RiskPause:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning(f"【{self.plugin_name}】{media_dir.name} 取 pickcode 失败，跳过自建 strm：{e}")
             return 0
@@ -1358,7 +1443,10 @@ class DirUpload115(_PluginBase):
         remote_dir = self._remote_dir(spec, media_dir)
 
         # 目录不存在则递归创建（115 存储插件提供的 get_folder 契约）
-        folder = self._storage.get_folder(storage=self._target_storage, path=Path(remote_dir))
+        folder = self._slow(
+            lambda: self._storage.get_folder(storage=self._target_storage, path=Path(remote_dir)),
+            f"get_folder {remote_dir}",
+        )
         if not folder:
             raise RuntimeError(
                 f"无法获取/创建 115 目录 {remote_dir}：请确认已安装并启用 115 存储插件"
@@ -1379,7 +1467,10 @@ class DirUpload115(_PluginBase):
             if done.get(name) == size:
                 skipped.append(name)
                 continue
-            item = self._storage.upload_file(fileitem=folder, path=f, new_name=remote_name)
+            item = self._slow(
+                lambda: self._storage.upload_file(fileitem=folder, path=f, new_name=remote_name),
+                f"upload_file {remote_name}",
+            )
             if not item:
                 raise RuntimeError(f"上传失败：{f}")
             code = getattr(item, "pickcode", None) or getattr(item, "pick_code", None)
@@ -1528,7 +1619,9 @@ class DirUpload115(_PluginBase):
                                 _text(
                                     "watch_dirs",
                                     "监控目录（每行一个，容器内路径）",
-                                    "支持映射：/data/bili/合集 => 合集；省略 => 时默认用本地目录名",
+                                    "① 单目录：/data/bili/合集 => 合集（省略 => 时用本地目录名）\n"
+                                    "② 自动展开（推荐）：/downloads/bili => @auto —— 自动把 <父>/<科目>/<UP目录> 两级展开，"
+                                    "115 子目录名取「科目」，新增科目或新 UP 无需改配置",
                                 ),
                             ),
                         ],
