@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -385,6 +385,14 @@ class DirUpload115(_PluginBase):
     def _show_name(self, spec: Dict[str, Any], media_dir: Path) -> str:
         """剧集（show）目录名，默认 `UP名 - 系列名`"""
         meta = self._item_meta(spec, media_dir)
+        series = (meta.get("series") or "").strip()
+        upper = (meta.get("upper") or "").strip()
+        # 1.2.0：投稿/单视频目录的目录名与 UP 名相同，直接渲染会出现
+        # 「一数-初中版 - 一数-初中版」，这里换成更可读的后缀
+        if series and upper and series == upper:
+            meta["series"] = "投稿"
+        elif series in ("单视频", "单集"):
+            meta["series"] = series
         text = self._show_template
         for key in ("upper", "series", "title", "bvid", "index"):
             text = text.replace("{" + key + "}", meta.get(key) or "")
