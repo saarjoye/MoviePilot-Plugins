@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -361,7 +361,15 @@ class DirUpload115(_PluginBase):
         不去动它的数据库记录（改了本地目录 bili-sync 会以为文件丢了重新下载）。
         """
         if self._series_mode:
-            return [self._show_name(spec, media_dir), f"Season {self._season}"]
+            # 二开修复：剧集模式也要带上「监控目录 => 115 相对路径」里的映射前缀，
+            # 否则 数学/英语 这类分类目录会在 115 上被丢掉
+            parts: List[str] = []
+            remote = str(spec.get("remote") or "").strip("/")
+            if remote:
+                parts.extend([seg for seg in remote.split("/") if seg])
+            parts.append(self._show_name(spec, media_dir))
+            parts.append(f"Season {self._season}")
+            return parts
         slug = self._render_remote_name(spec, media_dir)
         if slug:
             return [p for p in slug.split("/") if p]
