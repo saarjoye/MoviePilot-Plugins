@@ -3,7 +3,7 @@
     "name": "目录监控上传115",
     "description": "监控本地目录，目录稳定后整目录上传到 115 网盘（不走 TMDB 整理）。支持课程→剧集模式（一合集=一季、SxxExx 命名）、上传前重命名、只传视频上传、NFO/封面留在本地 strm 目录、strm/Emby 就绪判定后清理本地。",
     "labels": "115,工具,媒体库",
-    "version": "1.3.1",
+    "version": "1.4.0",
     "system_version": ">=3.0.0",
     "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/DirUpload115.png",
     "author": "wYw",
