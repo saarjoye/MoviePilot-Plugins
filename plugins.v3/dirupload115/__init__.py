@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.4.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -78,6 +78,11 @@ class DirUpload115(_PluginBase):
         self._status_path: Path = Path("/downloads/.dirupload115/status.json")
         self._recent_events: list = []
         self._max_per_round: int = 20
+        # 1.4.0：每小时最多上传多少集（0=不限，与 MP 共用的 115 限流叠加）
+        self._max_per_hour: int = 60
+        # 累计统计（删除本地后目录消失，不能靠扫目录统计历史）
+        self._totals: Dict[str, int] = {"uploaded": 0, "deleted": 0, "failed": 0}
+        self._upload_times: List[float] = []
         self._yield_to_mp: bool = True
         self._run_lock = Lock()
         self._storage: Optional[StorageChain] = None
@@ -162,6 +167,7 @@ class DirUpload115(_PluginBase):
         if _sp:
             self._status_path = Path(_sp)
         self._max_per_round = max(0, int(config.get("max_per_round") or 20))
+        self._max_per_hour = max(0, int(config.get("max_per_hour") or 60))
         self._yield_to_mp = bool(config.get("yield_to_mp", True))
         # 注意：StorageChain 不能在应用组合根就绪前实例化（实测报 "Chain 运行上下文尚未由启动组合根配置"），
         # 所以这里不创建，等真正用的时候再懒加载（_storage 为 None 时各处会现场创建）
@@ -284,6 +290,24 @@ class DirUpload115(_PluginBase):
 
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         queue = {"total": 0, "done": 0, "pending": 0, "waiting": 0, "failed": 0}
+
+        # 1.4.0：先做一次「只统计、不上传」的全量扫描，保证仪表盘数字是全局真实队列
+        try:
+            for spec in self._watch_dirs:
+                watch: Path = spec["local"]
+                if not watch.exists():
+                    continue
+                for item in self._iter_entries(spec):
+                    queue["total"] += 1
+                    st = self._read_state(item)
+                    if st.get("status") == "done":
+                        queue["done"] += 1
+                    elif st.get("status") == "waiting_strm":
+                        queue["waiting"] += 1
+                    else:
+                        queue["pending"] += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"【{self.plugin_name}】全量统计失败：{e}")
         try:
             for spec in self._watch_dirs:
                 watch: Path = spec["local"]
@@ -302,17 +326,9 @@ class DirUpload115(_PluginBase):
                         )
                         break
                     summary["scanned"] += 1
-                    queue["total"] += 1
-                    try:
-                        _st = self._read_state(item)
-                        if _st.get("status") == "done":
-                            queue["done"] += 1
-                        elif _st.get("status") == "waiting_strm":
-                            queue["waiting"] += 1
-                        else:
-                            queue["pending"] += 1
-                    except Exception:  # noqa: BLE001
-                        queue["pending"] += 1
+                    if self._max_per_hour and len(self._recent_uploads()) >= self._max_per_hour:
+                        logger.info(f"【{self.plugin_name}】已达每小时上限 {self._max_per_hour} 集，本轮停止")
+                        break
                     try:
                         outcome = self._handle_media_dir(spec, item)
                         if outcome == "failed":
@@ -378,6 +394,12 @@ class DirUpload115(_PluginBase):
             logger.debug(f"【{self.plugin_name}】查询 MP 队列失败（按空闲处理）：{e}")
             return False
 
+    def _recent_uploads(self) -> List[float]:
+        """最近 1 小时内的上传时间戳"""
+        cutoff = time.time() - 3600
+        self._upload_times = [t for t in self._upload_times if t >= cutoff]
+        return self._upload_times
+
     def _push_event(self, name: str, outcome: str) -> None:
         """记录最近事件（内存里保留最近 30 条）"""
         label = {
@@ -386,6 +408,15 @@ class DirUpload115(_PluginBase):
             "skipped": "已就绪",
             "failed": "失败",
         }.get(outcome, outcome)
+        if outcome == "uploaded":
+            self._upload_times.append(time.time())
+            self._totals["uploaded"] += 1
+        elif outcome == "failed":
+            self._totals["failed"] += 1
+        try:
+            self.save_data("totals", self._totals)
+        except Exception:  # noqa: BLE001
+            pass
         self._recent_events.append(
             {"time": time.strftime("%H:%M:%S"), "name": name, "outcome": outcome, "label": label}
         )
@@ -400,6 +431,9 @@ class DirUpload115(_PluginBase):
                 "enabled": bool(self._enabled),
                 "interval_seconds": self._interval_seconds,
                 "max_per_round": self._max_per_round,
+                "max_per_hour": self._max_per_hour,
+                "uploaded_last_hour": len(self._recent_uploads()),
+                "totals": self._totals,
                 "yield_to_mp": bool(self._yield_to_mp),
                 "delete_mode": self._delete_mode,
                 "ready_mode": self._ready_mode,
@@ -1083,6 +1117,11 @@ class DirUpload115(_PluginBase):
             import shutil
 
             shutil.rmtree(media_dir, ignore_errors=True)
+            self._totals["deleted"] += 1
+            try:
+                self.save_data("totals", self._totals)
+            except Exception:  # noqa: BLE001
+                pass
             logger.info(f"【{self.plugin_name}】已删除本地目录 {media_dir}（{file_count} 个文件）")
             self._prune_empty_parents(spec["local"], media_dir)
             return True
