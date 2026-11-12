@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -74,6 +74,9 @@ class DirUpload115(_PluginBase):
         self._cms_token: str = ""
         self._interval_seconds: int = 300
         # 1.3.0：每轮最多上传多少集（0=不限）、MP 转移队列繁忙时让路
+        # 1.3.1：把队列/进度写成 JSON 供 bili-sync 仪表盘读取
+        self._status_path: Path = Path("/downloads/.dirupload115/status.json")
+        self._recent_events: list = []
         self._max_per_round: int = 20
         self._yield_to_mp: bool = True
         self._run_lock = Lock()
@@ -155,6 +158,9 @@ class DirUpload115(_PluginBase):
         self._cms_base_url = str(config.get("cms_base_url") or "").strip().rstrip("/")
         self._cms_token = str(config.get("cms_token") or "").strip()
         self._interval_seconds = max(60, int(config.get("interval_seconds") or 300))
+        _sp = str(config.get("status_path") or "").strip()
+        if _sp:
+            self._status_path = Path(_sp)
         self._max_per_round = max(0, int(config.get("max_per_round") or 20))
         self._yield_to_mp = bool(config.get("yield_to_mp", True))
         # 注意：StorageChain 不能在应用组合根就绪前实例化（实测报 "Chain 运行上下文尚未由启动组合根配置"），
@@ -276,6 +282,8 @@ class DirUpload115(_PluginBase):
             logger.info(f"【{self.plugin_name}】MP 转移队列仍在执行，本轮让路（{self._interval_seconds}s 后再试）")
             return summary
 
+        started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        queue = {"total": 0, "done": 0, "pending": 0, "waiting": 0, "failed": 0}
         try:
             for spec in self._watch_dirs:
                 watch: Path = spec["local"]
@@ -294,14 +302,34 @@ class DirUpload115(_PluginBase):
                         )
                         break
                     summary["scanned"] += 1
+                    queue["total"] += 1
+                    try:
+                        _st = self._read_state(item)
+                        if _st.get("status") == "done":
+                            queue["done"] += 1
+                        elif _st.get("status") == "waiting_strm":
+                            queue["waiting"] += 1
+                        else:
+                            queue["pending"] += 1
+                    except Exception:  # noqa: BLE001
+                        queue["pending"] += 1
                     try:
                         outcome = self._handle_media_dir(spec, item)
+                        if outcome == "failed":
+                            queue["failed"] += 1
+                        if outcome in ("uploaded", "waiting", "skipped"):
+                            self._push_event(item.name, outcome)
                         summary[outcome].append(str(item))
                     except Exception as e:  # noqa: BLE001
                         logger.error(f"【{self.plugin_name}】处理 {item} 失败：{e}")
                         summary["failed"].append(f"{item}: {e}")
         finally:
             self._run_lock.release()
+            self._write_status(
+                started_at=started_at,
+                queue=queue,
+                summary=summary,
+            )
 
         if summary["uploaded"] or summary["waiting"] or summary["failed"]:
             logger.info(
@@ -329,10 +357,13 @@ class DirUpload115(_PluginBase):
                     timeout=5,
                 )
                 try:
+                    # 1.3.1：只把「真正在执行」的任务算繁忙，
+                    # 否则历史上卡在 planned 的脏任务会让插件永远让路
                     return int(
                         await conn.fetchval(
                             "select count(*) from transferpending "
-                            "where state in ('planned', 'running')"
+                            "where state = 'running' "
+                            "   or (lease_expires_at is not null and lease_expires_at > now())"
                         )
                         or 0
                     )
@@ -346,6 +377,48 @@ class DirUpload115(_PluginBase):
         except Exception as e:  # noqa: BLE001
             logger.debug(f"【{self.plugin_name}】查询 MP 队列失败（按空闲处理）：{e}")
             return False
+
+    def _push_event(self, name: str, outcome: str) -> None:
+        """记录最近事件（内存里保留最近 30 条）"""
+        label = {
+            "uploaded": "已上传",
+            "waiting": "等 strm",
+            "skipped": "已就绪",
+            "failed": "失败",
+        }.get(outcome, outcome)
+        self._recent_events.append(
+            {"time": time.strftime("%H:%M:%S"), "name": name, "outcome": outcome, "label": label}
+        )
+        self._recent_events = self._recent_events[-30:]
+
+    def _write_status(self, started_at: str, queue: Dict[str, Any], summary: Dict[str, Any]) -> None:
+        """把队列与调度信息写成 JSON，供 bili-sync 仪表盘读取（原子写）"""
+        try:
+            payload = {
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "round_started_at": started_at,
+                "enabled": bool(self._enabled),
+                "interval_seconds": self._interval_seconds,
+                "max_per_round": self._max_per_round,
+                "yield_to_mp": bool(self._yield_to_mp),
+                "delete_mode": self._delete_mode,
+                "ready_mode": self._ready_mode,
+                "queue": queue,
+                "round": {
+                    "scanned": summary.get("scanned", 0),
+                    "uploaded": len(summary.get("uploaded") or []),
+                    "waiting": len(summary.get("waiting") or []),
+                    "skipped": len(summary.get("skipped") or []),
+                    "failed": len(summary.get("failed") or []),
+                },
+                "recent": self._recent_events[-20:],
+            }
+            self._status_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._status_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._status_path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"【{self.plugin_name}】写状态文件失败：{e}")
 
     def _iter_entries(self, spec: Dict[str, Any]) -> List[Path]:
         """
