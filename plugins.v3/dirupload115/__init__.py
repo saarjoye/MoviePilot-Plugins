@@ -41,7 +41,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -705,6 +705,11 @@ class DirUpload115(_PluginBase):
         text = self._show_template
         for key in ("upper", "series", "title", "bvid", "index"):
             text = text.replace("{" + key + "}", meta.get(key) or "")
+        text = text.strip(" -_/")
+        # 1.5.5：模板只写 {series} 时，若系列名为空（无合集信息）就回落到 UP 名 / 本地目录名，
+        # 避免生成空目录名或 "untitled"
+        if not text:
+            text = upper or media_dir.name
         return _safe_stem(text)
 
     def _episode_no(self, spec: Dict[str, Any], media_dir: Path) -> int:
