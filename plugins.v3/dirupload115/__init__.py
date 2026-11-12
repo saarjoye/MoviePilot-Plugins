@@ -37,7 +37,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -83,6 +83,8 @@ class DirUpload115(_PluginBase):
         # 累计统计（删除本地后目录消失，不能靠扫目录统计历史）
         self._totals: Dict[str, int] = {"uploaded": 0, "deleted": 0, "failed": 0}
         self._upload_times: List[float] = []
+        # 1.4.1：按小时聚合的上传量（最多保留 12 小时）
+        self._hourly: Dict[str, int] = {}
         self._yield_to_mp: bool = True
         self._run_lock = Lock()
         self._storage: Optional[StorageChain] = None
@@ -290,6 +292,7 @@ class DirUpload115(_PluginBase):
 
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         queue = {"total": 0, "done": 0, "pending": 0, "waiting": 0, "failed": 0}
+        stuck: List[Dict[str, Any]] = []
 
         # 1.4.0：先做一次「只统计、不上传」的全量扫描，保证仪表盘数字是全局真实队列
         try:
@@ -304,6 +307,12 @@ class DirUpload115(_PluginBase):
                         queue["done"] += 1
                     elif st.get("status") == "waiting_strm":
                         queue["waiting"] += 1
+                        try:
+                            age = (time.time() - item.stat().st_mtime) / 60
+                            if age >= 30:
+                                stuck.append({"name": item.name, "minutes": int(age)})
+                        except Exception:  # noqa: BLE001
+                            pass
                     else:
                         queue["pending"] += 1
         except Exception as e:  # noqa: BLE001
@@ -411,6 +420,14 @@ class DirUpload115(_PluginBase):
         if outcome == "uploaded":
             self._upload_times.append(time.time())
             self._totals["uploaded"] += 1
+            hour_key = time.strftime("%m-%d %H:00")
+            self._hourly[hour_key] = self._hourly.get(hour_key, 0) + 1
+            keep = sorted(self._hourly.keys())[-12:]
+            self._hourly = {k: self._hourly[k] for k in keep}
+            try:
+                self.save_data("hourly", self._hourly)
+            except Exception:  # noqa: BLE001
+                pass
         elif outcome == "failed":
             self._totals["failed"] += 1
         try:
@@ -422,7 +439,12 @@ class DirUpload115(_PluginBase):
         )
         self._recent_events = self._recent_events[-30:]
 
-    def _write_status(self, started_at: str, queue: Dict[str, Any], summary: Dict[str, Any]) -> None:
+    def _write_status(
+        self,
+        started_at: str,
+        queue: Dict[str, Any],
+        summary: Dict[str, Any],
+    ) -> None:
         """把队列与调度信息写成 JSON，供 bili-sync 仪表盘读取（原子写）"""
         try:
             payload = {
@@ -434,6 +456,12 @@ class DirUpload115(_PluginBase):
                 "max_per_hour": self._max_per_hour,
                 "uploaded_last_hour": len(self._recent_uploads()),
                 "totals": self._totals,
+                "hourly": [{"hour": k, "count": v} for k, v in sorted(self._hourly.items())],
+                "stuck": sorted(stuck, key=lambda x: -x["minutes"])[:20],
+                "next_run_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(time.time() + self._interval_seconds),
+                ),
                 "yield_to_mp": bool(self._yield_to_mp),
                 "delete_mode": self._delete_mode,
                 "ready_mode": self._ready_mode,
