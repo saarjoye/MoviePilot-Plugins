@@ -41,7 +41,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.7"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -246,6 +246,9 @@ class DirUpload115(_PluginBase):
                 f"{self._target_storage}:{self._target_root}，稳定阈值 {self._stable_seconds}s，"
                 f"周期 {self._interval_seconds}s"
             )
+            # 1.5.7：MP 每次启用/重载都会重挂定时器，这里立刻刷新一次 status.json 的
+            # updated_at / next_run_at，仪表盘才不会拿着几小时前的旧时间显示“已逾期”
+            self._touch_status("插件已启动/重载，等待下一轮触发")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -348,6 +351,7 @@ class DirUpload115(_PluginBase):
             return summary
         if not self._run_lock.acquire(blocking=False):
             logger.warning(f"【{self.plugin_name}】上一轮仍在执行，跳过本轮")
+            self._touch_status("上一轮仍在执行")
             return summary
         # 1.5.4：target_root 必须显式配置，否则宁可不上传也不要往网盘根目录乱建目录
         if not self._target_root or self._target_root == "/":
@@ -355,6 +359,7 @@ class DirUpload115(_PluginBase):
             logger.error(
                 f"【{self.plugin_name}】未配置「115 目标根路径」(target_root)，为避免把内容传到网盘根目录，本轮跳过"
             )
+            self._touch_status("未配置 target_root，已跳过")
             return summary
         # 1.5.4：风控暂停中直接跳过（不发起任何 115 请求，避免被 MP 的冷却 sleep 卡住整整一小时）
         if time.time() < self._risk_until:
@@ -363,11 +368,13 @@ class DirUpload115(_PluginBase):
             logger.warning(
                 f"【{self.plugin_name}】115 风控冷却中，暂停上传，约 {left // 60} 分钟后再试"
             )
+            self._touch_status(f"115 风控暂停中，约 {max(1, left // 60)} 分钟后恢复")
             return summary
         # 1.3.0：MP 自己的转移队列繁忙时让路，避免两份调度互相抢配额
         if self._yield_to_mp and self._mp_busy():
             self._run_lock.release()
             logger.info(f"【{self.plugin_name}】MP 转移队列仍在执行，本轮让路（{self._interval_seconds}s 后再试）")
+            self._touch_status("MP 转移队列繁忙，本轮让路")
             return summary
 
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -546,6 +553,46 @@ class DirUpload115(_PluginBase):
         )
         self._recent_events = self._recent_events[-30:]
 
+    def _touch_status(self, reason: str) -> None:
+        """
+        1.5.6：本轮被跳过（风控暂停 / 上一轮没跑完 / 配置缺失）时也刷新 status.json。
+
+        不刷新的后果就是仪表盘一直显示几十分钟前算出来的 next_run_at，
+        用户看到「今天 10:07 · 还剩 +00:52」这种过期时间，完全无法判断真实的下一次时间。
+        """
+        try:
+            path = self._status_path
+            current: Dict[str, Any] = {}
+            if path.exists():
+                try:
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    current = {}
+            now = time.time()
+            current["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+            current["next_run_at"] = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(now + self._interval_seconds)
+            )
+            current["interval_seconds"] = self._interval_seconds
+            # 1.5.7：顺带把当前生效的节奏参数也刷新，避免仪表盘显示上一轮的旧值
+            current["max_per_round"] = self._max_per_round
+            current["max_per_hour"] = self._max_per_hour
+            current["enabled"] = bool(self._enabled)
+            current["delete_mode"] = self._delete_mode
+            current["ready_mode"] = self._ready_mode
+            current["paused_reason"] = reason
+            current["risk_paused_until"] = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._risk_until))
+                if self._risk_until > now
+                else ""
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"【{self.plugin_name}】刷新 status.json 失败：{e}")
+
     def _write_status(
         self,
         started_at: str,
@@ -579,6 +626,8 @@ class DirUpload115(_PluginBase):
                     if self._risk_until > time.time()
                     else ""
                 ),
+                # 1.5.6：正常跑完一轮时清空暂停原因
+                "paused_reason": "",
                 "ready_mode": self._ready_mode,
                 "queue": queue,
                 "by_dir": [
