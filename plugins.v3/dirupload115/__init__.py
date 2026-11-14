@@ -1,4 +1,4 @@
-﻿"""
+"""
 DirUpload115 —— 监控本地目录，识别到「下载完成」就把整个目录上传到 115 网盘。
 
 设计要点（与 MoviePilot 原生整理链完全解耦）：
@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.2"
+    plugin_version = "1.6.3"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -1076,8 +1076,21 @@ class DirUpload115(_PluginBase):
                 return "skipped"
 
         # 4) 已上传、正在等 strm：只做就绪检查，不重复上传、也不访问 115
+        #    1.6.3：如果命名规则变过（比如从「按合集分季」切到课程模式），旧状态里的文件名
+        #    和新模板算出来的对不上——这种情况永远等不到新路径的 strm，必须清空状态按新名字重传
         if status == "waiting_strm":
-            return self._finalize(spec, media_dir, state, files)
+            upload_files = [f for f in files if f.suffix.lower() in self._upload_ext]
+            expected = {self._remote_name_for(spec, media_dir, f) for f in upload_files}
+            recorded = set((state.get("files") or {}).keys())
+            if recorded and expected and recorded != expected:
+                logger.warning(
+                    f"【{self.plugin_name}】{media_dir.name} 的命名规则变了"
+                    f"（旧：{sorted(recorded)[0]} → 新：{sorted(expected)[0]}），清空旧状态按新规则重传"
+                )
+                self._write_state(media_dir, {})
+                state, status = {}, ""
+            else:
+                return self._finalize(spec, media_dir, state, files)
 
         # 5) 首次处理：加锁 → 重命名 → 只传视频 → 随片文件拷到 strm 目录 → 等 strm
         lock = media_dir / LOCK_FILE
