@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.5"
+    plugin_version = "1.6.6"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -2559,13 +2559,20 @@ _KNOWN_SUBJECTS = {
 _SUBJECT_TAG_RE = re.compile(r"【\s*([^】]{1,8}?)\s*】")
 
 
+_TAG_SKIP_RE = re.compile(r"^(梓墨说|梓墨品书|新课速递|开学第一课|.*新课.*|.*抽奖.*|.*广告.*)$")
+
+
 def _first_title_tag(title: str) -> str:
     """取标题里第一个【标签】，用作专题分组名（如「【非连续文本】…」→ 非连续文本）"""
     for m in re.finditer(r"【\s*([^】]{1,12}?)\s*】", str(title or "")):
         tag = m.group(1).strip()
-        tag = re.sub(r"^(精读|精讲|专题|连载|系列)\s*[·・:：\-_]\s*", "", tag).strip()
-        if tag:
-            return tag
+        # 异体字归一（「沖刺」→「冲刺」），否则同一专栏会被拆成两个目录
+        tag = tag.replace("沖", "冲").replace("衝", "冲")
+        # 去掉「精读·」「解读·」这类前缀，让「解读·朝花夕拾」并进「朝花夕拾」
+        tag = re.sub(r"^(精读|精讲|专题|连载|系列|解读)\s*[·・:：\-_]\s*", "", tag).strip()
+        if not tag or _TAG_SKIP_RE.match(tag):
+            continue
+        return tag
     return ""
 
 
