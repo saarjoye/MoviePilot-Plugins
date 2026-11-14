@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.7"
+    plugin_version = "1.6.8"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -870,11 +870,14 @@ class DirUpload115(_PluginBase):
                 meta["series"] = re.sub(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", "", meta["series"]).strip()
                 # 1.6.5：专题目录的分组来源
                 #   series=合集/UP 目录名（旧行为）｜tag=标题里的第一个【标签】｜both=合集名/标签
+                #   1.6.8：**来自合集订阅的用合集名**；单视频投稿（目录名是 UP 名/无合集）才看标题标签
+                raw_series = meta.get("series") or ""
+                is_collection = bool(re.match(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", raw_series))
                 tag = _first_title_tag(meta.get("title") or "") if self._topic_group in ("tag", "both") else ""
-                if tag and self._topic_group == "tag":
+                if tag and self._topic_group in ("tag", "both") and not is_collection:
                     meta["series"] = tag          # 让 {series} 直接渲染成标签名
                 parts.append(_safe_stem(self._render_tpl(self._topic_template, meta)))
-                if tag and self._topic_group == "both":
+                if tag and self._topic_group == "both" and is_collection:
                     parts.append(_safe_stem(tag))
                 return parts
             raise _Unmapped(
