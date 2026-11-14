@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.4"
+    plugin_version = "1.6.5"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -221,6 +221,10 @@ class DirUpload115(_PluginBase):
         self._offgrade_policy = str(config.get("offgrade_policy") or "keep").strip().lower()
         if self._offgrade_policy not in ("keep", "delete"):
             self._offgrade_policy = "keep"
+        # 专题目录按什么分组：series=合集/UP名 / tag=标题里的【标签】 / both=合集名/标签
+        self._topic_group = str(config.get("topic_group") or "series").strip().lower()
+        if self._topic_group not in ("series", "tag", "both"):
+            self._topic_group = "series"
         self._skipped_grade = 0
         self._skipped_noncourse = 0
         self._curriculum = _CurriculumMap(self._curriculum_fix if self._curriculum_mode else "",
@@ -864,7 +868,14 @@ class DirUpload115(_PluginBase):
                 # 合集目录名常带「合集·」「系列·」前缀，做专题目录时去掉，避免 `专题·合集·xxx`
                 meta = dict(meta)
                 meta["series"] = re.sub(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", "", meta["series"]).strip()
+                # 1.6.5：专题目录的分组来源
+                #   series=合集/UP 目录名（旧行为）｜tag=标题里的第一个【标签】｜both=合集名/标签
+                tag = _first_title_tag(meta.get("title") or "") if self._topic_group in ("tag", "both") else ""
+                if tag and self._topic_group == "tag":
+                    meta["series"] = tag          # 让 {series} 直接渲染成标签名
                 parts.append(_safe_stem(self._render_tpl(self._topic_template, meta)))
+                if tag and self._topic_group == "both":
+                    parts.append(_safe_stem(tag))
                 return parts
             raise _Unmapped(
                 f"{media_dir.name} 未映射：bvid={meta.get('bvid') or '?'} "
@@ -1971,6 +1982,7 @@ class DirUpload115(_PluginBase):
             "unmapped_policy": "topic",
             "grade_allowlist": [],
             "offgrade_policy": "keep",
+            "topic_group": "series",
             "subject_from_title": True,
             "interval_seconds": 300,
             "delete_mode": "none",
@@ -2089,7 +2101,26 @@ class DirUpload115(_PluginBase):
                                     },
                                 },
                             ),
-                            _col(3, _switch("curriculum_mode", "课程模式（按学科/年级册/单元命名）")),
+                            _col(
+                                3,
+                                {
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "topic_group",
+                                        "label": "专题目录按什么分组",
+                                        "items": [
+                                            {"title": "合集名 / UP 名（默认）", "value": "series"},
+                                            {"title": "标题里的【标签】（如【非连续文本】【诗歌阅读】）", "value": "tag"},
+                                            {"title": "合集名/标签（两级）", "value": "both"},
+                                        ],
+                                        "hint": "语文这种「一个 UP 发很多专栏」的，选「标题标签」就会分成 "
+                                                "语文/专题·非连续文本、语文/专题·诗歌阅读 这样；"
+                                                "英语按合集订的保持默认即可",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
+                            _col(1, _switch("curriculum_mode", "课程模式")),
                         ],
                     },
                     {
@@ -2526,6 +2557,16 @@ _KNOWN_SUBJECTS = {
     "政治": "道德与法治", "道法": "道德与法治", "道德与法治": "道德与法治",
 }
 _SUBJECT_TAG_RE = re.compile(r"【\s*([^】]{1,8}?)\s*】")
+
+
+def _first_title_tag(title: str) -> str:
+    """取标题里第一个【标签】，用作专题分组名（如「【非连续文本】…」→ 非连续文本）"""
+    for m in re.finditer(r"【\s*([^】]{1,12}?)\s*】", str(title or "")):
+        tag = m.group(1).strip()
+        tag = re.sub(r"^(精读|精讲|专题|连载|系列)\s*[·・:：\-_]\s*", "", tag).strip()
+        if tag:
+            return tag
+    return ""
 
 
 def _parse_subject_tag(title: str) -> str:
