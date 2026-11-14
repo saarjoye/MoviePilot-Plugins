@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.3"
+    plugin_version = "1.6.4"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -206,10 +206,23 @@ class DirUpload115(_PluginBase):
         self._topic_template = str(
             config.get("topic_template") or "专题·{series}"
         ).strip() or "专题·{series}"
-        # 查不到年级册时的去处：topic=归「专题·<合集名>」（推荐）/ hold=不上传，等补映射
+        # 查不到年级册时的去处：topic=归「专题·<合集名>」/ hold=不上传 / delete=不上传并删本地
         self._unmapped_policy = str(config.get("unmapped_policy") or "topic").strip().lower()
-        if self._unmapped_policy not in ("topic", "hold"):
+        if self._unmapped_policy not in ("topic", "hold", "delete"):
             self._unmapped_policy = "topic"
+        # 年级白名单：只上传这些年级（空=不限制），如 ["初中七","初中八"]；前端是多选下拉
+        _raw_allow = config.get("grade_allowlist")
+        if isinstance(_raw_allow, (list, tuple)):
+            _allow = [str(x).strip() for x in _raw_allow if str(x).strip()]
+        else:
+            _allow = [x.strip() for x in re.split(r"[,，;；\s]+", str(_raw_allow or "")) if x.strip()]
+        self._grade_allowlist = {a for a in _allow if a not in ("全部", "不限", "all")}
+        # 非目标年级怎么处理：keep=留本地不上传 / delete=不上传并删本地
+        self._offgrade_policy = str(config.get("offgrade_policy") or "keep").strip().lower()
+        if self._offgrade_policy not in ("keep", "delete"):
+            self._offgrade_policy = "keep"
+        self._skipped_grade = 0
+        self._skipped_noncourse = 0
         self._curriculum = _CurriculumMap(self._curriculum_fix if self._curriculum_mode else "",
                                           self._curriculum_csv if self._curriculum_mode else "")
         # 综合 UP：标题里的【数学】/【地理】覆盖订阅路径里的学科
@@ -696,6 +709,10 @@ class DirUpload115(_PluginBase):
                     "entries": len(self._curriculum.by_bvid),
                     "error": self._curriculum.error,
                     "unmapped_policy": self._unmapped_policy,
+                    "grade_allowlist": sorted(self._grade_allowlist),
+                    "offgrade_policy": self._offgrade_policy,
+                    "skipped_grade": self._skipped_grade,
+                    "skipped_noncourse": self._skipped_noncourse,
                     "dir_template": self._dir_template,
                     "file_template": self._file_template,
                     "topic_template": self._topic_template,
@@ -1067,8 +1084,24 @@ class DirUpload115(_PluginBase):
         if not any(f.suffix.lower() in self._video_ext for f in files):
             return "skipped"
 
-        # 3.5) 课程模式：先确认这条能落到「年级册」或「专题」，落不下就不碰 115（等补映射）
+        # 3.5) 课程模式：年级闸门 —— 非目标年级一律不动 115（可选顺手删本地）
         if self._curriculum_mode:
+            meta = self._item_meta(spec, media_dir)
+            grade_key = f"{meta.get('stage') or '初中'}{meta.get('grade') or ''}"
+            if meta.get("grade") and self._grade_allowlist and grade_key not in self._grade_allowlist:
+                self._skipped_grade += 1
+                logger.info(
+                    f"【{self.plugin_name}】{media_dir.name} 是「{grade_key}」，不在允许的年级"
+                    f"（{'、'.join(sorted(self._grade_allowlist))}），跳过上传"
+                )
+                if self._offgrade_policy == "delete":
+                    self._drop_local(spec, media_dir)
+                return "skipped"
+            if not meta.get("grade") and self._unmapped_policy == "delete":
+                self._skipped_noncourse += 1
+                logger.info(f"【{self.plugin_name}】{media_dir.name} 认不出年级（视为非课程），按策略删除本地")
+                self._drop_local(spec, media_dir)
+                return "skipped"
             try:
                 self._rel_parts(spec, media_dir)
             except _Unmapped as e:
@@ -1716,6 +1749,20 @@ class DirUpload115(_PluginBase):
             logger.warning(f"【{self.plugin_name}】移入回收站失败（本地保留）：{e}")
             return False
 
+    def _drop_local(self, spec: Dict[str, Any], media_dir: Path) -> bool:
+        """被年级/非课程闸门拦下的条目：直接删本地（省磁盘，不进回收站）"""
+        import shutil
+
+        try:
+            n = sum(1 for p in media_dir.rglob("*") if p.is_file())
+            shutil.rmtree(media_dir, ignore_errors=True)
+            self._prune_empty_parents(spec["local"], media_dir)
+            logger.info(f"【{self.plugin_name}】已删除不符合条件的本地目录 {media_dir}（{n} 个文件）")
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"【{self.plugin_name}】删除本地目录失败 {media_dir}：{e}")
+            return False
+
     @staticmethod
     def _prune_empty_parents(watch: Path, media_dir: Path) -> None:
         """清理因移走条目而变空的上级目录（不越过监控根）"""
@@ -1922,6 +1969,8 @@ class DirUpload115(_PluginBase):
             "file_template": "{unit_no} {unit} - {lesson} - {upper}",
             "topic_template": "专题·{series}",
             "unmapped_policy": "topic",
+            "grade_allowlist": [],
+            "offgrade_policy": "keep",
             "subject_from_title": True,
             "interval_seconds": 300,
             "delete_mode": "none",
@@ -1994,7 +2043,58 @@ class DirUpload115(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            _col(
+                                5,
+                                {
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "grade_allowlist",
+                                        "label": "只上传这些年级（多选，留空=全部）",
+                                        "items": [
+                                            {"title": "初中七（七上+七下）", "value": "初中七"},
+                                            {"title": "初中八（八上+八下）", "value": "初中八"},
+                                            {"title": "初中九（九上+九下）", "value": "初中九"},
+                                            {"title": "高中一", "value": "高中一"},
+                                            {"title": "高中二", "value": "高中二"},
+                                            {"title": "高中三", "value": "高中三"},
+                                            {"title": "小学一", "value": "小学一"},
+                                            {"title": "小学二", "value": "小学二"},
+                                            {"title": "小学三", "value": "小学三"},
+                                            {"title": "小学四", "value": "小学四"},
+                                            {"title": "小学五", "value": "小学五"},
+                                            {"title": "小学六", "value": "小学六"},
+                                        ],
+                                        "multiple": True,
+                                        "chips": True,
+                                        "clearable": True,
+                                        "hint": "选「初中七」就只上传七上/七下，八、九年级一律不上传；"
+                                                "专题/专栏（语法线、实验视频等）不受此限制",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
+                            _col(
+                                4,
+                                {
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "offgrade_policy",
+                                        "label": "非目标年级怎么处理",
+                                        "items": [
+                                            {"title": "留本地，不上传（推荐先这样）", "value": "keep"},
+                                            {"title": "不上传，并删本地（省磁盘）", "value": "delete"},
+                                        ],
+                                        "hint": "选「删本地」后，非目标年级下载完就会被删掉，只保留目标年级和专题",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
                             _col(3, _switch("curriculum_mode", "课程模式（按学科/年级册/单元命名）")),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             _col(
                                 5,
                                 {
@@ -2005,9 +2105,10 @@ class DirUpload115(_PluginBase):
                                         "items": [
                                             {"title": "归到「专题·<合集名>」（推荐）", "value": "topic"},
                                             {"title": "先不上传，等我来补", "value": "hold"},
+                                            {"title": "不上传，并删本地（当垃圾清掉）", "value": "delete"},
                                         ],
-                                        "hint": "专题/专栏课（语法线、暑期篇、实验视频）建议用「专题」；"
-                                                "想严格只要教材内容就选「先不上传」",
+                                        "hint": "专题/专栏课建议用「专题」；想严格只要教材内容就选「先不上传」；"
+                                                "「删本地」用于清理 vlog/表情包这类非课程",
                                         "persistent-hint": True,
                                     },
                                 },
