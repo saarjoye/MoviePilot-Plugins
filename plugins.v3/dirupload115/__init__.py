@@ -1,4 +1,4 @@
-"""
+﻿"""
 DirUpload115 —— 监控本地目录，识别到「下载完成」就把整个目录上传到 115 网盘。
 
 设计要点（与 MoviePilot 原生整理链完全解耦）：
@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.1"
+    plugin_version = "1.6.2"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -212,6 +212,8 @@ class DirUpload115(_PluginBase):
             self._unmapped_policy = "topic"
         self._curriculum = _CurriculumMap(self._curriculum_fix if self._curriculum_mode else "",
                                           self._curriculum_csv if self._curriculum_mode else "")
+        # 综合 UP：标题里的【数学】/【地理】覆盖订阅路径里的学科
+        self._subject_from_title = bool(config.get("subject_from_title", True))
         self._unmapped: List[Dict[str, str]] = []
         # 上传成功后如何处理本地文件：none 保留 / recycle 移到回收目录 / delete 直接删除
         self._delete_mode = str(config.get("delete_mode") or "none").strip().lower()
@@ -827,11 +829,17 @@ class DirUpload115(_PluginBase):
         """
         if self._curriculum_mode:
             # 课程模式：<映射前缀(学科)>/<学段年级(册)>；查不到册就落「专题·<合集名>」
+            meta = self._item_meta(spec, media_dir)
             parts: List[str] = []
             remote = str(spec.get("remote") or "").strip("/")
-            if remote:
-                parts.extend([seg for seg in remote.split("/") if seg])
-            meta = self._item_meta(spec, media_dir)
+            segs = [seg for seg in remote.split("/") if seg]
+            # 综合 UP：标题带【数学】【地理】时，用标题的学科替换监控映射的第一段
+            subject = (meta.get("subject") or "").strip()
+            if subject and segs and segs[0] != subject:
+                segs[0] = subject
+            elif subject and not segs:
+                segs = [subject]
+            parts.extend(segs)
             if meta.get("grade") and meta.get("volume"):
                 parts.append(_safe_stem(self._render_tpl(self._dir_template, meta)))
                 return parts
@@ -989,6 +997,12 @@ class DirUpload115(_PluginBase):
             # 1) 先定学科（= 订阅路径里的学科目录），词典要按学科启用
             if not meta.get("subject"):
                 meta["subject"] = str(spec.get("remote") or "").split("/")[0]
+            # 1.5) 综合 UP：标题里明确写了学科（【数学】【地理】）就以标题为准
+            if self._subject_from_title:
+                tag_subject = _parse_subject_tag(meta.get("title") or "")
+                if tag_subject and tag_subject != meta.get("subject"):
+                    meta["_subject_override"] = meta.get("subject") or ""
+                    meta["subject"] = tag_subject
             # 2) 查映射表（bvid 优先，其次标题），再退到内置词典
             cur = self._curriculum.lookup(
                 bvid=meta.get("bvid") or "", title=meta.get("title") or "",
@@ -1895,6 +1909,7 @@ class DirUpload115(_PluginBase):
             "file_template": "{unit_no} {unit} - {lesson} - {upper}",
             "topic_template": "专题·{series}",
             "unmapped_policy": "topic",
+            "subject_from_title": True,
             "interval_seconds": 300,
             "delete_mode": "none",
             "recycle_root": "",
@@ -1990,6 +2005,18 @@ class DirUpload115(_PluginBase):
                                     "curriculum_csv",
                                     "（可选）批量导入 CSV 路径",
                                     "留空即可，日常不用它。需要一次导入几百条时才用，如 /config/curriculum.csv",
+                                ),
+                            ),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(
+                                12,
+                                _switch(
+                                    "subject_from_title",
+                                    "综合 UP：以标题里的【学科】为准（【数学】→数学/、【地理】→地理/）",
                                 ),
                             ),
                         ],
@@ -2374,8 +2401,26 @@ def _parse_grade_tag(text: str) -> Dict[str, str]:
 
 def _norm_title(s: str) -> str:
     """标题归一化：只留中日文/字母/数字，用来做「115 文件名 ↔ 映射表 title」的模糊匹配"""
-    s = re.sub(r"[\s\-_·|｜:：,，.。!！?？~～【】\[\]（）()<>《》\"'“”‘’/\\]+", "", str(s or ""))
+    s = re.sub(r"[\s\-_·|｜:，,。!！?？~～【】\[\]（）()<>《》\"'“”‘’/\\]+", "", str(s or ""))
     return s.lower()
+
+
+# 标题里【】中出现的学科名（综合 UP 会用它标学科，如「【数学】八上 11.1 …」）
+_KNOWN_SUBJECTS = {
+    "数学": "数学", "语文": "语文", "英语": "英语", "物理": "物理", "化学": "化学",
+    "生物": "生物", "历史": "历史", "地理": "地理", "科学": "科学",
+    "政治": "道德与法治", "道法": "道德与法治", "道德与法治": "道德与法治",
+}
+_SUBJECT_TAG_RE = re.compile(r"【\s*([^】]{1,8}?)\s*】")
+
+
+def _parse_subject_tag(title: str) -> str:
+    """标题里的【数学】/【地理】→ 学科名（不认识的一律忽略，避免把【初一】当学科）"""
+    for m in _SUBJECT_TAG_RE.finditer(str(title or "")):
+        name = _KNOWN_SUBJECTS.get(m.group(1).strip())
+        if name:
+            return name
+    return ""
 
 
 _NOISE_WORDS = sorted([
