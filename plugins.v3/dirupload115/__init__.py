@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -986,15 +986,19 @@ class DirUpload115(_PluginBase):
             meta["series"] = spec["local"].name if parent == spec["local"] else parent.name
         meta["index"] = self._extract_index(meta.get("title") or "") or self._sibling_index(media_dir)
         if self._curriculum_mode:
-            # 1) 先查映射表（bvid 优先，其次标题）
+            # 1) 先定学科（= 订阅路径里的学科目录），词典要按学科启用
+            if not meta.get("subject"):
+                meta["subject"] = str(spec.get("remote") or "").split("/")[0]
+            # 2) 查映射表（bvid 优先，其次标题），再退到内置词典
             cur = self._curriculum.lookup(
-                bvid=meta.get("bvid") or "", title=meta.get("title") or ""
+                bvid=meta.get("bvid") or "", title=meta.get("title") or "",
+                subject=meta.get("subject") or "",
             )
             for key in ("subject", "stage", "grade", "volume", "unit_no", "unit", "lesson"):
                 if cur.get(key):
                     meta[key] = cur[key]
             meta["_match"] = cur.get("_match") or ""
-            # 2) 表里没有年级册时，从「合集名」再退到「标题」读 【七上】/【初一】
+            # 3) 表里没有年级册时，从「合集名」再退到「父目录名 / 标题」读 【七上】/八上/七年级上册
             if not (meta.get("grade") and meta.get("volume")):
                 for tag in (
                     _parse_grade_tag(meta.get("series") or ""),
@@ -1005,11 +1009,8 @@ class DirUpload115(_PluginBase):
                         if val and not meta.get(key):
                             meta[key] = val
                     if meta.get("grade") and meta.get("volume"):
-                        meta.setdefault("_match", "tag")
+                        meta["_match"] = meta.get("_match") or "tag"
                         break
-            # 3) 学科取「监控目录映射」（= 订阅路径里的学科目录），其次映射表的 subject
-            if not meta.get("subject"):
-                meta["subject"] = str(spec.get("remote") or "").split("/")[0]
             # 4) UP 名兜底：NFO 没有、也没手填覆盖值时，从带 `-ID` 的目录名里剥出来
             if not meta.get("upper"):
                 meta["upper"] = self._guess_upper(spec, media_dir)
@@ -2336,21 +2337,39 @@ CURRICULUM_COLUMNS = [
 
 # 【七上】【初一】（八下）等年级标签 → (学段, 年级, 册)
 _TAG_RE = re.compile(r"[【\[（(]\s*(初|高)?\s*([一二三四五六七八九])\s*(上|下|全)?\s*[】\]）)]")
+# 没有括号也认：`八上`、`七年级上册`、`九年级上`、`初二下`、`高一`
+_PLAIN_RE = re.compile(
+    r"(?:初\s*([一二三])|高\s*([一二三])|([七八九一二三四五六])\s*年级?|[七八九])\s*([上下全])"
+)
 _JUNIOR_MAP = {"一": "七", "二": "八", "三": "九"}
 
 
 def _parse_grade_tag(text: str) -> Dict[str, str]:
-    """从合集名/标题里读年级册：`【七上】`→初中七(上)，`【初一】`→初中七（册缺），`【高一】`→高中一"""
-    m = _TAG_RE.search(text or "")
-    if not m:
-        return {}
-    prefix, digit, volume = m.group(1), m.group(2), m.group(3) or ""
-    if prefix == "初":
-        return {"stage": "初中", "grade": _JUNIOR_MAP.get(digit, digit), "volume": volume}
-    if prefix == "高":
-        return {"stage": "高中", "grade": digit, "volume": volume}
-    stage = "初中" if digit in "七八九" else ("高中" if digit in "一二三" else "")
-    return {"stage": stage, "grade": digit, "volume": volume}
+    """从合集名/目录名/标题里读年级册：`【七上】`→初中七(上)，`八年级上册`→初中八(上)，`高一`→高中一"""
+    s = text or ""
+    m = _TAG_RE.search(s)
+    if m:
+        prefix, digit, volume = m.group(1), m.group(2), m.group(3) or ""
+        if prefix == "初":
+            return {"stage": "初中", "grade": _JUNIOR_MAP.get(digit, digit), "volume": volume}
+        if prefix == "高":
+            return {"stage": "高中", "grade": digit, "volume": volume}
+        stage = "初中" if digit in "七八九" else ""
+        return {"stage": stage, "grade": digit, "volume": volume}
+    m = _PLAIN_RE.search(s)
+    if m:
+        junior, senior, plain, volume = m.group(1), m.group(2), m.group(3), m.group(4) or ""
+        if junior:
+            return {"stage": "初中", "grade": _JUNIOR_MAP.get(junior, junior), "volume": volume}
+        if senior:
+            return {"stage": "高中", "grade": senior, "volume": volume}
+        # 纯 `八上` / `七年级上`
+        seg = m.group(0)
+        digit = next((c for c in seg if c in "七八九一二三四五六"), plain or "")
+        if digit:
+            stage = "初中" if digit in "七八九" else ""
+            return {"stage": stage, "grade": digit, "volume": volume}
+    return {}
 
 
 def _norm_title(s: str) -> str:
@@ -2549,7 +2568,7 @@ class _CurriculumMap:
 
     # ---------------- 查询 ----------------
 
-    def lookup(self, bvid: str = "", title: str = "") -> Dict[str, str]:
+    def lookup(self, bvid: str = "", title: str = "", subject: str = "") -> Dict[str, str]:
         self.reload()
         if bvid and bvid in self.by_bvid:
             return dict(self.by_bvid[bvid], _match="bvid")
@@ -2563,8 +2582,9 @@ class _CurriculumMap:
                     continue
                 if (key.startswith(k) or k.startswith(key)) and min(len(k), len(key)) >= 8:
                     return dict(rec, _match="title~")
-        # ③ 内置词典兜底：标题里的知识点 → 章 → 年级册（零配置也能用）
-        unit_no, _key = _guess_unit(title or "")
+        # ③ 内置词典兜底：**只对数学启用**（这张表是人教版初中数学的 29 章，
+        #    套到英语/生物上会误判——实测「英语·概率问题」会被算成数学九上第 25 章）
+        unit_no, _key = _guess_unit(title or "") if subject in ("", "数学") else ("", "")
         if unit_no and unit_no in _UNIT_TABLE:
             _g, _v, _u = _UNIT_TABLE[unit_no]
             return {
