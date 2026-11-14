@@ -14,6 +14,12 @@ MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
 MATCHER_VERSION = 7
 SEGMENT_GAP_DAYS = 60
+TV_ITEM_NAME_PATTERN = re.compile(
+    r"^(?P<title>.+?)\s+S(?P<season>\d{1,3})\s*E(?P<episode>\d{1,5})(?=\s|$)",
+    re.IGNORECASE,
+)
+TRAILING_SEASON_PATTERN = re.compile(r"\s*第\s*(?P<season>\d{1,3})\s*季\s*$")
+TRAILING_EPISODE_PATTERN = re.compile(r"\s*第\s*(?P<episode>\d{1,5})\s*[集话期]\s*$")
 
 
 class FailureKind(str, Enum):
@@ -116,6 +122,13 @@ class AuthCheckResult:
 class EpisodeMetadata:
     episode_number: int
     air_date: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TvEpisodeRef:
+    title: str
+    season: Optional[int] = None
+    episode: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +262,39 @@ def strip_title_year_suffix(value: Optional[str], year: Optional[int] = None) ->
     if year and int(match.group(1)) != int(year):
         return value
     return value[:match.start()].strip()
+
+
+def parse_tv_episode_ref(item_name: Optional[str]) -> TvEpisodeRef:
+    """从媒体服务器条目名中拆分剧名、季号和集号。
+
+    媒体服务器只在同时提供剧名、季号和集号时才会拼出 `剧名 S01E04 单集名`；
+    季号为 0（特别篇）或集号缺失时只拼出 `剧名 第 4 集` 或 `剧名 单集名`。
+    因此这里不做字符串定位，改用正则解析，解析不到就保留空季集号交给调用方兜底。
+    """
+    value = str(item_name or "").strip()
+    if not value:
+        return TvEpisodeRef(title="")
+
+    match = TV_ITEM_NAME_PATTERN.match(value)
+    if match:
+        return TvEpisodeRef(
+            title=match.group("title").strip(),
+            season=int(match.group("season")),
+            episode=int(match.group("episode")),
+        )
+
+    title = value
+    season = None
+    episode = None
+    season_match = TRAILING_SEASON_PATTERN.search(title)
+    if season_match:
+        season = int(season_match.group("season"))
+        title = title[:season_match.start()].strip()
+    episode_match = TRAILING_EPISODE_PATTERN.search(title)
+    if episode_match:
+        episode = int(episode_match.group("episode"))
+        title = title[:episode_match.start()].strip()
+    return TvEpisodeRef(title=title or value, season=season, episode=episode)
 
 
 def normalize_title(value: Optional[str]) -> str:

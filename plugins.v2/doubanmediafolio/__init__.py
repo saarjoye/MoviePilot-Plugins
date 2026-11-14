@@ -26,6 +26,7 @@ from .sync_models import (
     find_processed_record_key,
     normalize_wait_entry,
     normalize_release_date,
+    parse_tv_episode_ref,
     prepare_retry_attempt,
     record_retry_failure,
     resolve_subject_target,
@@ -48,7 +49,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.13"
+    plugin_version = "1.0.14"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -200,10 +201,20 @@ class DoubanMediaFolio(_PluginBase):
                 self.sync_log(event=event, played=True)
 
     def _process_tv_show(self, event_info: WebhookEventInfo, processed_items: Dict, played: bool = False):
-        index = event_info.item_name.index(" S")
-        title = event_info.item_name[:index]
-        season_id, episode_id = map(int, [event_info.season_id, event_info.episode_id])
+        parsed = parse_tv_episode_ref(event_info.item_name)
+        title = parsed.title
+        season_id = self._item_number(event_info.season_id, parsed.season)
+        episode_id = self._item_number(event_info.episode_id, parsed.episode)
         tmdb_id = event_info.tmdb_id
+
+        if not title or episode_id is None:
+            logger.info(
+                f"{event_info.item_name or '未知条目'} 缺少用于判断进度的剧名或集号，跳过豆瓣同步"
+            )
+            return
+
+        # 特别篇/未分季在该媒体服务器中季号为 0，统一按第 1 季处理
+        season_id = season_id or 1
 
         if not played:
             logger.info(f"开始播放 {title} 第{season_id}季 第{episode_id}集")
@@ -338,6 +349,17 @@ class DoubanMediaFolio(_PluginBase):
             "last_attempt_at": now.strftime(DATETIME_FORMAT),
             "next_attempt_at": (now + AUTH_RETRY_COOLDOWN).strftime(DATETIME_FORMAT),
         })
+
+    @staticmethod
+    def _item_number(value, fallback=None) -> Optional[int]:
+        for candidate in (value, fallback):
+            if candidate is None or candidate == "":
+                continue
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def _item_value(item, key: str, default=None):
