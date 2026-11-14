@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.8"
+    plugin_version = "1.6.9"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -225,6 +225,15 @@ class DirUpload115(_PluginBase):
         self._topic_group = str(config.get("topic_group") or "series").strip().lower()
         if self._topic_group not in ("series", "tag", "both"):
             self._topic_group = "series"
+        # 1.6.9：标签别名（每行 `旧名=新名`），把「语法」并进「语法线」这类同义专栏
+        self._topic_alias: Dict[str, str] = {}
+        for line in str(config.get("topic_alias") or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            old, _, new = line.partition("=")
+            if old.strip() and new.strip():
+                self._topic_alias[old.strip()] = new.strip()
         self._skipped_grade = 0
         self._skipped_noncourse = 0
         self._curriculum = _CurriculumMap(self._curriculum_fix if self._curriculum_mode else "",
@@ -874,6 +883,8 @@ class DirUpload115(_PluginBase):
                 raw_series = meta.get("series") or ""
                 is_collection = bool(re.match(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", raw_series))
                 tag = _first_title_tag(meta.get("title") or "") if self._topic_group in ("tag", "both") else ""
+                if tag:
+                    tag = self._topic_alias.get(tag, tag)   # 1.6.9：标签别名（语法→语法线）
                 if tag and self._topic_group in ("tag", "both") and not is_collection:
                     meta["series"] = tag          # 让 {series} 直接渲染成标签名
                 parts.append(_safe_stem(self._render_tpl(self._topic_template, meta)))
@@ -1986,6 +1997,7 @@ class DirUpload115(_PluginBase):
             "grade_allowlist": [],
             "offgrade_policy": "keep",
             "topic_group": "series",
+            "topic_alias": "",
             "subject_from_title": True,
             "interval_seconds": 300,
             "delete_mode": "none",
@@ -2124,6 +2136,26 @@ class DirUpload115(_PluginBase):
                                 },
                             ),
                             _col(1, _switch("curriculum_mode", "课程模式")),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(
+                                12,
+                                {
+                                    "component": "VTextarea",
+                                    "props": {
+                                        "model": "topic_alias",
+                                        "label": "专题标签别名（每行 旧名=新名，可留空）",
+                                        "rows": 4,
+                                        "placeholder": "语法=语法线\n单词=单词线\n词汇=单词线\n累计单词=单词线\n听力=听力线\n听写=听力线",
+                                        "hint": "用来把同义专栏并进一个目录：例如投稿里的「【语法】…」和合集「语法线」"
+                                                "会并到 专题·语法线；留空则各用各的名字",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
                         ],
                     },
                     {
