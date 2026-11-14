@@ -8,7 +8,9 @@ DirUpload115 —— 监控本地目录，识别到「下载完成」就把整个
 4. 上传完成后可选钩子：调 CloudMediaSync 增量同步（Emby 刷新由 CMS 负责，插件不重复触发）。
 """
 
+import csv
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -30,6 +32,11 @@ DEFAULT_SIDECAR_EXT = ".nfo,.jpg,.jpeg,.png,.webp,.ass,.srt,.vtt"
 
 class _RiskPause(RuntimeError):
     """115 风控冷却（MP 会把请求 sleep 住）→ 立刻中止本轮，避免整轮被卡住一小时"""
+
+
+class _Unmapped(RuntimeError):
+    """课程模式：这条视频在映射表里查不到、标题也推不出年级册 → 不上传，等补映射"""
+
 # 状态文件名（放在被监控的媒体目录里，不会被上传）
 STATE_FILE = ".upload115.state"
 # 正在上传的互斥标记
@@ -41,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.5.7"
+    plugin_version = "1.6.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -49,14 +56,17 @@ class DirUpload115(_PluginBase):
     # 1.5.4：115 风控 —— 冷却 1 小时，结束后再等 30 分钟才恢复
     RISK_COOLDOWN_SECONDS = 3600
     RISK_RESUME_DELAY = 1800
-    # 单次 115 调用超过这个秒数，基本可判定是被风控冷却 sleep 住了
-    RISK_SLOW_CALL_SECONDS = 45
+    # 单次 115 调用超过这个秒数只记 warning（大文件正常上传），不再据此判定风控
+    RISK_SLOW_CALL_SECONDS = 300
+    # 只有异常信息里出现这些关键字才判定为 115 风控
+    RISK_KEYWORDS = ("风控", "访问上限", "访问过于频繁", "too many", "429", "rate limit")
 
     def __init__(self) -> None:
         super().__init__()
         self._enabled: bool = False
         self._watch_dirs: List[Path] = []
         self._risk_until: float = 0.0
+        self._round_started_at: str = ""
         self._target_storage: str = "u115"
         self._target_root: str = "/B站"
         self._stable_seconds: int = 120
@@ -183,6 +193,26 @@ class DirUpload115(_PluginBase):
             config.get("episode_template") or "{show} - S{season:02}E{ep:02} - {title}"
         ).strip()
         self._season = max(1, int(config.get("season") or 1))
+        # 1.6.0 课程模式：按「学科路径 / 年级册 / 单元-课题-UP」组织，名字来自映射表
+        self._curriculum_mode = bool(config.get("curriculum_mode"))
+        self._curriculum_csv = str(config.get("curriculum_csv") or "").strip()
+        self._curriculum_fix = str(config.get("curriculum_fix") or "").strip()
+        self._dir_template = str(
+            config.get("dir_template") or "{stage}{grade}({volume})"
+        ).strip() or "{stage}{grade}({volume})"
+        self._file_template = str(
+            config.get("file_template") or "{unit_no} {unit} - {lesson} - {upper}"
+        ).strip() or "{unit_no} {unit} - {lesson} - {upper}"
+        self._topic_template = str(
+            config.get("topic_template") or "专题·{series}"
+        ).strip() or "专题·{series}"
+        # 查不到年级册时的去处：topic=归「专题·<合集名>」（推荐）/ hold=不上传，等补映射
+        self._unmapped_policy = str(config.get("unmapped_policy") or "topic").strip().lower()
+        if self._unmapped_policy not in ("topic", "hold"):
+            self._unmapped_policy = "topic"
+        self._curriculum = _CurriculumMap(self._curriculum_fix if self._curriculum_mode else "",
+                                          self._curriculum_csv if self._curriculum_mode else "")
+        self._unmapped: List[Dict[str, str]] = []
         # 上传成功后如何处理本地文件：none 保留 / recycle 移到回收目录 / delete 直接删除
         self._delete_mode = str(config.get("delete_mode") or "none").strip().lower()
         if self._delete_mode not in ("none", "recycle", "delete"):
@@ -378,6 +408,9 @@ class DirUpload115(_PluginBase):
             return summary
 
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 1.5.8：本轮开始时立刻标记「执行中」，让仪表盘能和 MP 日志对上
+        self._round_started_at = started_at
+        self._touch_status("本轮执行中", running=True)
         # 1.5.1：每轮重置「额外查 115 取 pickcode」的预算，避免连续 API 调用触发风控
         self._pickcode_budget = max(0, int(self._pickcode_budget_default))
         queue = {"total": 0, "done": 0, "pending": 0, "waiting": 0, "failed": 0}
@@ -415,6 +448,7 @@ class DirUpload115(_PluginBase):
                         _bucket["pending"] += 1
         except Exception as e:  # noqa: BLE001
             logger.warning(f"【{self.plugin_name}】全量统计失败：{e}")
+        _last_touch = time.time()
         try:
             for spec in self._watch_dirs:
                 watch: Path = spec["local"]
@@ -433,6 +467,10 @@ class DirUpload115(_PluginBase):
                         )
                         break
                     summary["scanned"] += 1
+                    # 1.5.8：大文件一轮可能跑几十分钟，每 30 秒刷新一次「执行中」状态
+                    if time.time() - _last_touch >= 30:
+                        self._touch_status("本轮执行中", running=True)
+                        _last_touch = time.time()
                     if self._max_per_hour and len(self._recent_uploads()) >= self._max_per_hour:
                         logger.info(f"【{self.plugin_name}】已达每小时上限 {self._max_per_hour} 集，本轮停止")
                         break
@@ -553,12 +591,16 @@ class DirUpload115(_PluginBase):
         )
         self._recent_events = self._recent_events[-30:]
 
-    def _touch_status(self, reason: str) -> None:
+    def _touch_status(self, reason: str, running: bool = False) -> None:
         """
         1.5.6：本轮被跳过（风控暂停 / 上一轮没跑完 / 配置缺失）时也刷新 status.json。
 
         不刷新的后果就是仪表盘一直显示几十分钟前算出来的 next_run_at，
         用户看到「今天 10:07 · 还剩 +00:52」这种过期时间，完全无法判断真实的下一次时间。
+
+        1.5.8：本轮**执行中也刷新**（round_running=true + round_started_at），
+        否则遇到大文件分片上传（一轮跑几十分钟）时，仪表盘会以为“还没到时间”，
+        而 MP 里其实正在狂传。
         """
         try:
             path = self._status_path
@@ -581,6 +623,9 @@ class DirUpload115(_PluginBase):
             current["delete_mode"] = self._delete_mode
             current["ready_mode"] = self._ready_mode
             current["paused_reason"] = reason
+            current["round_running"] = bool(running)
+            if running and self._round_started_at:
+                current["round_started_at"] = self._round_started_at
             current["risk_paused_until"] = (
                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._risk_until))
                 if self._risk_until > now
@@ -606,6 +651,7 @@ class DirUpload115(_PluginBase):
             payload = {
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "round_started_at": started_at,
+                "round_running": False,
                 "enabled": bool(self._enabled),
                 "interval_seconds": self._interval_seconds,
                 "max_per_round": self._max_per_round,
@@ -641,6 +687,18 @@ class DirUpload115(_PluginBase):
                     "failed": len(summary.get("failed") or []),
                 },
                 "recent": self._recent_events[-20:],
+                # 1.6.0 课程模式：映射表状态 + 待补映射清单
+                "curriculum": {
+                    "mode": self._curriculum_mode,
+                    "csv": self._curriculum_csv or "",
+                    "entries": len(self._curriculum.by_bvid),
+                    "error": self._curriculum.error,
+                    "unmapped_policy": self._unmapped_policy,
+                    "dir_template": self._dir_template,
+                    "file_template": self._file_template,
+                    "topic_template": self._topic_template,
+                },
+                "unmapped": self._unmapped[-50:],
             }
             self._status_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._status_path.with_suffix(".tmp")
@@ -663,6 +721,26 @@ class DirUpload115(_PluginBase):
         children = [
             d for d in sorted(watch.iterdir()) if d.is_dir() and not d.name.startswith(".")
         ]
+        if self._curriculum_mode:
+            # 课程模式：容器识别（<UP目录>/<合集目录>/<视频目录>），但不生成 Show/Season
+            for d in children:
+                if self._has_video_direct(d):
+                    self._series_hints[str(d)] = watch.name
+                    entries.append(d)
+                    continue
+                subs = [
+                    s for s in sorted(d.iterdir())
+                    if s.is_dir() and not s.name.startswith(".") and self._dir_has_video(s)
+                ]
+                if subs:
+                    for s in subs:
+                        self._series_hints[str(s)] = d.name      # 合集名 → {series}
+                        entries.append(s)
+                else:
+                    self._series_hints[str(d)] = d.name
+                    entries.append(d)
+            return entries
+
         if self._series_mode:
             # 判断监控目录本身是不是「系列容器」：它的子目录直接含视频、且没有再往下套
             has_nested_container = any(
@@ -706,6 +784,35 @@ class DirUpload115(_PluginBase):
             return False
         return False
 
+    def _has_video_direct(self, d: Path) -> bool:
+        """目录自己这一层是否有视频（用来区分「视频目录」和「合集容器」）"""
+        try:
+            return any(
+                p.is_file() and p.suffix.lower() in self._video_ext for p in d.iterdir()
+            )
+        except OSError:
+            return False
+
+    def _note_unmapped(self, spec: Dict[str, Any], media_dir: Path, reason: str) -> None:
+        """记一条「待补映射」，别每轮重复刷日志（状态页能看到就够了）"""
+        try:
+            key = str(media_dir)
+            if any(x.get("dir") == key for x in self._unmapped):
+                return
+            self._unmapped.append(
+                {
+                    "dir": key,
+                    "name": media_dir.name,
+                    "bvid": self._read_nfo_meta(media_dir).get("bvid", ""),
+                    "reason": reason,
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+            self._unmapped = self._unmapped[-100:]
+            logger.warning(f"【{self.plugin_name}】待补映射：{reason}")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _rel_parts(self, spec: Dict[str, Any], media_dir: Path) -> List[str]:
         """
         决定这个条目在 115 / strm 里的相对路径。
@@ -718,6 +825,27 @@ class DirUpload115(_PluginBase):
         所以上传前定的名字 == Emby 里看到的名字；而本地目录保持 bili-sync 的原样，
         不去动它的数据库记录（改了本地目录 bili-sync 会以为文件丢了重新下载）。
         """
+        if self._curriculum_mode:
+            # 课程模式：<映射前缀(学科)>/<学段年级(册)>；查不到册就落「专题·<合集名>」
+            parts: List[str] = []
+            remote = str(spec.get("remote") or "").strip("/")
+            if remote:
+                parts.extend([seg for seg in remote.split("/") if seg])
+            meta = self._item_meta(spec, media_dir)
+            if meta.get("grade") and meta.get("volume"):
+                parts.append(_safe_stem(self._render_tpl(self._dir_template, meta)))
+                return parts
+            if self._unmapped_policy == "topic" and (meta.get("series") or ""):
+                # 合集目录名常带「合集·」「系列·」前缀，做专题目录时去掉，避免 `专题·合集·xxx`
+                meta = dict(meta)
+                meta["series"] = re.sub(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", "", meta["series"]).strip()
+                parts.append(_safe_stem(self._render_tpl(self._topic_template, meta)))
+                return parts
+            raise _Unmapped(
+                f"{media_dir.name} 未映射：bvid={meta.get('bvid') or '?'} "
+                f"标题={meta.get('title') or '?'}（补一行映射表或用 hold 策略等它）"
+            )
+
         if self._series_mode:
             # 二开修复：剧集模式也要带上「监控目录 => 115 相对路径」里的映射前缀，
             # 否则 数学/英语 这类分类目录会在 115 上被丢掉
@@ -739,6 +867,29 @@ class DirUpload115(_PluginBase):
         return parts
 
     # ------------------------------------------------------------------ 课程→剧集
+
+    @staticmethod
+    def _render_tpl(tpl: str, meta: Dict[str, str]) -> str:
+        """用 meta 渲染模板；没赋值的占位符直接清空（避免名字里残留 {lesson} 这类字样）"""
+        text = tpl or ""
+        for key, val in meta.items():
+            if isinstance(val, str):
+                text = text.replace("{" + key + "}", val)
+        text = re.sub(r"\{[a-z_]+(:0\d)?\}", "", text)
+        return text
+
+    def _entry_stem(self, spec: Dict[str, Any], media_dir: Path) -> str:
+        """课程模式下的最终文件名（不含扩展名），默认 `01 有理数 - 有理数与数轴 - 妖王本妖`"""
+        meta = self._item_meta(spec, media_dir)
+        return _safe_stem(self._render_tpl(self._file_template, meta))
+
+    def _guess_upper(self, spec: Dict[str, Any], media_dir: Path) -> str:
+        """从路径里猜 UP 名：优先取带 `-数字ID` 后缀的那层目录名（bili-sync 的作者目录）"""
+        cands = [spec["local"], *list(media_dir.parents)]
+        for p in cands:
+            if re.search(r"-\d{5,}$", p.name):
+                return re.sub(r"-\d{5,}$", "", p.name)
+        return ""
 
     def _show_name(self, spec: Dict[str, Any], media_dir: Path) -> str:
         """剧集（show）目录名，默认 `UP名 - 系列名`"""
@@ -834,6 +985,37 @@ class DirUpload115(_PluginBase):
             # 兼容「直接监控合集目录」的配置：系列名取监控目录名
             meta["series"] = spec["local"].name if parent == spec["local"] else parent.name
         meta["index"] = self._extract_index(meta.get("title") or "") or self._sibling_index(media_dir)
+        if self._curriculum_mode:
+            # 1) 先查映射表（bvid 优先，其次标题）
+            cur = self._curriculum.lookup(
+                bvid=meta.get("bvid") or "", title=meta.get("title") or ""
+            )
+            for key in ("subject", "stage", "grade", "volume", "unit_no", "unit", "lesson"):
+                if cur.get(key):
+                    meta[key] = cur[key]
+            meta["_match"] = cur.get("_match") or ""
+            # 2) 表里没有年级册时，从「合集名」再退到「标题」读 【七上】/【初一】
+            if not (meta.get("grade") and meta.get("volume")):
+                for tag in (
+                    _parse_grade_tag(meta.get("series") or ""),
+                    _parse_grade_tag(media_dir.parent.name),
+                    _parse_grade_tag(meta.get("title") or ""),
+                ):
+                    for key, val in tag.items():
+                        if val and not meta.get(key):
+                            meta[key] = val
+                    if meta.get("grade") and meta.get("volume"):
+                        meta.setdefault("_match", "tag")
+                        break
+            # 3) 学科取「监控目录映射」（= 订阅路径里的学科目录），其次映射表的 subject
+            if not meta.get("subject"):
+                meta["subject"] = str(spec.get("remote") or "").split("/")[0]
+            # 4) UP 名兜底：NFO 没有、也没手填覆盖值时，从带 `-ID` 的目录名里剥出来
+            if not meta.get("upper"):
+                meta["upper"] = self._guess_upper(spec, media_dir)
+            # 5) 课题名兜底：清洗标题（只影响显示，不影响归类）
+            if not meta.get("lesson"):
+                meta["lesson"] = _clean_lesson(meta.get("title") or media_dir.name)
         return meta
 
     def _render_remote_name(self, spec: Dict[str, Any], media_dir: Path) -> str:
@@ -870,6 +1052,14 @@ class DirUpload115(_PluginBase):
         if not any(f.suffix.lower() in self._video_ext for f in files):
             return "skipped"
 
+        # 3.5) 课程模式：先确认这条能落到「年级册」或「专题」，落不下就不碰 115（等补映射）
+        if self._curriculum_mode:
+            try:
+                self._rel_parts(spec, media_dir)
+            except _Unmapped as e:
+                self._note_unmapped(spec, media_dir, str(e))
+                return "skipped"
+
         # 4) 已上传、正在等 strm：只做就绪检查，不重复上传、也不访问 115
         if status == "waiting_strm":
             return self._finalize(spec, media_dir, state, files)
@@ -883,7 +1073,8 @@ class DirUpload115(_PluginBase):
 
         try:
             # 5.1 重命名（必须在上传前：115 文件名 → CMS strm 文件名，事后改名 strm 就断）
-            if self._rename_enabled:
+            #     课程模式下不改本地文件名——本地目录/文件名是 bili-sync 的记录，动了它会重下
+            if self._rename_enabled and not self._curriculum_mode:
                 renamed = self._apply_rename(media_dir, files)
                 if renamed:
                     files = self._collect_files(media_dir)
@@ -1073,6 +1264,30 @@ class DirUpload115(_PluginBase):
             return 0
 
         copied = 0
+        if self._curriculum_mode:
+            # 课程模式：与 115 同构，但随片文件名要跟着视频的新名字（否则 Emby 认不出配对）
+            target_dir = self._strm_dir(spec, media_dir)
+            stem = self._entry_stem(spec, media_dir)
+            videos = [
+                f for f in self._collect_files(media_dir)
+                if f.suffix.lower() in self._video_ext and f.parent == media_dir
+            ]
+            old_stem = videos[0].stem if videos else ""
+            for src in sidecar_files:
+                if old_stem and src.name.startswith(old_stem):
+                    dest = target_dir / (stem + src.name[len(old_stem):])
+                    if src.name.endswith("-thumb.jpg"):
+                        copied += self._safe_copy(src, dest)
+                        continue
+                    copied += self._safe_copy(src, dest)
+                    if "-poster" in src.name:
+                        copied += self._safe_copy(src, target_dir / (stem + "-thumb.jpg"))
+                else:
+                    copied += self._safe_copy(src, target_dir / src.name)
+            if copied:
+                logger.info(f"【{self.plugin_name}】{media_dir.name} 课程模式：{copied} 个随片文件已就位")
+            return copied
+
         if self._series_mode:
             parts = self._rel_parts(spec, media_dir)
             ep_dir = Path(self._strm_root).joinpath(*parts)
@@ -1243,13 +1458,33 @@ class DirUpload115(_PluginBase):
         return False
 
     def _slow(self, fn, label: str):
-        """包一层计时：单次 115 调用过慢说明正被风控冷却 sleep，直接抛 _RiskPause 中止本轮"""
+        """
+        调用 115 存储接口的统一包装（1.5.9 修正判定方式）。
+
+        教训：1.5.4~1.5.8 里用「单次调用 >45 秒就判定被风控」是错的——
+        4GB 的物理课视频分片上传本来就要几十分钟，于是每轮都被误判成风控，
+        白白暂停 90 分钟，用户看到的就是「倒计时没跑完又变成 1 个多小时」。
+        现在只有**明确的风控错误**才暂停；慢调用只记一条 warning。
+        """
         t0 = time.time()
-        result = fn()
-        elapsed = time.time() - t0
-        if elapsed >= self.RISK_SLOW_CALL_SECONDS:
-            raise _RiskPause(f"{label} 单次耗时 {int(elapsed)}s")
-        return result
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            if self._is_risk_error(e):
+                raise _RiskPause(f"{label}: {e}") from e
+            raise
+        finally:
+            elapsed = time.time() - t0
+            if elapsed >= self.RISK_SLOW_CALL_SECONDS:
+                logger.warning(
+                    f"【{self.plugin_name}】{label} 单次耗时 {int(elapsed)}s"
+                    f"（大文件分片上传属正常，不判定为风控）"
+                )
+
+    def _is_risk_error(self, error: Exception) -> bool:
+        """只有 115 明确报「风控 / 访问上限 / 429」才算风控"""
+        text = str(error)
+        return any(k in text for k in self.RISK_KEYWORDS)
 
     def _strm_dir(self, spec: Dict[str, Any], media_dir: Path) -> Path:
         """本地媒体目录 → CMS 的 strm 输出目录（与 115 路径严格同构：CMS 会镜像 115 结构）"""
@@ -1539,9 +1774,12 @@ class DirUpload115(_PluginBase):
         return uploaded, skipped
 
     def _remote_name_for(self, spec: Dict[str, Any], media_dir: Path, f: Path) -> str:
-        """该文件在 115 / strm 里的文件名（剧集模式下视频会带 SxxExx）"""
-        if self._series_mode and f.suffix.lower() in self._video_ext:
-            return self._episode_stem(spec, media_dir) + f.suffix
+        """该文件在 115 / strm 里的文件名（课程模式用模板，剧集模式带 SxxExx）"""
+        if f.suffix.lower() in self._video_ext:
+            if self._curriculum_mode:
+                return self._entry_stem(spec, media_dir) + f.suffix
+            if self._series_mode:
+                return self._episode_stem(spec, media_dir) + f.suffix
         return f.name
 
     def _remote_names(self, spec: Dict[str, Any], media_dir: Path, files: List[Path]) -> List[str]:
@@ -1649,6 +1887,13 @@ class DirUpload115(_PluginBase):
             "show_template": "{upper} - {series}",
             "episode_template": "{show} - S{season:02}E{ep:02} - {title}",
             "season": 1,
+            "curriculum_mode": False,
+            "curriculum_csv": "",
+            "curriculum_fix": "",
+            "dir_template": "{stage}{grade}({volume})",
+            "file_template": "{unit_no} {unit} - {lesson} - {upper}",
+            "topic_template": "专题·{series}",
+            "unmapped_policy": "topic",
             "interval_seconds": 300,
             "delete_mode": "none",
             "recycle_root": "",
@@ -1715,6 +1960,87 @@ class DirUpload115(_PluginBase):
                         "content": [
                             _col(6, _text("series_name", "覆盖系列名（可选）", "默认取本地父目录名，即 bili-sync 的合集目录")),
                             _col(6, _text("upper_name", "覆盖 UP 名（可选）", "默认取 NFO 里的 actor/role")),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(3, _switch("curriculum_mode", "课程模式（按学科/年级册/单元命名）")),
+                            _col(
+                                5,
+                                {
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "unmapped_policy",
+                                        "label": "认不出年级册时怎么办",
+                                        "items": [
+                                            {"title": "归到「专题·<合集名>」（推荐）", "value": "topic"},
+                                            {"title": "先不上传，等我来补", "value": "hold"},
+                                        ],
+                                        "hint": "专题/专栏课（语法线、暑期篇、实验视频）建议用「专题」；"
+                                                "想严格只要教材内容就选「先不上传」",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
+                            _col(
+                                4,
+                                _text(
+                                    "curriculum_csv",
+                                    "（可选）批量导入 CSV 路径",
+                                    "留空即可，日常不用它。需要一次导入几百条时才用，如 /config/curriculum.csv",
+                                ),
+                            ),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(
+                                12,
+                                {
+                                    "component": "VTextarea",
+                                    "props": {
+                                        "model": "curriculum_fix",
+                                        "label": "映射修正（一般留空，认错的才写一行）",
+                                        "rows": 6,
+                                        "placeholder": "BV1AB3F6qEAQ | 初中 | 七 | 上 | 01 | 有理数 | 有理数与数轴",
+                                        "hint": "每行一条，竖线分隔。格式：视频BV号 | 学段 | 年级 | 册 | 章号 | 章名 | 课题。"
+                                                "后面几项可以省（只写 BV号|年级|册 也行）。内置人教版 29 章词典会自动归类，"
+                                                "绝大多数视频不用写；认错的、或词典没收录的才在这里补一行，保存后下一轮扫描就生效",
+                                        "persistent-hint": True,
+                                    },
+                                },
+                            ),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            _col(
+                                4,
+                                _text(
+                                    "dir_template",
+                                    "目录名模板（学科下那一层）",
+                                    "默认 {stage}{grade}({volume}) → 例如 初中七(上)；学科那层来自监控目录映射，不要重复写",
+                                ),
+                            ),
+                            _col(
+                                4,
+                                _text(
+                                    "file_template",
+                                    "文件名模板",
+                                    "默认 {unit_no} {unit} - {lesson} - {upper} → 例如 01 有理数 - 有理数与数轴 - 一数-初中版",
+                                ),
+                            ),
+                            _col(
+                                4,
+                                _text(
+                                    "topic_template",
+                                    "专题目录模板",
+                                    "默认 专题·{series} → 例如 专题·语法线（{series}=合集目录名）",
+                                ),
+                            ),
                         ],
                     },
                     {
@@ -1862,9 +2188,9 @@ class DirUpload115(_PluginBase):
         ], defaults
 
     def get_page(self) -> Optional[List[Dict[str, Any]]]:
-        """详情页：展示状态清单"""
+        """详情页：展示状态清单（课程模式额外展示归类统计 + 待补映射）"""
         rows = self.collect_status()
-        return [
+        blocks: List[Dict[str, Any]] = [
             {
                 "component": "VRow",
                 "content": [
@@ -1890,6 +2216,82 @@ class DirUpload115(_PluginBase):
                 ],
             }
         ]
+        if self._curriculum_mode:
+            self._curriculum.reload()
+            buckets: Dict[str, int] = {}
+            for rec in list(self._curriculum.by_bvid.values()) + self._curriculum.csv_rows:
+                if rec.get("grade") and rec.get("volume"):
+                    key = f"{rec.get('stage') or '初中'}{rec['grade']}({rec['volume']})"
+                    buckets[key] = buckets.get(key, 0) + 1
+            stat_rows = [{"年级册": k, "条数": v} for k, v in sorted(buckets.items())]
+            blocks.append(
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-subtitle-1 font-weight-bold mb-2"},
+                                    "text": (
+                                        f"课程模式：手工修正 {len(self._curriculum.by_bvid)} 条 · "
+                                        f"内置词典 + 合集名自动识别 · 待补映射 {len(self._unmapped)} 条"
+                                    ),
+                                },
+                                {
+                                    "component": "VTable",
+                                    "props": {
+                                        "density": "compact",
+                                        "headers": [
+                                            {"title": "年级册", "key": "年级册"},
+                                            {"title": "条数", "key": "条数"},
+                                        ],
+                                        "items": stat_rows,
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+            if self._unmapped:
+                blocks.append(
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "text-subtitle-2 text-error mb-2"},
+                                        "text": "待补映射（把下面这行的 BV 号复制到配置页「映射修正」里补一行）",
+                                    },
+                                    {
+                                        "component": "VTable",
+                                        "props": {
+                                            "density": "compact",
+                                            "headers": [
+                                                {"title": "BV号", "key": "bvid"},
+                                                {"title": "目录", "key": "name"},
+                                                {"title": "时间", "key": "at"},
+                                            ],
+                                            "items": [
+                                                {"bvid": u.get("bvid", ""), "name": u.get("name", ""),
+                                                 "at": u.get("at", "")}
+                                                for u in self._unmapped[-30:]
+                                            ],
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                )
+        return blocks
 
 
 # ---------------------------------------------------------------------- 页面小工具
@@ -1921,6 +2323,258 @@ def _safe_stem(name: str, fallback: str = "untitled", maxlen: int = 120) -> str:
     if len(name) > maxlen:
         name = name[:maxlen].rstrip()
     return name or fallback
+
+
+# ---------------------------------------------------------------------------
+# 课程模式（1.6.0）：映射表 + 年级册/单元/课题
+# ---------------------------------------------------------------------------
+
+CURRICULUM_COLUMNS = [
+    "bvid", "title", "subject", "stage", "grade", "volume",
+    "unit_no", "unit", "lesson", "version", "confidence",
+]
+
+# 【七上】【初一】（八下）等年级标签 → (学段, 年级, 册)
+_TAG_RE = re.compile(r"[【\[（(]\s*(初|高)?\s*([一二三四五六七八九])\s*(上|下|全)?\s*[】\]）)]")
+_JUNIOR_MAP = {"一": "七", "二": "八", "三": "九"}
+
+
+def _parse_grade_tag(text: str) -> Dict[str, str]:
+    """从合集名/标题里读年级册：`【七上】`→初中七(上)，`【初一】`→初中七（册缺），`【高一】`→高中一"""
+    m = _TAG_RE.search(text or "")
+    if not m:
+        return {}
+    prefix, digit, volume = m.group(1), m.group(2), m.group(3) or ""
+    if prefix == "初":
+        return {"stage": "初中", "grade": _JUNIOR_MAP.get(digit, digit), "volume": volume}
+    if prefix == "高":
+        return {"stage": "高中", "grade": digit, "volume": volume}
+    stage = "初中" if digit in "七八九" else ("高中" if digit in "一二三" else "")
+    return {"stage": stage, "grade": digit, "volume": volume}
+
+
+def _norm_title(s: str) -> str:
+    """标题归一化：只留中日文/字母/数字，用来做「115 文件名 ↔ 映射表 title」的模糊匹配"""
+    s = re.sub(r"[\s\-_·|｜:：,，.。!！?？~～【】\[\]（）()<>《》\"'“”‘’/\\]+", "", str(s or ""))
+    return s.lower()
+
+
+_NOISE_WORDS = sorted([
+    "持续更新", "一个视频全覆盖", "一个视频全通关", "一次性吃透全部题型", "学完拿满分",
+    "学霸必会都在这", "全面知识和思维提升", "史上最全", "快速上手", "搞定", "速通",
+    "满分大合集", "满分", "通关", "大全", "大合集", "合集", "必会", "必考", "超高频",
+    "重难点", "核心解法", "核心", "精讲", "详解", "初中数学",
+], key=len, reverse=True)
+_SEG_SPLIT = re.compile(r"[，,｜|！!？?。～~：:\s]+")
+_GENERIC_PREFIX = re.compile(r"^(考试必考难点|考试难点|高频考点|重难点|难点|重点|方法|技巧|总结|注意)[：:]\s*")
+
+
+def _clean_lesson(title: str, limit: int = 40) -> str:
+    """把营销体标题洗成能看的课题名（只影响显示，不影响归类）"""
+    raw = re.sub(r"【[^】]*】", "", str(title or "")).replace("　", " ")
+    segs = [s for s in _SEG_SPLIT.split(raw) if s and not re.fullmatch(r"[\d\-–—.%]+", s)]
+    t = max(segs, key=len) if segs else raw
+    t = _GENERIC_PREFIX.sub("", t)
+    t = re.sub(r"\d+\s*[-–—]\s*\d+\s*[节讲]", "", t)
+    for w in _NOISE_WORDS:
+        t = t.replace(w, "")
+    t = re.sub(r"[【】\[\]（）()<>《》]", "", t)
+    t = re.sub(r"\s+", " ", t).strip(" -_·，,。.!！?？~～")
+    return (t[:limit].strip(" -_·") or str(title or "")[:limit]).strip()
+
+
+# 人教版初中数学 29 章 + 专题（内置词典，零配置也能归类）
+_UNIT_TABLE: Dict[str, Tuple[str, str, str]] = {
+    "01": ("七", "上", "有理数"), "02": ("七", "上", "整式的加减"),
+    "03": ("七", "上", "一元一次方程"), "04": ("七", "上", "几何图形初步"),
+    "05": ("七", "下", "相交线与平行线"), "06": ("七", "下", "实数"),
+    "07": ("七", "下", "平面直角坐标系"), "08": ("七", "下", "二元一次方程组"),
+    "09": ("七", "下", "不等式与不等式组"), "10": ("七", "下", "数据的收集整理与描述"),
+    "11": ("八", "上", "三角形"), "12": ("八", "上", "全等三角形"),
+    "13": ("八", "上", "轴对称"), "14": ("八", "上", "整式的乘法与因式分解"),
+    "15": ("八", "上", "分式"), "16": ("八", "下", "二次根式"),
+    "17": ("八", "下", "勾股定理"), "18": ("八", "下", "平行四边形"),
+    "19": ("八", "下", "一次函数"), "20": ("八", "下", "数据的分析"),
+    "21": ("九", "上", "一元二次方程"), "22": ("九", "上", "二次函数"),
+    "23": ("九", "上", "旋转"), "24": ("九", "上", "圆"),
+    "25": ("九", "上", "概率初步"), "26": ("九", "下", "反比例函数"),
+    "27": ("九", "下", "相似"), "28": ("九", "下", "锐角三角函数"),
+    "29": ("九", "下", "投影与视图"), "98": ("九", "下", "专题·模型"),
+    "99": ("九", "下", "中考压轴专题"),
+}
+
+# 顺序 = 优先级：专题最先，具体知识点随后，泛词兜底，最后才是"压轴"
+_UNIT_KEYWORDS: List[Tuple[str, List[str]]] = [
+    ("99", ["阿氏圆", "隐圆", "费马点", "瓜豆", "胡不归", "阿基米德折弦"]),
+    ("21", ["一元二次方程", "韦达定理", "根与系数", "判别式", "配方法"]),
+    ("03", ["一元一次方程", "移项", "去分母", "列方程解应用题"]),
+    ("08", ["二元一次方程"]),
+    ("09", ["不等式"]),
+    ("22", ["二次函数", "抛物线", "顶点式", "区间最值", "多结论"]),
+    ("26", ["反比例", "双曲线", "面积模型"]),
+    ("19", ["一次函数", "正比例函数"]),
+    ("28", ["三角函数", "正弦", "余弦", "正切", "解直角三角形", "仰角", "俯角", "坡度"]),
+    ("27", ["相似", "位似", "黄金分割"]),
+    ("12", ["全等", "倍长中线", "角平分线", "半角模型", "截长补短", "一线三等角"]),
+    ("13", ["轴对称", "等腰三角形", "等边三角形", "垂直平分线", "将军饮马"]),
+    ("17", ["勾股"]),
+    ("18", ["平行四边形", "矩形", "菱形", "正方形", "中位线"]),
+    ("05", ["平行线", "相交线", "同位角", "内错角", "同旁内角", "拐点"]),
+    ("01", ["有理数", "数轴", "相反数", "绝对值", "正负数"]),
+    ("02", ["整式加减", "整式的加减", "合并同类项", "去括号"]),
+    ("14", ["整式乘法", "幂的运算", "平方差", "完全平方", "因式分解", "提公因式", "十字相乘"]),
+    ("15", ["分式"]),
+    ("16", ["二次根式", "分母有理化"]),
+    ("06", ["平方根", "立方根", "无理数", "实数"]),
+    ("07", ["平面直角坐标系", "坐标系", "象限"]),
+    ("04", ["几何图形初步", "射线线段", "余角", "补角", "展开图", "角的度量"]),
+    ("20", ["平均数", "中位数", "众数", "方差"]),
+    ("23", ["旋转", "中心对称"]),
+    ("25", ["概率", "树状图"]),
+    ("29", ["三视图", "投影"]),
+    ("10", ["统计调查", "直方图", "频数"]),
+    ("24", ["圆周角", "圆心角", "切线", "垂径定理", "弧长", "扇形", "圆"]),
+    ("11", ["三角形", "三边关系", "多边形内角和"]),
+    ("99", ["中考压轴", "压轴"]),
+]
+
+
+def _guess_unit(title: str) -> Tuple[str, str]:
+    """内置词典：标题里的知识点 → (章号, 命中词)；匹配不到返回 ("", "")"""
+    t = str(title or "")
+    cands: List[Tuple[int, int, int, int, str, str]] = []
+    for order, (unit, keys) in enumerate(_UNIT_KEYWORDS):
+        tier = 0 if (unit == "99" and keys and keys[0] not in ("中考压轴", "压轴")) else 1
+        for idx, k in enumerate(keys):
+            pos = t.find(k)
+            if pos >= 0:
+                cands.append((tier, pos, order, idx, unit, k))
+                break
+    if not cands:
+        return "", ""
+    best = min(cands)
+    return best[4], best[5]
+
+
+class _CurriculumMap:
+    """
+    映射表：bvid / 标题 → 学段/年级/册/章号/章名/课题。
+
+    三个来源，后者覆盖前者：
+      ① 内置词典（人教版 29 章 + 专题，按标题关键词命中，零配置）
+      ② 插件配置页「映射修正」多行文本（网页里改，立即生效）
+      ③ 可选 CSV（老用户/批量导入，路径留空就不用）
+    """
+
+    def __init__(self, fix_text: str = "", path: str = ""):
+        self.fix_text = str(fix_text or "")
+        self.path = str(path or "").strip()
+        self._mtime = -1.0
+        self.by_bvid: Dict[str, Dict[str, str]] = {}
+        self.by_title: Dict[str, Dict[str, str]] = {}
+        self.csv_rows: List[Dict[str, str]] = []
+        self.error = ""
+
+    # ---------------- 解析 ----------------
+
+    @staticmethod
+    def _parse_fix(text: str) -> List[Dict[str, str]]:
+        """把配置页里的多行文本解析成行：bvid | 学段 | 年级 | 册 | 章号 | 章名 | 课题"""
+        out: List[Dict[str, str]] = []
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in re.split(r"[|\t]", line)]
+            if len(parts) < 3:
+                continue
+            rec = {k: "" for k in CURRICULUM_COLUMNS}
+            rec["bvid"] = parts[0]
+            rest = parts[1:]
+            if rest and rest[0] in ("小学", "初中", "高中"):
+                rec["stage"] = rest.pop(0)
+            if rest:
+                rec["grade"] = rest.pop(0)
+            if rest:
+                rec["volume"] = rest.pop(0)
+            if rest:
+                rec["unit_no"] = rest.pop(0)
+            if rest:
+                rec["unit"] = rest.pop(0)
+            if rest:
+                rec["lesson"] = rest.pop(0)
+            if not rec["stage"]:
+                rec["stage"] = "初中"
+            out.append(rec)
+        return out
+
+    def _reload_csv(self) -> None:
+        if not self.path:
+            return
+        try:
+            st = os.stat(self.path)
+        except OSError as e:
+            self.error = f"读不到 CSV {self.path}：{e}（可留空不用）"
+            return
+        if st.st_mtime == self._mtime:
+            return
+        try:
+            with open(self.path, encoding="utf-8-sig", newline="") as f:
+                raw = list(csv.DictReader(f))
+        except Exception as e:  # noqa: BLE001
+            self.error = f"解析 CSV 失败：{e}"
+            return
+        rows = []
+        for r in raw:
+            rec = {k: str(r.get(k) or "").strip() for k in CURRICULUM_COLUMNS}
+            if not rec["stage"]:
+                rec["stage"] = "初中"
+            rows.append(rec)
+        self.csv_rows = rows
+        self._mtime, self.error = st.st_mtime, ""
+
+    def _rebuild_index(self) -> None:
+        by_bvid: Dict[str, Dict[str, str]] = {}
+        by_title: Dict[str, Dict[str, str]] = {}
+        for rec in self._parse_fix(self.fix_text) + self.csv_rows:
+            if rec.get("bvid"):
+                by_bvid[rec["bvid"]] = rec
+            if rec.get("title"):
+                by_title[_norm_title(rec["title"])] = rec
+        self.by_bvid, self.by_title = by_bvid, by_title
+
+    def reload(self) -> None:
+        self._reload_csv()
+        self._rebuild_index()
+
+    # ---------------- 查询 ----------------
+
+    def lookup(self, bvid: str = "", title: str = "") -> Dict[str, str]:
+        self.reload()
+        if bvid and bvid in self.by_bvid:
+            return dict(self.by_bvid[bvid], _match="bvid")
+        if title:
+            key = _norm_title(title)
+            if key in self.by_title:
+                return dict(self.by_title[key], _match="title")
+            # 退化匹配：标题前缀对得上（115 上的名字可能被截断）
+            for k, rec in self.by_title.items():
+                if not k:
+                    continue
+                if (key.startswith(k) or k.startswith(key)) and min(len(k), len(key)) >= 8:
+                    return dict(rec, _match="title~")
+        # ③ 内置词典兜底：标题里的知识点 → 章 → 年级册（零配置也能用）
+        unit_no, _key = _guess_unit(title or "")
+        if unit_no and unit_no in _UNIT_TABLE:
+            _g, _v, _u = _UNIT_TABLE[unit_no]
+            return {
+                "bvid": bvid, "title": title, "subject": "", "stage": "初中",
+                "grade": _g, "volume": _v, "unit_no": unit_no, "unit": _u,
+                "lesson": _clean_lesson(title or ""),
+                "version": "人教", "confidence": "dict", "_match": "dict",
+            }
+        return {}
+
 
 
 
