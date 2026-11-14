@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.10"
+    plugin_version = "1.7.0"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -2001,6 +2001,8 @@ class DirUpload115(_PluginBase):
             "topic_alias": "",
             "subject_from_title": True,
             "interval_seconds": 300,
+            "max_per_round": 3,
+            "max_per_hour": 6,
             "delete_mode": "none",
             "recycle_root": "",
             "ready_mode": "strm",
@@ -2292,7 +2294,19 @@ class DirUpload115(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            _col(4, _text("interval_seconds", "扫描周期（秒）", "最小 60")),
+                            _col(3, _text("interval_seconds", "扫描周期（秒）", "最小 60")),
+                            _col(
+                                3,
+                                _text("max_per_round", "每轮最多上传（集）", "一轮里最多传几个；0=不限制。建议 3～5"),
+                            ),
+                            _col(
+                                3,
+                                _text(
+                                    "max_per_hour",
+                                    "每小时最多上传（集）",
+                                    "0=不限制。115 有访问上限，建议 6～10，撞风控就调小",
+                                ),
+                            ),
                             _col(
                                 8,
                                 {
@@ -2396,9 +2410,72 @@ class DirUpload115(_PluginBase):
             }
         ], defaults
 
+    def _status_snapshot(self) -> Dict[str, Any]:
+        """读取上次写入的 status.json（纯读文件，不扫目录，保证详情页秒开）"""
+        try:
+            if self._status_path.exists():
+                return json.loads(self._status_path.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"【{self.plugin_name}】读取 status.json 失败：{e}")
+        return {}
+
     def get_page(self) -> Optional[List[Dict[str, Any]]]:
-        """详情页：展示状态清单（课程模式额外展示归类统计 + 待补映射）"""
-        rows = self.collect_status()
+        """详情页：任务数据统计（只读状态快照，绝不扫描目录）"""
+        snap = self._status_snapshot()
+        totals = snap.get("totals") or {}
+        rnd = snap.get("round") or {}
+        cur = snap.get("curriculum") or {}
+        queue = snap.get("queue") or {}
+
+        metrics = [
+            {"指标": "累计上传", "值": totals.get("uploaded", 0)},
+            {"指标": "累计删除本地", "值": totals.get("deleted", 0)},
+            {"指标": "累计失败", "值": totals.get("failed", 0)},
+            {"指标": "近 1 小时已上传", "值": snap.get("uploaded_last_hour", 0)},
+            {
+                "指标": "本轮 扫描/上传/跳过/失败",
+                "值": "%s / %s / %s / %s"
+                % (
+                    rnd.get("scanned", 0),
+                    rnd.get("uploaded", 0),
+                    rnd.get("skipped", 0),
+                    rnd.get("failed", 0),
+                ),
+            },
+            {
+                "指标": "队列（待上传/等strm/卡住）",
+                "值": "%s / %s / %s"
+                % (queue.get("pending", 0), queue.get("waiting", 0), queue.get("stuck", 0)),
+            },
+            {
+                "指标": "周期 / 每轮上限 / 每小时上限",
+                "值": "%s 秒 / %s 集 / %s 集"
+                % (
+                    snap.get("interval_seconds", self._interval_seconds),
+                    snap.get("max_per_round", self._max_per_round),
+                    snap.get("max_per_hour", self._max_per_hour),
+                ),
+            },
+            {
+                "指标": "上次完成 / 下次运行",
+                "值": "%s → %s" % (snap.get("updated_at", "-"), snap.get("next_run_at", "-")),
+            },
+            {"指标": "115 风控冷却至", "值": snap.get("risk_paused_until") or "无"},
+            {
+                "指标": "年级白名单 / 非目标策略",
+                "值": "%s / %s"
+                % (
+                    "、".join(cur.get("grade_allowlist") or []) or "不限",
+                    cur.get("offgrade_policy") or self._offgrade_policy,
+                ),
+            },
+            {
+                "指标": "被年级拦下 / 非课程拦下",
+                "值": "%s / %s" % (cur.get("skipped_grade", 0), cur.get("skipped_noncourse", 0)),
+            },
+            {"指标": "待补映射（认不出年级册）", "值": len(self._unmapped)},
+        ]
+
         blocks: List[Dict[str, Any]] = [
             {
                 "component": "VRow",
@@ -2408,23 +2485,69 @@ class DirUpload115(_PluginBase):
                         "props": {"cols": 12},
                         "content": [
                             {
+                                "component": "div",
+                                "props": {"class": "text-subtitle-1 font-weight-bold mb-2"},
+                                "text": "任务数据统计",
+                            },
+                            {
                                 "component": "VTable",
                                 "props": {
                                     "density": "compact",
                                     "headers": [
-                                        {"title": "目录", "key": "目录"},
-                                        {"title": "状态", "key": "状态"},
-                                        {"title": "文件数", "key": "文件数"},
-                                        {"title": "完成时间", "key": "完成时间"},
+                                        {"title": "指标", "key": "指标"},
+                                        {"title": "值", "key": "值"},
                                     ],
-                                    "items": rows,
+                                    "items": metrics,
                                 },
-                            }
+                            },
                         ],
                     }
                 ],
             }
         ]
+
+        recent = snap.get("recent") or []
+        if recent:
+            rows = []
+            for ev in recent[-15:]:
+                rows.append(
+                    {
+                        "时间": ev.get("time") or ev.get("at") or "",
+                        "结果": ev.get("result") or ev.get("status") or "",
+                        "目录": (ev.get("dir") or ev.get("name") or "")[:80],
+                    }
+                )
+            blocks.append(
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-subtitle-1 font-weight-bold mb-2 mt-4"},
+                                    "text": "最近上传记录",
+                                },
+                                {
+                                    "component": "VTable",
+                                    "props": {
+                                        "density": "compact",
+                                        "headers": [
+                                            {"title": "时间", "key": "时间"},
+                                            {"title": "结果", "key": "结果"},
+                                            {"title": "目录", "key": "目录"},
+                                        ],
+                                        "items": rows,
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+
         if self._curriculum_mode:
             self._curriculum.reload()
             buckets: Dict[str, int] = {}
@@ -2443,10 +2566,10 @@ class DirUpload115(_PluginBase):
                             "content": [
                                 {
                                     "component": "div",
-                                    "props": {"class": "text-subtitle-1 font-weight-bold mb-2"},
+                                    "props": {"class": "text-subtitle-1 font-weight-bold mb-2 mt-4"},
                                     "text": (
                                         f"课程模式：手工修正 {len(self._curriculum.by_bvid)} 条 · "
-                                        f"内置词典 + 合集名自动识别 · 待补映射 {len(self._unmapped)} 条"
+                                        f"待补映射 {len(self._unmapped)} 条"
                                     ),
                                 },
                                 {
@@ -2465,46 +2588,41 @@ class DirUpload115(_PluginBase):
                     ],
                 }
             )
-            if self._unmapped:
-                blocks.append(
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "div",
-                                        "props": {"class": "text-subtitle-2 text-error mb-2"},
-                                        "text": "待补映射（把下面这行的 BV 号复制到配置页「映射修正」里补一行）",
+
+        if self._unmapped:
+            rows = [
+                {"目录": u.get("目录", ""), "原因": (u.get("原因") or "")[:70]} for u in self._unmapped[:20]
+            ]
+            blocks.append(
+                {
+                    "component": "VRow",
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-subtitle-1 font-weight-bold mb-2 mt-4"},
+                                    "text": "待补映射（认不出年级册，落专题或卡住）",
+                                },
+                                {
+                                    "component": "VTable",
+                                    "props": {
+                                        "density": "compact",
+                                        "headers": [
+                                            {"title": "目录", "key": "目录"},
+                                            {"title": "原因", "key": "原因"},
+                                        ],
+                                        "items": rows,
                                     },
-                                    {
-                                        "component": "VTable",
-                                        "props": {
-                                            "density": "compact",
-                                            "headers": [
-                                                {"title": "BV号", "key": "bvid"},
-                                                {"title": "目录", "key": "name"},
-                                                {"title": "时间", "key": "at"},
-                                            ],
-                                            "items": [
-                                                {"bvid": u.get("bvid", ""), "name": u.get("name", ""),
-                                                 "at": u.get("at", "")}
-                                                for u in self._unmapped[-30:]
-                                            ],
-                                        },
-                                    },
-                                ],
-                            }
-                        ],
-                    }
-                )
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
         return blocks
-
-
-# ---------------------------------------------------------------------- 页面小工具
-
 
 def _col(md: int, node: Dict[str, Any]) -> Dict[str, Any]:
     return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [node]}
