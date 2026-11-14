@@ -48,7 +48,7 @@ class DirUpload115(_PluginBase):
     plugin_name = "目录监控上传115"
     plugin_desc = "监控本地目录，目录稳定后整目录上传到 115 网盘，不依赖 TMDB 识别"
     plugin_icon = "upload.png"
-    plugin_version = "1.6.9"
+    plugin_version = "1.6.10"
     plugin_author = "DirUpload115"
     plugin_config_prefix = "dirupload115_"
     plugin_order = 21
@@ -876,12 +876,13 @@ class DirUpload115(_PluginBase):
             if self._unmapped_policy == "topic" and (meta.get("series") or ""):
                 # 合集目录名常带「合集·」「系列·」前缀，做专题目录时去掉，避免 `专题·合集·xxx`
                 meta = dict(meta)
-                meta["series"] = re.sub(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", "", meta["series"]).strip()
+                # 注意：先判断「是不是合集来的」，再去掉前缀——顺序反了会把合集误判成单视频
+                raw_series = meta.get("series") or ""
+                is_collection = bool(re.match(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", raw_series))
+                meta["series"] = re.sub(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", "", raw_series).strip()
                 # 1.6.5：专题目录的分组来源
                 #   series=合集/UP 目录名（旧行为）｜tag=标题里的第一个【标签】｜both=合集名/标签
                 #   1.6.8：**来自合集订阅的用合集名**；单视频投稿（目录名是 UP 名/无合集）才看标题标签
-                raw_series = meta.get("series") or ""
-                is_collection = bool(re.match(r"^(合集|系列|列表)\s*[·・:：\-_]\s*", raw_series))
                 tag = _first_title_tag(meta.get("title") or "") if self._topic_group in ("tag", "both") else ""
                 if tag:
                     tag = self._topic_alias.get(tag, tag)   # 1.6.9：标签别名（语法→语法线）
