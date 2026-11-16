@@ -15,15 +15,22 @@ from app.schemas import Notification, NotificationType, MessageChannel
 from .sync_models import (
     DATETIME_FORMAT,
     MATCHER_VERSION,
+    AuthState,
     DoubanActionResult,
     EpisodeMetadata,
     FailureKind,
     SubjectCandidate,
     SubjectResolveResult,
     TERMINAL_FAILURES,
+    auth_check_due,
+    auth_notice_due,
+    build_cookie_cache,
     build_segmented_subject_mapping,
+    cached_cookie,
     failure_is_suppressed,
     find_processed_record_key,
+    mark_auth_notice,
+    next_auth_check_at,
     normalize_wait_entry,
     normalize_release_date,
     parse_tv_episode_ref,
@@ -49,7 +56,7 @@ class DoubanMediaFolio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xijin285/MoviePilot-Plugins/refs/heads/main/icons/douban.png"
     # 插件版本
-    plugin_version = "1.0.14"
+    plugin_version = "1.0.15"
     # 插件作者
     plugin_author = "wYw"
     # 作者主页
@@ -91,7 +98,9 @@ class DoubanMediaFolio(_PluginBase):
         self._first = config.get("first", True)
         self._user = config.get("user", "")
         self._exclude = config.get("exclude", "")
-        self._cookie = config.get("cookie", "")
+        self._config_cookie = config.get("cookie", "")
+        # 登录/刷新得到的 Cookie 会持久化，避免进程重启后又退回旧配置反复登录
+        self._cookie = cached_cookie(self.get_data("runtime_cookie"), self._config_cookie) or self._config_cookie
         self._douban_username = config.get("douban_username", "")
         self._douban_password = config.get("douban_password", "")
         self._auto_login = config.get("auto_login", True)
@@ -124,43 +133,7 @@ class DoubanMediaFolio(_PluginBase):
                 self._last_skip_log_time = now
             return
         try:
-            import time
-            if not hasattr(self, '_last_cookie_check_time'):
-                self._last_cookie_check_time = 0
-            now = time.time()
-            if now - self._last_cookie_check_time > 3600:  # 1小时
-                try:
-                    douban_helper = self._get_douban_helper()
-                    auth_result = douban_helper.check_auth_status(allow_login=True)
-                    self._update_auth_retry_state(douban_helper, auth_valid=auth_result.success)
-                except Exception as err:
-                    auth_result = None
-                    logger.warning(f"检查豆瓣登录状态异常: {DoubanApi._safe_message(err)}")
-
-                if auth_result and auth_result.success:
-                    self._cookie = douban_helper.get_cookie_string()
-                    self._cookie_invalid_notified = False
-                    if not hasattr(self, '_last_cookie_valid_time'):
-                        self._last_cookie_valid_time = 0
-                    if now - self._last_cookie_valid_time > 600:
-                        logger.info("豆瓣登录状态检测通过")
-                        self._last_cookie_valid_time = now
-                elif auth_result and auth_result.explicitly_logged_out:
-                    if not getattr(self, '_cookie_invalid_notified', False):
-                        message = (
-                            "豆瓣登录状态已明确失效，自动登录未成功，请人工登录或更新Cookie。"
-                            if auth_result.login_attempted
-                            else "豆瓣登录状态已明确失效，请人工登录或更新Cookie。"
-                        )
-                        self._send_notification(False, message)
-                        self._cookie_invalid_notified = True
-                elif auth_result:
-                    if not hasattr(self, '_last_cookie_check_warning_time'):
-                        self._last_cookie_check_warning_time = 0
-                    if now - self._last_cookie_check_warning_time > 21600:
-                        logger.warning(auth_result.message or "暂时无法确认豆瓣登录状态")
-                        self._last_cookie_check_warning_time = now
-                self._last_cookie_check_time = now
+            self._maybe_check_auth_status()
 
             event_info: WebhookEventInfo = event.event_data
             play_start = {"playback.start", "media.play", "PlaybackStart"}
@@ -337,7 +310,7 @@ class DoubanMediaFolio(_PluginBase):
 
     def _update_auth_retry_state(self, douban_helper: DoubanApi, auth_valid: bool = False):
         if getattr(douban_helper, 'restricted_login_succeeded', False) and douban_helper.ck:
-            self._cookie = douban_helper.get_cookie_string()
+            self._remember_cookie(douban_helper.get_cookie_string())
         if auth_valid or getattr(douban_helper, 'restricted_login_verified', False):
             if self.get_data('auth_retry'):
                 self.save_data('auth_retry', {})
@@ -349,6 +322,60 @@ class DoubanMediaFolio(_PluginBase):
             "last_attempt_at": now.strftime(DATETIME_FORMAT),
             "next_attempt_at": (now + AUTH_RETRY_COOLDOWN).strftime(DATETIME_FORMAT),
         })
+
+    def _remember_cookie(self, cookie: str):
+        """持久化登录/刷新得到的 Cookie，重启后不必重新登录。"""
+        cookie = str(cookie or "").strip()
+        if not cookie:
+            return
+        self._cookie = cookie
+        self.save_data(
+            'runtime_cookie',
+            build_cookie_cache(cookie, getattr(self, '_config_cookie', ''), datetime.now()),
+        )
+
+    def _maybe_check_auth_status(self):
+        """按持久化日程检查豆瓣登录状态：默认 6 小时一次，连续受限时退避到 24 小时。"""
+        now = datetime.now()
+        state = self.get_data('auth_check') or {}
+        if not auth_check_due(state, now):
+            return
+
+        try:
+            douban_helper = self._get_douban_helper()
+            auth_result = douban_helper.check_auth_status(allow_login=True)
+            self._update_auth_retry_state(douban_helper, auth_valid=auth_result.success)
+        except Exception as err:
+            logger.warning(f"检查豆瓣登录状态异常: {DoubanApi._safe_message(err)}")
+            self.save_data('auth_check', next_auth_check_at(state, restricted=False, now=now))
+            return
+
+        restricted = auth_result.state == AuthState.RESTRICTED
+        state = next_auth_check_at(state, restricted=restricted, now=now)
+
+        if auth_result.success:
+            self._remember_cookie(douban_helper.get_cookie_string())
+            self._cookie_invalid_notified = False
+            logger.info("豆瓣登录状态检测通过")
+        elif auth_result.explicitly_logged_out:
+            if not getattr(self, '_cookie_invalid_notified', False):
+                message = (
+                    "豆瓣登录状态已明确失效，自动登录未成功，请人工登录或更新Cookie。"
+                    if auth_result.login_attempted
+                    else "豆瓣登录状态已明确失效，请人工登录或更新Cookie。"
+                )
+                self._send_notification(False, message)
+                self._cookie_invalid_notified = True
+        elif auth_notice_due(state, now):
+            message = auth_result.message or "暂时无法确认豆瓣登录状态"
+            if restricted:
+                # 403 属于豆瓣对出口的页面级风控，CK 本身通常仍可用于标记，不按错误刷日志
+                logger.info(f"{message}；状态检查已退避，不影响观影标记提交")
+            else:
+                logger.warning(message)
+            state = mark_auth_notice(state, now)
+
+        self.save_data('auth_check', state)
 
     @staticmethod
     def _item_number(value, fallback=None) -> Optional[int]:
@@ -778,7 +805,7 @@ class DoubanMediaFolio(_PluginBase):
             )
             return False
 
-        self._cookie = douban_helper.get_cookie_string()
+        self._remember_cookie(douban_helper.get_cookie_string())
         processed_items[processed_key] = {
             "subject_id": candidate.subject_id,
             "subject_name": candidate.title,

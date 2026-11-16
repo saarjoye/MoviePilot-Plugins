@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -14,6 +15,10 @@ MAX_RETRY_COUNT = 5
 RETRY_REOPEN_DELAY = timedelta(hours=24)
 MATCHER_VERSION = 7
 SEGMENT_GAP_DAYS = 60
+# 豆瓣登录状态检查：正常 6 小时一次，连续受限时指数退避到 24 小时
+AUTH_CHECK_BASE_INTERVAL = 6 * 3600
+AUTH_CHECK_MAX_INTERVAL = 24 * 3600
+AUTH_CHECK_NOTICE_INTERVAL = 24 * 3600
 TV_ITEM_NAME_PATTERN = re.compile(
     r"^(?P<title>.+?)\s+S(?P<season>\d{1,3})\s*E(?P<episode>\d{1,5})(?=\s|$)",
     re.IGNORECASE,
@@ -842,6 +847,106 @@ def prepare_retry_attempt(
     if result["retry_count"] >= MAX_RETRY_COUNT and retry_is_due(result, now):
         result["retry_count"] = 0
     return result
+
+
+def auth_check_delay(restricted_count: int) -> int:
+    """连续受限时按 6h→12h→24h 退避，返回下次检查间隔秒数。"""
+    count = max(0, int(restricted_count or 0))
+    delay = AUTH_CHECK_BASE_INTERVAL
+    for _ in range(count):
+        if delay >= AUTH_CHECK_MAX_INTERVAL:
+            break
+        delay *= 2
+    return min(delay, AUTH_CHECK_MAX_INTERVAL)
+
+
+def next_auth_check_at(
+        state: Optional[Dict[str, Any]],
+        restricted: bool = False,
+        now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """登记下一次登录状态检查时间；受限时累加次数并指数退避。"""
+    now = now or datetime.now()
+    result = dict(state) if isinstance(state, dict) else {}
+    count = int(result.get("restricted_count") or 0)
+    count = min(count + 1, 8) if restricted else 0
+    result["restricted_count"] = count
+    result["next_check_at"] = (
+            now + timedelta(seconds=auth_check_delay(count))
+    ).strftime(DATETIME_FORMAT)
+    return result
+
+
+def auth_check_due(state: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:
+    """是否到了下一次登录状态检查时间；状态缺失或损坏时视为到期。"""
+    now = now or datetime.now()
+    if not isinstance(state, dict):
+        return True
+    next_check_at = str(state.get("next_check_at") or "")
+    if not next_check_at:
+        return True
+    try:
+        return now >= datetime.strptime(next_check_at, DATETIME_FORMAT)
+    except (TypeError, ValueError):
+        return True
+
+
+def auth_notice_due(state: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:
+    """同类状态提示是否已过冷却（默认一天最多一条）。"""
+    now = now or datetime.now()
+    if not isinstance(state, dict):
+        return True
+    last_notice_at = str(state.get("last_notice_at") or "")
+    if not last_notice_at:
+        return True
+    try:
+        return now >= datetime.strptime(last_notice_at, DATETIME_FORMAT) + timedelta(
+            seconds=AUTH_CHECK_NOTICE_INTERVAL
+        )
+    except (TypeError, ValueError):
+        return True
+
+
+def mark_auth_notice(
+        state: Optional[Dict[str, Any]],
+        now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """记录一次已展示过的状态提示时间。"""
+    now = now or datetime.now()
+    result = dict(state) if isinstance(state, dict) else {}
+    result["last_notice_at"] = now.strftime(DATETIME_FORMAT)
+    return result
+
+
+def cookie_fingerprint(cookie: str) -> str:
+    """配置 Cookie 的短指纹，用于判断用户是否手动改过配置。"""
+    return hashlib.sha256(str(cookie or "").encode("utf-8")).hexdigest()[:16]
+
+
+def build_cookie_cache(
+        cookie: str,
+        config_cookie: str,
+        now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """缓存登录/刷新得到的浏览器 Cookie，并记录当时配置值的指纹。"""
+    now = now or datetime.now()
+    return {
+        "cookie": str(cookie or ""),
+        "config_fingerprint": cookie_fingerprint(config_cookie),
+        "timestamp": now.strftime(DATETIME_FORMAT),
+    }
+
+
+def cached_cookie(cache: Optional[Dict[str, Any]], config_cookie: str) -> Optional[str]:
+    """取回缓存 Cookie；配置被用户改过（指纹不符）时视为失效。"""
+    if not isinstance(cache, dict):
+        return None
+    value = str(cache.get("cookie") or "").strip()
+    if not value:
+        return None
+    if str(cache.get("config_fingerprint") or "") != cookie_fingerprint(config_cookie):
+        return None
+    return value
 
 
 def failure_is_suppressed(

@@ -7,7 +7,6 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from app.core.config import settings
 from app.core.meta import MetaBase
 from app.helper.cookiecloud import CookieCloudHelper
 from app.log import logger
@@ -43,6 +42,11 @@ class DoubanApi:
     SEARCH_URL = "https://www.douban.com/search"
     INTEREST_URL = "https://movie.douban.com/j/subject/{subject_id}/interest"
     SUBJECT_URL = "https://movie.douban.com/subject/{subject_id}/"
+    # 豆瓣按 UA 做风控，固定用桌面浏览器 UA，避免暴露 MoviePilot 的默认机器人标识
+    USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    )
 
     def __init__(
             self,
@@ -64,7 +68,7 @@ class DoubanApi:
         self.ck: str = self.cookies.get("ck", "")
 
         self.headers = {
-            "User-Agent": settings.USER_AGENT,
+            "User-Agent": self.USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Encoding": "gzip, deflate, sdch",
             "Accept-Language": "zh-CN,zh;q=0.8,en-US;q=0.6,en;q=0.4,en-GB;q=0.2,zh-TW;q=0.2",
