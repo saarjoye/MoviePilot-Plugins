@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, quote
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends
@@ -270,6 +270,11 @@ TMDB_ANIME_GENRE_ID = 16
 TMDB_SOURCE_DAYS = 90
 TMDB_RESULT_PAGES = 1
 BANGUMI_CALENDAR_URL = "https://api.bgm.tv/calendar"
+# 豆瓣兜底识别：TMDB 没有条目时，用豆瓣拿 subject id 与地区/题材，订阅身份使用 media_source=douban。
+DOUBAN_SUGGEST_URL = "https://movie.douban.com/j/subject_suggest"
+DOUBAN_ABSTRACT_URL = "https://movie.douban.com/j/subject_abstract"
+DOUBAN_FALLBACK_DELAY_SECONDS = 1.2
+DOUBAN_BLOCK_SECONDS = 3600
 # TMDB genre_id → 插件题材名（未收录的 id 直接忽略）
 TMDB_GENRE_NAME_MAP = {
     28: "动作", 12: "冒险", 16: "动画", 35: "喜剧", 80: "犯罪", 99: "纪录片",
@@ -621,7 +626,7 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.49"
+    plugin_version = "0.6.50"
     plugin_release_date = "2026-11-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
@@ -645,6 +650,7 @@ class UpcomingReleases(_PluginBase):
         "tmdb_language": "zh-CN",
         "tmdb_regions": ",".join(TMDB_UPCOMING_REGIONS),
         "enable_bangumi": False,
+        "enable_douban_fallback": True,
         "auto_subscribe_max_per_run": 20,
         "cache_ttl_minutes": 180,
         "daily_refresh_time": DEFAULT_DAILY_REFRESH_TIME,
@@ -1461,13 +1467,20 @@ class UpcomingReleases(_PluginBase):
                 or int(time.time()) - updated >= RECOGNITION_FAILURE_RETRY_SECONDS
             )
             if not retry_due:
-                message = "媒体识别失败，暂时无法创建订阅，请等待后台重新识别或从搜索页手动订阅。"
-                logger.warning(
-                    "[UpcomingReleases] page subscribe skipped: cached recognition failure is still fresh "
-                    f"media_id={item.get('media_id')}"
-                )
-                self._set_page_feedback("warning", message)
-                return {"success": False, "message": message, "subscription_status": "none"}
+                douban_record = self._recognize_via_douban(item)
+                if douban_record:
+                    self._store_recognition_record(item, douban_record)
+                    if getattr(self, "_recognize_dirty", False):
+                        self._persist_recognize_cache()
+                    recognition = douban_record
+                else:
+                    message = "媒体识别失败，暂时无法创建订阅，请等待后台重新识别或从搜索页手动订阅。"
+                    logger.warning(
+                        "[UpcomingReleases] page subscribe skipped: cached recognition failure is still fresh "
+                        f"media_id={item.get('media_id')}"
+                    )
+                    self._set_page_feedback("warning", message)
+                    return {"success": False, "message": message, "subscription_status": "none"}
         if not recognition or self._is_failed_recognition_record(recognition):
             recognition = self._get_subscription_recognition(item)
             if getattr(self, "_recognize_dirty", False):
@@ -2744,6 +2757,10 @@ class UpcomingReleases(_PluginBase):
             self._source_health = self._load_source_health()
         if not hasattr(self, "_last_http_error"):
             self._last_http_error = ""
+        if not hasattr(self, "_douban_last_request_at"):
+            self._douban_last_request_at = 0.0
+        if not hasattr(self, "_douban_blocked_until"):
+            self._douban_blocked_until = 0.0
         if not isinstance(getattr(self, "_refresh_lock", None), type(threading.Lock())):
             self._refresh_lock = threading.Lock()
         if not isinstance(getattr(self, "_refresh_state", None), dict):
@@ -2940,6 +2957,7 @@ class UpcomingReleases(_PluginBase):
             "country_updated": 0,
             "country_missing": 0,
             "metadata_updated": 0,
+            "douban_fallback": 0,
             "failed": 0,
             "failure_cached": 0,
             "missing_cached": 0,
@@ -2970,6 +2988,12 @@ class UpcomingReleases(_PluginBase):
             try:
                 media = self._recognize_item(item)
                 if not media:
+                    douban_record = self._recognize_via_douban(item)
+                    if douban_record:
+                        self._store_recognition_record(item, douban_record)
+                        self._apply_cached_metadata(item)
+                        counters["douban_fallback"] += 1
+                        continue
                     self._store_recognition_record(item, self._build_text_fallback_recognition(item))
                     counters["failed"] += 1
                     continue
@@ -3331,6 +3355,10 @@ class UpcomingReleases(_PluginBase):
             return {}
         media = self._recognize_item(item)
         if not media:
+            douban_record = self._recognize_via_douban(item)
+            if douban_record:
+                self._store_recognition_record(item, douban_record)
+                return douban_record
             fallback = self._build_text_fallback_recognition(item)
             self._store_recognition_record(item, fallback)
             return fallback
@@ -4095,6 +4123,152 @@ class UpcomingReleases(_PluginBase):
             "updated": int(time.time()),
         }
 
+    def _douban_fallback_enabled(self) -> bool:
+        return bool((self._config or {}).get("enable_douban_fallback", True))
+
+    def _douban_request_json(self, url: str) -> Any:
+        """豆瓣限速请求：单次间隔 >=1.2s，遇到 403/418 熔断 1 小时，避免整轮抓取被封。"""
+        self._ensure_runtime_state()
+        now = time.time()
+        if self._douban_blocked_until and now < self._douban_blocked_until:
+            return None
+        wait_seconds = DOUBAN_FALLBACK_DELAY_SECONDS - (now - self._douban_last_request_at)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        self._douban_last_request_at = time.time()
+        self._last_http_error = ""
+        text = self._request_text(
+            url,
+            headers={"Referer": "https://movie.douban.com/"},
+            log_context="douban fallback",
+        )
+        error_text = self._last_http_error or ""
+        if error_text.startswith("HTTP 403") or error_text.startswith("HTTP 418") or error_text.startswith("HTTP 429"):
+            self._douban_blocked_until = time.time() + DOUBAN_BLOCK_SECONDS
+            logger.warning(
+                f"[UpcomingReleases] 豆瓣兜底识别被限流（{error_text}），暂停 {DOUBAN_BLOCK_SECONDS // 60} 分钟"
+            )
+            return None
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _douban_type_key(entry_type: Any, item_type: str) -> str:
+        entry_type = str(entry_type or "").lower()
+        if item_type in {"anime", "variety", "documentary", "kids", "humanity", "short"}:
+            return item_type
+        if entry_type == "movie":
+            return "movie"
+        if entry_type == "tv":
+            return "tv"
+        return item_type or "tv"
+
+    def _douban_lookup(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """按标题在豆瓣搜索，命中后返回 {douban_id,title,year,country_codes,genre_names,type_key}。"""
+        if not self._douban_fallback_enabled():
+            return None
+        title = self._clean_text(item.get("title"))
+        if not title:
+            return None
+        item_type = self._clean_text(item.get("type_key")).lower() or "tv"
+        item_year = self._normalize_media_year(item.get("year"))
+        queries = [title]
+        cleaned_title = re.sub(r"[（(][^）)]*[）)]", "", title).strip()
+        if cleaned_title and cleaned_title != title:
+            queries.append(cleaned_title)
+        for query in queries:
+            payload = self._douban_request_json(f"{DOUBAN_SUGGEST_URL}?q={quote(query)}")
+            if not isinstance(payload, list):
+                continue
+            candidates = [
+                entry for entry in payload
+                if isinstance(entry, dict)
+                and entry.get("id")
+                and str(entry.get("type") or "").lower() in {"movie", "tv"}
+            ]
+            if not candidates:
+                continue
+            wanted = self._normalize_compare_text(query)
+            matched = None
+            for entry in candidates:
+                entry_title = self._normalize_compare_text(entry.get("sub_title") or entry.get("title"))
+                year = self._normalize_media_year(entry.get("year"))
+                title_hit = bool(wanted) and (wanted in entry_title or entry_title in wanted)
+                if not title_hit:
+                    continue
+                if item_year and year and abs(int(item_year) - int(year)) > 1:
+                    continue
+                matched = entry
+                break
+            if not matched:
+                continue
+            subject_id = str(matched.get("id"))
+            subject = {}
+            abstract = self._douban_request_json(f"{DOUBAN_ABSTRACT_URL}?subject_id={subject_id}")
+            if isinstance(abstract, dict):
+                subject = abstract.get("subject") or {}
+            region_text = self._clean_text(subject.get("region"))
+            country_codes = sorted(self._extract_text_region_codes(region_text)) if region_text else []
+            if not country_codes:
+                country_codes = sorted(self._normalize_region_values(
+                    self._extract_text_region_codes(self._clean_text(subject.get("title")))
+                ))
+            genre_names = self._normalize_genre_values(subject.get("types") or [])
+            year = (
+                self._normalize_media_year(subject.get("release_year"))
+                or self._normalize_media_year(matched.get("year"))
+                or item_year
+            )
+            display_title = self._clean_text(subject.get("title")) or self._clean_text(matched.get("title"))
+            return {
+                "douban_id": subject_id,
+                "title": display_title or title,
+                "year": year,
+                "country_codes": country_codes,
+                "genre_names": sorted(genre_names),
+                "type_key": self._douban_type_key(matched.get("type"), item_type),
+            }
+        return None
+
+    def _recognize_via_douban(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """TMDB 识别失败时的兜底：用豆瓣结果构造识别记录（media_source=douban）。"""
+        if not self._douban_fallback_enabled():
+            return None
+        cached = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
+        if cached.get("douban_id") and not cached.get("recognition_failed"):
+            return cached
+        found = self._douban_lookup(item)
+        if not found:
+            return None
+        type_key = found.get("type_key") or item.get("type_key") or "tv"
+        target_season, season_source = self._extract_item_target_season(item)
+        record = {
+            "recognition_failed": False,
+            "recognition_source": "douban",
+            "strategy_version": RECOGNITION_STRATEGY_VERSION,
+            "type_key": type_key,
+            "tmdb_id": None,
+            "douban_id": found.get("douban_id"),
+            "bangumi_id": None,
+            "season": None,
+            "source_season": None,
+            "target_season": target_season,
+            "season_source": season_source,
+            "title": item.get("title"),
+            "display_title": found.get("title") or item.get("title"),
+            "year": found.get("year") or item.get("year"),
+            "media_year": found.get("year") or "",
+            "country_codes": list(found.get("country_codes") or []),
+            "country_names": [self._region_label(code) for code in found.get("country_codes") or []],
+            "genre_names": list(found.get("genre_names") or []),
+            "updated": int(time.time()),
+        }
+        return record
+
     def _get_subscription_recognition(self, item: Dict[str, Any]) -> Dict[str, Any]:
         record = self._get_cached_recognition(item, populate=False, require_ids=False) or {}
         if record and not record.get("recognition_failed") and any(
@@ -4109,6 +4283,11 @@ class UpcomingReleases(_PluginBase):
         if media:
             self._cache_recognition(item, media, self._media_to_type_key(media))
             return self._get_cached_recognition(item, populate=False, require_ids=False) or {}
+        # TMDB/MP 识别失败时走豆瓣兜底，拿到 douban_id 后可正常创建订阅。
+        douban_record = self._recognize_via_douban(item)
+        if douban_record:
+            self._store_recognition_record(item, douban_record)
+            return douban_record
         fallback = self._build_text_fallback_recognition(item)
         self._store_recognition_record(item, fallback)
         return fallback

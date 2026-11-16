@@ -119,6 +119,7 @@ const defaults = {
   tmdb_language: 'zh-CN',
   tmdb_regions: 'US,JP,KR,GB,CN',
   enable_bangumi: false,
+  enable_douban_fallback: true,
   auto_subscribe_max_per_run: 20,
   auto_subscribe_rules: '[]',
 };
@@ -867,6 +868,15 @@ return (_ctx, _cache) => {
             [_vModelCheckbox, config.mgtv_extra_modules]
           ]),
           _createTextVNode(" 芒果扩展模块")
+        ]),
+        _createElementVNode("label", { class: "toggle-field" }, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": $event => ((config.enable_douban_fallback) = $event),
+            type: "checkbox"
+          }, null, 8, ["onUpdate:modelValue"]), [
+            [_vModelCheckbox, config.enable_douban_fallback]
+          ]),
+          _createTextVNode(" 豆瓣兜底识别")
         ]),
         _createElementVNode("label", { class: "toggle-field" }, [
           _withDirectives(_createElementVNode("input", {
