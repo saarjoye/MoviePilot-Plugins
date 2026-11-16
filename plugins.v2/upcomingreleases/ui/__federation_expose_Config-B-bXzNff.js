@@ -161,7 +161,7 @@ const RECOMMENDED_REGIONS = ['CN', 'HK', 'TW', 'KR', 'JP', 'US', 'GB', 'FR', 'DE
 const DEFAULT_WINDOW_OPTIONS = TIME_OPTIONS.filter(option => option.value !== 'default');
 const FALLBACK_RECOMMENDED_RULES = [
   { name: '华语电影', enabled: true, time_range: 'default', types: ['movie'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'tmdb'], regions: ['CN', 'HK', 'TW'], genres: [], include_pending: true },
-  { name: '外语电影', enabled: true, time_range: 'default', types: ['movie'], platforms: ['netflix', 'tencent', 'youku', 'tmdb'], regions: ['US', 'GB', 'JP', 'KR'], genres: [], include_pending: true },
+  { name: '外语电影', enabled: true, time_range: 'default', types: ['movie'], platforms: ['netflix', 'tencent', 'youku', 'tmdb'], regions: ['US', 'GB', 'JP', 'KR', 'DE', 'FR', 'ES', 'IT'], genres: [], include_pending: true },
   { name: '国产剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['iqiyi', 'tencent', 'youku', 'mgtv', 'tmdb'], regions: ['CN'], genres: [], include_pending: true },
   { name: '日韩剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['netflix', 'youku', 'tmdb'], regions: ['JP', 'KR'], genres: [], include_pending: true },
   { name: '美剧', enabled: true, time_range: 'default', types: ['tv'], platforms: ['netflix', 'tmdb'], regions: ['US', 'GB'], genres: [], include_pending: true },

@@ -291,7 +291,7 @@ RECOMMENDED_RULES = [
     {
         "name": "外语电影", "enabled": True, "time_range": "default", "days": None,
         "types": ["movie"], "platforms": ["netflix", "tencent", "youku", "tmdb"],
-        "regions": ["US", "GB", "JP", "KR"], "genres": [], "include_pending": True,
+        "regions": ["US", "GB", "JP", "KR", "DE", "FR", "ES", "IT"], "genres": [], "include_pending": True,
         "region_match_mode": "production",
     },
     {
@@ -360,6 +360,11 @@ PREVIOUS_DEFAULT_RULES = [
         "regions": RECOMMENDED_PRODUCTION_REGIONS, "region_match_mode": "production",
     },
 ]
+# 0.6.44~0.6.48 的默认规则（外语电影地区为 US/GB/JP/KR），仅用于精确匹配迁移。
+PREVIOUS_DEFAULT_RULES_V2 = copy.deepcopy([
+    {**rule, "regions": ["US", "GB", "JP", "KR"]} if rule.get("name") == "外语电影" else dict(rule)
+    for rule in RECOMMENDED_RULES
+])
 LEGACY_AUTO_SUBSCRIBE_RULES = [
     {
         "name": "国产及华语电视剧-明日上映", "enabled": True, "time_range": "3days", "days": 3,
@@ -616,8 +621,8 @@ class UpcomingReleases(_PluginBase):
     plugin_name = "待播影视日历"
     plugin_desc = "聚合爱奇艺、腾讯视频、优酷、芒果TV、Netflix 的即将上映内容，支持探索页筛选、推荐页扩展和定时推送。"
     plugin_icon = "TrendingShow.jpg"
-    plugin_version = "0.6.48"
-    plugin_release_date = "2026-11-09"
+    plugin_version = "0.6.49"
+    plugin_release_date = "2026-11-16"
     plugin_author = "wYw"
     author_url = "https://github.com/saarjoye/MoviePilot-Plugins"
     plugin_config_prefix = "upcomingreleases_"
@@ -700,7 +705,7 @@ class UpcomingReleases(_PluginBase):
             rules = raw_rules if isinstance(raw_rules, list) else json.loads(str(raw_rules or ""))
         except (TypeError, json.JSONDecodeError):
             return False
-        if rules not in (LEGACY_AUTO_SUBSCRIBE_RULES, PREVIOUS_DEFAULT_RULES):
+        if rules not in (LEGACY_AUTO_SUBSCRIBE_RULES, PREVIOUS_DEFAULT_RULES, PREVIOUS_DEFAULT_RULES_V2):
             return False
         self._config["auto_subscribe_rules"] = AUTO_SUBSCRIBE_RULES_SAMPLE
         update_config = getattr(self, "update_config", None)
@@ -2906,6 +2911,19 @@ class UpcomingReleases(_PluginBase):
         if media_year and not item.get("year"):
             item["year"] = media_year
             item["year_source"] = "recognition"
+        # 类型回写：源站没有类型字段（芒果/爱奇艺回退）时用识别结果纠正，
+        # 避免“电影被推断成电视剧”导致类型规则漏订阅。
+        record_type = self._clean_text(record.get("type_key")).lower()
+        item_type = self._clean_text(item.get("type_key")).lower()
+        if (
+            self._clean_text(item.get("type_source")).lower() == "inferred"
+            and record_type in TYPE_LABELS
+            and record_type != "all"
+            and record_type != item_type
+        ):
+            item["type_key"] = record_type
+            item["type_label"] = TYPE_LABELS.get(record_type, item.get("type_label"))
+            item["type_source"] = "recognition"
         return item
 
     def _get_cached_items(self) -> List[Dict[str, Any]]:
@@ -3388,7 +3406,8 @@ class UpcomingReleases(_PluginBase):
                 if not year:
                     year = self._guess_year(title, release_date, publish_text)
                     year_source = "title_or_labeled_text" if year else ""
-                type_key = self._extract_iqiyi_type_key(obj_text) or self._infer_type_key(
+                source_type_key = self._extract_iqiyi_type_key(obj_text)
+                type_key = source_type_key or self._infer_type_key(
                     title=title,
                     year=year,
                     story=desc,
@@ -3411,6 +3430,7 @@ class UpcomingReleases(_PluginBase):
                         year_source=year_source,
                         alternate_titles=self._extract_source_alternate_titles(source_metadata, title),
                         region_codes=region_codes,
+                        type_source="source" if source_type_key else "inferred",
                     )
                 )
             cursor = payload.find("{", cursor + len(obj_text))
@@ -3625,6 +3645,7 @@ class UpcomingReleases(_PluginBase):
                     year_source=year_source,
                     alternate_titles=self._extract_source_alternate_titles(entry, title),
                     region_codes=self._extract_source_region_codes(entry),
+                    type_source="inferred",
                 )
             )
         logger.info(f"[UpcomingReleases] 芒果TV抓取到 {len(items)} 条")
@@ -3850,6 +3871,7 @@ class UpcomingReleases(_PluginBase):
         alternate_titles: Optional[Any] = None,
         reserve_count: int = 0,
         region_codes: Optional[Any] = None,
+        type_source: str = "",
     ) -> Dict[str, Any]:
         if type_key not in TYPE_LABELS:
             type_key = "tv"
@@ -3884,6 +3906,7 @@ class UpcomingReleases(_PluginBase):
             "platform_label": PLATFORM_LABELS.get(platform, platform),
             "type_key": type_key,
             "type_label": TYPE_LABELS.get(type_key, "电视剧"),
+            "type_source": self._clean_text(type_source) or "unknown",
             "title": self._clean_text(title),
             "year": normalized_year,
             "year_source": normalized_year_source,
