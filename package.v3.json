@@ -30,5 +30,20 @@
       "v1.5.0": "新增「自建 strm」开关 + 115 直链前缀配置：上传后按 {前缀}/d/{pickcode}.mp4?/{文件名} 直接写 .strm，解决 CMS 收不到 115 秒传事件、strm 迟迟不生成导致本地目录卡在 waiting_strm 的问题",
       "v1.0.0": "首个版本：目录稳定判定、只传视频到 115（复用 u115 存储插件）、随片文件进 strm 目录、课程→剧集模式（SxxExx + tvshow.nfo）、上传前重命名、三段式命名模板、删本地三态（保留/回收/删除）、删本地判定依据可选 strm 或 emby、webhook 触发入口"
     }
+  },
+  "U115RiskControl": {
+    "name": "u115风控参数",
+    "description": "为 MoviePilot 的 u115 存储注入更保守的限流参数，把 115 硬风控冷却做成跨实例共享、可持久化的唯一冷却，冷却结束后只放行一个探针请求，并在冷却结束后补跑失败的整理任务。",
+    "labels": "115,工具,风控",
+    "version": "0.3.6",
+    "system_version": ">=3.0.0",
+    "icon": "https://raw.githubusercontent.com/saarjoye/MoviePilot-Plugins/main/icons/U115RiskControl.jpg",
+    "author": "wYw",
+    "history": {
+      "v0.3.6": "修复 v3 环境扫描崩溃：改用 SessionFactory 取会话，数据库不可用时安全跳过。",
+      "v0.3.5": "用单次调用耗时反推 MP 内部已撞限，主动置共享冷却，避免新实例绕过冷却。",
+      "v0.3.4": "启动补偿扫描延迟到 retry_failed_delay_seconds 后执行，避开数据库未就绪。",
+      "v0.3.3": "115 硬风控冷却改为跨实例共享并持久化；冷却结束只放一个探针，叠加抖动与轮次放大。"
+    }
   }
 }
